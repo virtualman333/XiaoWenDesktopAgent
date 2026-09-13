@@ -41,6 +41,35 @@ export async function streamChat({ messages, onDelta }) {
   }
 }
 
+/**
+ * Agent 模式对话（模型可自主调用工具）
+ * 与普通流式的区别：额外通过 onTool 回调把工具调用过程推给界面展示。
+ */
+export async function streamAgent({ messages, sessionId, onDelta, onTool }) {
+  let full = '';
+
+  const offD = window.xw.onChatDelta((delta) => {
+    full += delta;
+    onDelta && onDelta(delta, full);
+  });
+  const offT = window.xw.onAgentTool((p) => onTool && onTool(p));
+
+  try {
+    const res = await window.xw.agentRun({ messages, sessionId });
+    if (!res || res.ok !== true) {
+      const err = new Error((res && res.error) || '未知错误');
+      if (res && res.error === 'AGENT_DISABLED') err.disabled = true;
+      if (res && res.aborted) err.aborted = true;
+      throw err;
+    }
+    if (res.text) full = res.text;
+    return full;
+  } finally {
+    offD && offD();
+    offT && offT();
+  }
+}
+
 /** 中断当前流式请求 */
 export function abortChat() {
   try {

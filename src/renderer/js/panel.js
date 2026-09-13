@@ -1,25 +1,24 @@
-import { streamChat, testConnection, abortChat } from './api.js';
+import { streamChat, streamAgent, testConnection, abortChat } from './api.js';
 import { renderMarkdown, toPlainText } from './markdown.js';
 import * as speech from './speech.js';
 
 // ============ 全局状态 ============
 let cfg = {};
-let messages = [];          // 当前会话（不含 system）
+let persona = null;
+let session = null;         // 当前会话对象 { id, title, messages }
+let messages = [];          // 当前会话消息（不含 system）
 let streaming = false;
 let abortCtrl = null;
 let currentAiNode = null;   // 正在流式输出的气泡节点
 let lastUserText = '';
+let currentAudio = null;    // 正在播放的 TTS 音频（dashscope / openai 方案）
 
 const $ = (id) => document.getElementById(id);
 
 /**
  * 角色名归一化。
- *
- * 界面内部一直用 'ai' 表示助手（气泡 CSS 类名、历史记录都这么写），
- * 但 OpenAI 兼容接口只接受 system / assistant / user / tool / function，
- * 直接把 'ai' 发出去会得到：
- *   HTTP 400 · ai is not one of ['system','assistant','user','tool','function']
- * 所以凡是「要发往网络」的地方，都必须先过一遍这里。
+ * 界面内部一直用 'ai' 表示助手，但 OpenAI 兼容接口只接受
+ * system / assistant / user / tool / function，直接发 'ai' 会 400。
  */
 function normalizeRole(role) {
   if (role === 'ai') return 'assistant';
@@ -33,37 +32,36 @@ const els = {
   btnSend: $('btnSend'),
   btnVoice: $('btnVoice'),
   btnNew: $('btnNew'),
+  btnAgent: $('btnAgent'),
+  btnSessions: $('btnSessions'),
   btnSettings: $('btnSettings'),
   btnMin: $('btnMin'),
   btnClose: $('btnClose'),
   modelTag: $('modelTag'),
+  appName: $('appName'),
   statusTip: $('statusTip'),
   ttsToggle: $('ttsToggle'),
   voiceOverlay: $('voiceOverlay'),
   voiceText: $('voiceText'),
-  voiceCancel: $('voiceCancel')
+  voiceCancel: $('voiceCancel'),
+  drawer: $('sessionDrawer'),
+  drawerMask: $('drawerMask'),
+  sessionList: $('sessionList')
 };
 
 // 页面用途：设置窗口会带 #settings 打开。
-// 注意：打包后走 file:// 协议，loadFile 的 hash 有时不生效，
-// 所以这里除了看 hash，也看 URL 里是否含 settings，再兜底。
 function detectPage() {
   const h = (location.hash || '').toLowerCase();
   const u = decodeURIComponent(location.href || '').toLowerCase();
-  if (h.includes('settings') || u.includes('#settings') || u.includes('%23settings')) {
-    return 'settings';
-  }
+  if (h.includes('settings') || u.includes('#settings') || u.includes('%23settings')) return 'settings';
   return 'chat';
 }
-
 const PAGE = detectPage();
 
-/** 显式切换两个视图的显示状态 */
 function showView(which) {
   const appEl = document.getElementById('app');
   const setEl = document.getElementById('settings');
   if (!appEl || !setEl) return;
-
   if (which === 'settings') {
     appEl.style.display = 'none';
     setEl.style.display = 'flex';
@@ -75,12 +73,8 @@ function showView(which) {
 
 // ============ 初始化 ============
 async function init() {
-  try {
-    cfg = await window.xw.getConfig();
-  } catch (e) {
-    console.error('[init] 读取配置失败:', e);
-    cfg = {};
-  }
+  try { cfg = await window.xw.getConfig(); } catch (e) { cfg = {}; }
+  try { persona = await window.xw.personaGet(); } catch (e) { persona = null; }
 
   if (PAGE === 'settings') {
     showView('settings');
@@ -88,54 +82,42 @@ async function init() {
     return;
   }
   showView('chat');
-  initChat();
+  await initChat();
 }
 
-// 监听 hash 变化：支持在同一窗口内切换视图
 window.addEventListener('hashchange', () => {
   const p = detectPage();
   showView(p);
   if (p === 'settings') initSettings();
-  else initChat();
 });
 
-// 主进程会在窗口显示时明确告知页面用途（作为 hash 的兜底）
 try {
   window.xw.onPageMode((mode) => {
-    if (mode === 'settings') {
-      showView('settings');
-      initSettings();
-    } else {
-      showView('chat');
-    }
+    if (mode === 'settings') { showView('settings'); initSettings(); }
+    else showView('chat');
   });
-} catch (e) {
-  console.warn('[page] onPageMode 不可用:', e);
-}
+} catch (e) { /* ignore */ }
 
 // ================== 对话页 ==================
 async function initChat() {
   els.modelTag.textContent = cfg.model || '未配置模型';
-  els.ttsToggle.checked = cfg.ttsEnabled !== false;
-
-  // 载入历史
-  const history = await window.xw.getHistory();
-  if (history && history.length) {
-    els.welcome.style.display = 'none';
-    history.slice(-20).forEach((m) => {
-      const role = normalizeRole(m.role);
-      addMessageBubble(role, m.content, { save: false, animate: false });
-      messages.push({ role, content: m.content });
-    });
-    scrollToBottom();
+  els.ttsToggle.checked = cfg.ttsAutoSpeak === true;
+  els.btnAgent && els.btnAgent.classList.toggle('on', cfg.agentEnabled !== false);
+  if (persona && persona.assistantName) {
+    els.appName.textContent = persona.assistantName;
+    const t = $('welcomeTitle');
+    if (t) t.textContent = `你好，我是${persona.assistantName}`;
+    const d = $('welcomeDesc');
+    if (d && persona.userName) d.textContent = `${persona.userName}，随时吩咐。点击悬浮球或按 Alt+Space 语音提问。`;
   }
 
+  await loadSession();
   bindEvents();
 
-  // 主进程事件
   window.xw.onConfigUpdate((c) => {
     cfg = c;
     els.modelTag.textContent = c.model || '未配置模型';
+    els.btnAgent && els.btnAgent.classList.toggle('on', c.agentEnabled !== false);
   });
   window.xw.onVoiceStart(() => startVoice());
   window.xw.onHistoryCleared(() => {
@@ -144,27 +126,108 @@ async function initChat() {
     els.welcome.style.display = '';
   });
 
-  // 语音识别结果由主进程推送（WebSocket 在主进程侧）
   bindAsrEvents();
+  bindConfirmEvents();
+  renderSessionList();
 }
 
-function bindEvents() {
-  els.btnSend.addEventListener('click', send);
-  els.input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      send();
+/** 载入（或迁移）当前会话 */
+async function loadSession() {
+  try {
+    let data = await window.xw.sessionList();
+    if (!data.sessions || !data.sessions.length) {
+      // 首次运行：把旧版 config.history 迁移成会话
+      const history = (await window.xw.getHistory()) || [];
+      if (history.length) {
+        const s = await window.xw.sessionCreate('导入的历史');
+        for (const m of history.slice(-40)) {
+          await window.xw.sessionAppend(s.id, { role: normalizeRole(m.role), content: m.content });
+        }
+        data = await window.xw.sessionList();
+      } else {
+        await window.xw.sessionCreate('新对话');
+        data = await window.xw.sessionList();
+      }
     }
+    session = await window.xw.sessionActive();
+  } catch (e) {
+    console.error('[session] 加载失败', e);
+    session = null;
+  }
+
+  messages = [];
+  clearMessageNodes();
+  if (session && session.messages && session.messages.length) {
+    els.welcome.style.display = 'none';
+    session.messages.slice(-40).forEach((m) => {
+      const role = normalizeRole(m.role);
+      addMessageBubble(role, m.content, { animate: false });
+      messages.push({ role, content: m.content });
+    });
+    scrollToBottom();
+  } else {
+    els.welcome.style.display = '';
+  }
+}
+
+// ---------- 会话抽屉 ----------
+async function renderSessionList() {
+  if (!els.sessionList) return;
+  try {
+    const data = await window.xw.sessionList();
+    els.sessionList.innerHTML = '';
+    [...data.sessions].reverse().forEach((s) => {
+      const item = document.createElement('div');
+      item.className = 'sess-item' + (s.id === (session && session.id) ? ' active' : '');
+      const title = document.createElement('div');
+      title.className = 'sess-title';
+      title.textContent = s.title || '新对话';
+      const meta = document.createElement('div');
+      meta.className = 'sess-meta';
+      const d = new Date(s.updatedAt || Date.now());
+      meta.textContent = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} · ${s.count || 0} 条`;
+
+      const del = document.createElement('button');
+      del.className = 'sess-del';
+      del.textContent = '×';
+      del.title = '删除会话';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        await window.xw.sessionDelete(s.id);
+        if (session && session.id === s.id) await loadSession();
+        renderSessionList();
+      };
+
+      item.appendChild(title);
+      item.appendChild(meta);
+      item.appendChild(del);
+      item.onclick = async () => {
+        await window.xw.sessionSetActive(s.id);
+        await loadSession();
+        renderSessionList();
+        toggleDrawer(false);
+      };
+      els.sessionList.appendChild(item);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+function toggleDrawer(show) {
+  const on = show === undefined ? !els.drawer.classList.contains('show') : show;
+  els.drawer.classList.toggle('show', on);
+  els.drawerMask.classList.toggle('show', on);
+}
+
+// ---------- 事件绑定 ----------
+function bindEvents() {
+  els.btnSend.addEventListener('click', () => send());
+  els.input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   els.input.addEventListener('input', autoResize);
 
-  // 快捷问题
   document.querySelectorAll('.quick').forEach((b) => {
-    b.addEventListener('click', () => {
-      els.input.value = b.dataset.q;
-      autoResize();
-      send();
-    });
+    b.addEventListener('click', () => { els.input.value = b.dataset.q; autoResize(); send(); });
   });
 
   els.btnVoice.addEventListener('click', startVoice);
@@ -173,14 +236,30 @@ function bindEvents() {
   els.btnMin.addEventListener('click', () => window.xw.hidePanel());
   els.btnClose.addEventListener('click', () => window.xw.closePanel());
   els.voiceCancel.addEventListener('click', cancelVoice);
+  els.btnSessions.addEventListener('click', () => toggleDrawer());
+  els.drawerMask.addEventListener('click', () => toggleDrawer(false));
+  $('btnNewSession').addEventListener('click', async () => {
+    await window.xw.sessionCreate('新对话');
+    await loadSession();
+    renderSessionList();
+    toggleDrawer(false);
+  });
+
+  els.btnAgent.addEventListener('click', async () => {
+    const next = !(cfg.agentEnabled !== false);
+    cfg = await window.xw.setConfig({ agentEnabled: next });
+    els.btnAgent.classList.toggle('on', next);
+    setStatus(next ? 'Agent 模式已开启：小问可以调用工具操作电脑' : 'Agent 模式已关闭：退化为普通聊天');
+  });
 
   els.ttsToggle.addEventListener('change', async () => {
-    cfg = await window.xw.setConfig({ ttsEnabled: els.ttsToggle.checked });
+    cfg = await window.xw.setConfig({ ttsAutoSpeak: els.ttsToggle.checked });
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (els.voiceOverlay.classList.contains('show')) cancelVoice();
+      else if (els.drawer.classList.contains('show')) toggleDrawer(false);
       else if (streaming) stopStreaming();
     }
   });
@@ -190,16 +269,13 @@ function autoResize() {
   els.input.style.height = 'auto';
   els.input.style.height = Math.min(els.input.scrollHeight, 130) + 'px';
 }
-
 function scrollToBottom() {
-  requestAnimationFrame(() => {
-    els.messages.scrollTop = els.messages.scrollHeight;
-  });
+  requestAnimationFrame(() => { els.messages.scrollTop = els.messages.scrollHeight; });
 }
-
 function clearMessageNodes() {
-  [...els.messages.querySelectorAll('.msg')].forEach((n) => n.remove());
+  [...els.messages.querySelectorAll('.msg, .tool-card')].forEach((n) => n.remove());
 }
+function setStatus(t) { els.statusTip.textContent = t; }
 
 // ---------- 发送 ----------
 async function send(textOverride) {
@@ -207,8 +283,6 @@ async function send(textOverride) {
   const text = (textOverride ?? els.input.value).trim();
   if (!text) return;
 
-  // 渲染进程只知道「有没有配过 Key」（apiKeyMasked 非空即表示已配置），
-  // 真实 Key 在主进程，这里不需要也不应该拿到它。
   if (!cfg.apiKeyMasked) {
     setStatus('请先在设置中配置 API Key');
     window.xw.openSettings();
@@ -220,63 +294,63 @@ async function send(textOverride) {
   autoResize();
   updateSendBtn(true);
 
-  // 用户消息
   lastUserText = text;
   addMessageBubble('user', text);
   messages.push({ role: 'user', content: text });
-  window.xw.addHistory({ role: 'user', content: text });
+  persist({ role: 'user', content: text });
 
-  // 上下文裁剪
   const maxTurns = cfg.contextTurns ?? 10;
   const recent = maxTurns > 0 ? messages.slice(-maxTurns * 2) : messages.slice(-1);
-
-  const payload = [
-    { role: 'system', content: cfg.systemPrompt || '' },
-    ...recent
-  ]
+  const payload = recent
     .filter((m) => m.content)
-    // 兜底归一化：老版本的历史记录里存的是 'ai'，不转换会直接 400
-    .map((m) => ({ ...m, role: normalizeRole(m.role) }));
+    .map((m) => ({ role: normalizeRole(m.role), content: m.content }));
 
-  // 占位气泡
   currentAiNode = addMessageBubble('ai', '', { thinking: true });
 
   let full = '';
   abortCtrl = new AbortController();
   streaming = true;
   setStatus('思考中…');
-  document.querySelector('.ball');
+  const useAgent = cfg.agentEnabled !== false;
+  setStatus(useAgent ? 'Agent 工作中…' : '思考中…');
 
   try {
-    full = await streamChat({
-      messages: payload,
-      onDelta: (_d, acc) => {
-        full = acc;
-        renderStreaming(currentAiNode, acc);
-        scrollToBottom();
-      }
-    });
-  } catch (err) {
-    if (err.name === 'AbortError' || err.aborted) {
-      // 用户点了「停止」：保留已经收到的内容，不当作错误
-      if (full) {
-        renderStreaming(currentAiNode, full, true);
-        finalizeAiNode(currentAiNode, full);
-        messages.push({ role: 'assistant', content: full });
-        window.xw.addHistory({ role: 'assistant', content: full });
-      } else {
-        els.messages.removeChild(currentAiNode);
-      }
-      setStatus('已停止');
+    if (useAgent) {
+      full = await streamAgent({
+        messages: payload,
+        sessionId: session && session.id,
+        onDelta: (_d, acc) => { full = acc; renderStreaming(currentAiNode, acc); scrollToBottom(); },
+        onTool: (p) => renderToolCard(p)
+      });
     } else {
-      const msg = String(err.message || err);
-      renderStreaming(currentAiNode, full + `\n\n> ⚠️ 请求失败：${msg}`, true);
-      setStatus('请求失败');
-      console.error('[chat]', err);
+      full = await streamChat({
+        messages: [{ role: 'system', content: cfg.systemPrompt || '' }, ...payload],
+        onDelta: (_d, acc) => { full = acc; renderStreaming(currentAiNode, acc); scrollToBottom(); }
+      });
     }
+  } catch (err) {
     streaming = false;
     updateSendBtn(false);
-    return;
+
+    // 模型不支持 Agent：自动降级为普通对话重试一次
+    if (err && err.disabled) {
+      setStatus('模型不支持函数调用，已切换普通对话');
+      cfg = await window.xw.setConfig({ agentEnabled: false });
+      els.btnAgent.classList.remove('on');
+      streaming = true;
+      updateSendBtn(true);
+      try {
+        full = await streamChat({
+          messages: [{ role: 'system', content: cfg.systemPrompt || '' }, ...payload],
+          onDelta: (_d, acc) => { full = acc; renderStreaming(currentAiNode, acc); scrollToBottom(); }
+        });
+      } catch (e2) { err = e2; full = ''; }
+      streaming = false;
+      updateSendBtn(false);
+      if (!full && err) return handleStreamError(err, full);
+    } else {
+      return handleStreamError(err, full);
+    }
   }
 
   streaming = false;
@@ -284,20 +358,43 @@ async function send(textOverride) {
 
   if (full) {
     messages.push({ role: 'assistant', content: full });
-    window.xw.addHistory({ role: 'assistant', content: full });
+    persist({ role: 'assistant', content: full });
     finalizeAiNode(currentAiNode, full);
     setStatus('就绪');
-
-    // 语音朗读
-    if (cfg.ttsEnabled !== false) {
-      speakText(full);
-    }
+    if (els.ttsToggle.checked) speakText(full);
   } else {
     currentAiNode && currentAiNode.remove();
     setStatus('未收到回复');
   }
   currentAiNode = null;
   scrollToBottom();
+}
+
+function handleStreamError(err, full) {
+  if (err && (err.name === 'AbortError' || err.aborted)) {
+    if (full) {
+      renderStreaming(currentAiNode, full, true);
+      finalizeAiNode(currentAiNode, full);
+      messages.push({ role: 'assistant', content: full });
+      persist({ role: 'assistant', content: full });
+    } else {
+      currentAiNode && currentAiNode.remove();
+    }
+    setStatus('已停止');
+  } else {
+    const msg = String((err && err.message) || err);
+    renderStreaming(currentAiNode, full + `\n\n> ⚠️ 请求失败：${msg}`, true);
+    setStatus('请求失败');
+  }
+  currentAiNode = null;
+  updateSendBtn(false);
+}
+
+function persist(msg) {
+  if (session && session.id) {
+    try { window.xw.sessionAppend(session.id, msg); } catch (e) { /* ignore */ }
+  }
+  window.xw.addHistory(msg);
 }
 
 function updateSendBtn(busy) {
@@ -314,18 +411,109 @@ function updateSendBtn(busy) {
 }
 
 function stopStreaming() {
-  // 通知主进程真正中断请求（否则后台仍在消费 token）
   abortChat();
   if (abortCtrl) abortCtrl.abort();
   speech.stopSpeaking();
+  stopAudio();
   streaming = false;
   updateSendBtn(false);
   setStatus('已停止');
 }
 
+// ---------- 工具调用卡片 ----------
+const TOOL_LABEL = {
+  shell_exec: '执行命令', file_read: '读取文件', file_write: '写入文件', file_list: '列出目录',
+  file_delete: '删除文件', file_search: '搜索文件', app_open: '打开应用', process_list: '进程列表',
+  process_kill: '结束进程', screenshot: '截屏', clipboard_read: '读剪贴板', clipboard_write: '写剪贴板',
+  notify: '发送通知', memory_add: '记住信息', memory_search: '检索记忆', http_request: '网络请求',
+  get_datetime: '获取时间', system_info: '系统信息', load_skill: '加载技能'
+};
+
+function renderToolCard(p) {
+  if (!p) return;
+  let node = document.getElementById('tool-' + p.id);
+  if (p.status === 'start') {
+    if (node) node.remove();
+    node = document.createElement('div');
+    node.id = 'tool-' + p.id;
+    node.className = 'tool-card';
+    const label = TOOL_LABEL[p.name] || (p.name.startsWith('mcp__') ? 'MCP ' + p.name.split('__')[2] : p.name);
+    const brief = briefArgs(p.name, p.args);
+    node.innerHTML = `<div class="tool-head"><span class="tool-dot running"></span>
+      <span class="tool-name">${escapeHtml(label)}</span>
+      ${p.danger ? '<span class="tool-tag danger">高危</span>' : ''}
+      <span class="tool-status">执行中…</span></div>
+      <div class="tool-args">${escapeHtml(brief)}</div>`;
+    els.messages.appendChild(node);
+    scrollToBottom();
+    setStatus(`正在${label}…`);
+    return;
+  }
+  if (!node) return;
+  const head = node.querySelector('.tool-status');
+  const dot = node.querySelector('.tool-dot');
+  if (p.status === 'rejected') {
+    dot.className = 'tool-dot';
+    head.textContent = '主人已拒绝';
+    node.classList.add('rejected');
+  } else {
+    dot.className = 'tool-dot done';
+    head.textContent = p.ok ? '完成' : '失败';
+    node.classList.add(p.ok ? 'done' : 'failed');
+    const pre = document.createElement('pre');
+    pre.className = 'tool-out';
+    pre.textContent = String(p.output || '').slice(0, 700);
+    node.appendChild(pre);
+    // 截图结果可以直接点开
+    const f = p.output && /([A-Za-z]:\\[^\s]+\.png)/.exec(p.output);
+    if (f) {
+      const b = document.createElement('button');
+      b.className = 'tool-open';
+      b.textContent = '打开截图';
+      b.onclick = () => window.xw.toolsOpenFile(f[1]);
+      node.appendChild(b);
+    }
+  }
+  scrollToBottom();
+}
+
+function briefArgs(name, args) {
+  if (!args) return '';
+  if (name === 'shell_exec') return String(args.command || '');
+  if (name === 'file_write') return `${args.path} (${String(args.content || '').length} 字符)`;
+  return String(args.path || args.url || args.target || args.query || args.text || args.id || JSON.stringify(args)).slice(0, 200);
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- 高危操作确认 ----------
+function bindConfirmEvents() {
+  try {
+    window.xw.onAgentConfirm(({ id, toolName, args }) => {
+      const mask = $('confirmMask');
+      const label = TOOL_LABEL[toolName] || toolName;
+      $('confirmTitle').textContent = `允许执行「${label}」吗？`;
+      $('confirmDesc').textContent = TOOL_LABEL[toolName]
+        ? '这是一个可能影响你电脑的操作，确认后才会执行。'
+        : '模型想要调用一个外部工具。';
+      $('confirmArgs').textContent = briefArgs(toolName, args);
+      mask.classList.add('show');
+      const done = (approved) => {
+        mask.classList.remove('show');
+        $('confirmYes').onclick = null;
+        $('confirmNo').onclick = null;
+        window.xw.agentConfirmReply(id, approved);
+      };
+      $('confirmYes').onclick = () => done(true);
+      $('confirmNo').onclick = () => done(false);
+    });
+  } catch (e) { /* ignore */ }
+}
+
 // ---------- 气泡渲染 ----------
-function addMessageBubble(role, content, { save = true, animate = true, thinking = false } = {}) {
-  // 归一化后再判断：兼容历史上存过的 'ai'
+function addMessageBubble(role, content, { animate = true, thinking = false } = {}) {
   const r = normalizeRole(role);
   const wrap = document.createElement('div');
   wrap.className = `msg ${r === 'user' ? 'user' : 'ai'}`;
@@ -333,33 +521,23 @@ function addMessageBubble(role, content, { save = true, animate = true, thinking
 
   const avatar = document.createElement('div');
   avatar.className = 'msg-avatar';
-  avatar.textContent = role === 'user' ? '我' : '问';
+  avatar.textContent = r === 'user' ? '我' : (persona && persona.assistantName ? persona.assistantName.slice(0, 1) : '问');
 
   const body = document.createElement('div');
   body.className = 'msg-body';
-
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
 
-  if (thinking) {
-    bubble.innerHTML = `<span class="thinking-dots"><i></i><i></i><i></i></span>`;
-  } else if (r === 'assistant') {
-    bubble.innerHTML = renderMarkdown(content);
-  } else {
-    bubble.textContent = content;
-  }
+  if (thinking) bubble.innerHTML = `<span class="thinking-dots"><i></i><i></i><i></i></span>`;
+  else if (r === 'assistant') bubble.innerHTML = renderMarkdown(content);
+  else bubble.textContent = content;
 
   body.appendChild(bubble);
-
-  // AI 消息操作条
-  if (r === 'assistant' && !thinking) {
-    body.appendChild(buildActions(content, bubble));
-  }
+  if (r === 'assistant' && !thinking) body.appendChild(buildActions(content, bubble));
 
   wrap.appendChild(avatar);
   wrap.appendChild(body);
   els.messages.appendChild(wrap);
-
   if (animate) scrollToBottom();
   return wrap;
 }
@@ -368,11 +546,7 @@ function renderStreaming(node, text, isError = false) {
   if (!node) return;
   const bubble = node.querySelector('.bubble');
   if (!bubble) return;
-  if (isError) {
-    bubble.innerHTML = renderMarkdown(text);
-  } else {
-    bubble.innerHTML = renderMarkdown(text) + '<span class="cursor"></span>';
-  }
+  bubble.innerHTML = isError ? renderMarkdown(text) : renderMarkdown(text) + '<span class="cursor"></span>';
 }
 
 function finalizeAiNode(node, text) {
@@ -380,9 +554,7 @@ function finalizeAiNode(node, text) {
   const bubble = node.querySelector('.bubble');
   if (bubble) bubble.innerHTML = renderMarkdown(text);
   const body = node.querySelector('.msg-body');
-  if (body && !body.querySelector('.msg-actions')) {
-    body.appendChild(buildActions(text, bubble));
-  }
+  if (body && !body.querySelector('.msg-actions')) body.appendChild(buildActions(text, bubble));
 }
 
 function buildActions(text, bubble) {
@@ -401,8 +573,9 @@ function buildActions(text, bubble) {
   speakBtn.textContent = '朗读';
   const plain = toPlainText(text);
   speakBtn.onclick = () => {
-    if (speech.isSpeaking()) {
+    if (speech.isSpeaking() || currentAudio) {
       speech.stopSpeaking();
+      stopAudio();
       speakBtn.classList.remove('on');
       speakBtn.textContent = '朗读';
     } else {
@@ -422,21 +595,13 @@ function buildActions(text, bubble) {
   retryBtn.textContent = '重答';
   retryBtn.onclick = () => {
     if (streaming) return;
-    // 移除当前 AI 消息
     const wrap = bar.closest('.msg');
-    // 历史数据可能是 'ai'，新数据是 'assistant'，两种都要能匹配上
-    const idx = messages.findIndex(
-      (m) => normalizeRole(m.role) === 'assistant' && m.content === text
-    );
+    const idx = messages.findIndex((m) => normalizeRole(m.role) === 'assistant' && m.content === text);
     if (idx >= 0) messages.splice(idx, 1);
     wrap && wrap.remove();
-    // 用最后一个用户消息重发
-    if (lastUserText) {
-      // 去掉末尾 user 消息，重新发送
-      const lastIdx = messages.map((m) => m.role).lastIndexOf('user');
-      if (lastIdx >= 0) messages.splice(lastIdx, 1);
-      send(lastUserText);
-    }
+    const lastIdx = messages.map((m) => m.role).lastIndexOf('user');
+    if (lastIdx >= 0) messages.splice(lastIdx, 1);
+    if (lastUserText) send(lastUserText);
   };
 
   bar.appendChild(copyBtn);
@@ -445,11 +610,51 @@ function buildActions(text, bubble) {
   return bar;
 }
 
-function speakText(text) {
+// ---------- 语音输出 ----------
+function stopAudio() {
+  if (currentAudio) {
+    try { currentAudio.pause(); currentAudio.currentTime = 0; } catch (e) { /* ignore */ }
+    currentAudio = null;
+  }
+}
+
+function playAudioFile(file) {
+  return new Promise((resolve) => {
+    let url = String(file).replace(/\\/g, '/');
+    if (!/^file:\/\/\//i.test(url)) url = 'file:///' + url.replace(/^\/+/, '');
+    const a = new Audio(url);
+    a.volume = (cfg.ttsVolume ?? 100) / 100;
+    a.playbackRate = 1 + (cfg.ttsRate || 0) / 20;
+    a.onended = () => { currentAudio = null; document.dispatchEvent(new CustomEvent('speech-ended')); resolve(true); };
+    a.onerror = () => { currentAudio = null; resolve(false); };
+    a.play().then(() => { currentAudio = a; }).catch(() => resolve(false));
+  });
+}
+
+async function speakText(text) {
   if (cfg.ttsEnabled === false) return;
   const plain = toPlainText(text);
   if (!plain) return;
-  speech.speak(plain, {
+
+  const provider = cfg.ttsProvider || 'web';
+  // 长文本截断，避免合成过久
+  const body = plain.length > 600 ? plain.slice(0, 600) + '……（内容较长已省略）' : plain;
+
+  if (provider === 'dashscope' || provider === 'openai') {
+    try {
+      const r = await window.xw.ttsSynth({ provider, text: body });
+      if (r && r.ok && r.file) {
+        const played = await playAudioFile(r.file);
+        if (played) return;
+      } else {
+        console.warn('[tts] 合成失败，回退系统语音：', r && r.error);
+      }
+    } catch (e) {
+      console.warn('[tts] 合成异常，回退系统语音：', e && e.message);
+    }
+  }
+
+  speech.speak(body, {
     rate: 1 + (cfg.ttsRate || 0) / 10,
     volume: (cfg.ttsVolume ?? 100) / 100,
     voiceName: cfg.ttsVoice || '',
@@ -457,18 +662,19 @@ function speakText(text) {
   });
 }
 
-function setStatus(t) {
-  els.statusTip.textContent = t;
-}
-
 function newChat() {
   if (streaming) stopStreaming();
   speech.stopSpeaking();
+  stopAudio();
   messages = [];
   lastUserText = '';
   clearMessageNodes();
   els.welcome.style.display = '';
   setStatus('就绪');
+  window.xw.sessionCreate('新对话').then(async () => {
+    await loadSession();
+    renderSessionList();
+  });
 }
 
 // ================== 语音问答 ==================
@@ -477,7 +683,6 @@ let voiceActive = false;
 
 function startVoice() {
   if (voiceActive) return;
-
   const provider = cfg.asrProvider || 'dashscope';
   if (provider === 'dashscope' && !cfg.asrApiKeyMasked) {
     setStatus('请先在设置 → 语音中配置语音识别 API Key');
@@ -490,6 +695,7 @@ function startVoice() {
   }
 
   speech.stopSpeaking();
+  stopAudio();
   voiceFinalText = '';
   voiceActive = true;
   els.voiceText.textContent = '正在聆听…';
@@ -502,15 +708,11 @@ function startVoice() {
     lang: cfg.asrLanguage || 'zh',
     silenceMs: cfg.asrSilenceMs || 2000,
     onResult: (text, isFinal) => {
-      // 实时显示识别中的文本；中间结果带光标，成品句子去掉光标
       els.voiceText.textContent = text || '正在聆听…';
       els.voiceText.classList.toggle('live', !isFinal);
       voiceFinalText = text;
     },
-    onLevel: (lv) => {
-      // 音量驱动波纹动画
-      els.voiceOverlay.style.setProperty('--voice-level', String(lv));
-    },
+    onLevel: (lv) => els.voiceOverlay.style.setProperty('--voice-level', String(lv)),
     onError: (msg) => {
       voiceActive = false;
       els.voiceText.textContent = msg;
@@ -521,15 +723,11 @@ function startVoice() {
       voiceActive = false;
       const t = (finalText || voiceFinalText || '').trim();
       closeVoiceOverlay();
-      if (t) {
-        send(t);
-      } else {
-        setStatus('未识别到内容');
-      }
+      if (t) send(t);
+      else setStatus('未识别到内容');
     }
   });
 
-  // startRecognition 是异步的，失败会走 onError
   Promise.resolve(started).catch((e) => {
     voiceActive = false;
     setStatus('语音识别启动失败：' + (e && e.message));
@@ -551,18 +749,10 @@ function closeVoiceOverlay() {
   els.voiceOverlay.style.removeProperty('--voice-level');
 }
 
-/** 主进程推送的识别事件（在 initChat 里订阅） */
 function bindAsrEvents() {
-  window.xw.onAsrResult((res) => {
-    if (!voiceActive) return;
-    speech.pushAsrResult(res);
-  });
+  window.xw.onAsrResult((res) => { if (voiceActive) speech.pushAsrResult(res); });
   window.xw.onAsrEnd(() => {
-    // 只有还在语音态时才需要收尾，避免与 onError 重复
-    if (!voiceActive) {
-      speech.handleAsrEnd();
-      return;
-    }
+    if (!voiceActive) { speech.handleAsrEnd(); return; }
     voiceActive = false;
     speech.handleAsrEnd();
   });
@@ -579,239 +769,104 @@ function bindAsrEvents() {
 let settingsInited = false;
 
 function initSettings() {
-  if (settingsInited) return;
+  if (settingsInited) { fillAll(); return; }
   settingsInited = true;
+  buildTabs();
+  bindGeneral();
+  bindModel();
+  bindPersona();
+  bindAgent();
+  bindMcp();
+  bindSkills();
+  bindVoice();
+  bindAdvanced();
+  fillAll();
+}
 
-  const el = {
-    provider: $('stProvider'),
-    baseUrl: $('stBaseUrl'),
-    model: $('stModel'),
-    apiKey: $('stApiKey'),
-    keyToggle: $('stKeyToggle'),
-    test: $('stTest'),
-    testResult: $('stTestResult'),
-    systemPrompt: $('stSystemPrompt'),
-    context: $('stContext'),
-    contextVal: $('stContextVal'),
-    ttsEnabled: $('stTtsEnabled'),
-    ttsRate: $('stTtsRate'),
-    rateVal: $('stRateVal'),
-    ttsVolume: $('stTtsVolume'),
-    volumeVal: $('stVolumeVal'),
-    voice: $('stVoice'),
-    testVoice: $('stTestVoice'),
-    asrProvider: $('stAsrProvider'),
-    asrDashBlock: $('stAsrDashBlock'),
-    asrKey: $('stAsrKey'),
-    asrKeyToggle: $('stAsrKeyToggle'),
-    asrKeyLink: $('stAsrKeyLink'),
-    asrModel: $('stAsrModel'),
-    asrSilence: $('stAsrSilence'),
-    asrSilenceVal: $('stAsrSilenceVal'),
-    asrTest: $('stAsrTest'),
-    asrTestResult: $('stAsrTestResult'),
-    opacity: $('stOpacity'),
-    opacityVal: $('stOpacityVal'),
-    hotkey: $('stHotkey'),
-    gpuDisabled: $('stGpuDisabled'),
-    gpuStatus: $('stGpuStatus'),
-    restart: $('stRestart'),
-    openData: $('stOpenData'),
-    clearHistory: $('stClearHistory'),
-    save: $('stSave')
-  };
+function buildTabs() {
+  document.querySelectorAll('.st-nav-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.st-nav-item').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll('.st-section').forEach((s) => s.classList.remove('active'));
+      btn.classList.add('active');
+      const sec = document.querySelector(`.st-section[data-tab="${btn.dataset.tab}"]`);
+      if (sec) sec.classList.add('active');
+    });
+  });
+}
 
-  // 填充表单
-  function fill(c) {
-    el.baseUrl.value = c.apiBaseUrl || '';
-    el.model.value = c.model || '';
-    // 不要把打码后的 Key 填进输入框 —— 否则用户直接点保存会把 "xx***xx" 当成真 Key 存下去。
-    // 改为留空 + placeholder 提示，并标记 keep=1（保存时沿用它）。
-    const hasKey = !!(c.apiKeyMasked || (c.apiKey && c.apiKey !== '__KEEP__'));
-    el.apiKey.value = '';
-    el.apiKey.placeholder = hasKey
-      ? `已配置：${c.apiKeyMasked || '••••••'}（留空保持不变，重新填写则覆盖）`
-      : 'sk-... 请粘贴服务商提供的 API Key';
-    el.apiKey.dataset.keep = hasKey ? '1' : '0';
-    el.systemPrompt.value = c.systemPrompt || '';
-    el.context.value = c.contextTurns ?? 10;
-    el.contextVal.textContent = c.contextTurns ?? 10;
-    el.ttsEnabled.checked = c.ttsEnabled !== false;
-    el.ttsRate.value = c.ttsRate || 0;
-    el.rateVal.textContent = (1 + (c.ttsRate || 0) / 10).toFixed(1) + 'x';
-    el.ttsVolume.value = c.ttsVolume ?? 100;
-    el.volumeVal.textContent = (c.ttsVolume ?? 100) + '%';
+function fillAll() {
+  fillGeneral();
+  fillModel();
+  fillPersona();
+  fillAgent();
+  fillMcp();
+  fillSkills();
+  fillVoice();
+  refreshGpuStatus();
+}
 
-    // ---- 语音识别 ----
-    el.asrProvider.value = c.asrProvider || 'dashscope';
-    toggleAsrBlock();
-    const hasAsrKey = !!(c.asrApiKeyMasked || (c.asrApiKey && c.asrApiKey !== '__KEEP__'));
-    el.asrKey.value = '';
-    el.asrKey.placeholder = hasAsrKey
-      ? `已配置：${c.asrApiKeyMasked || '••••••'}（留空保持不变，重新填写则覆盖）`
-      : 'sk-... 请粘贴百炼 API Key';
-    el.asrKey.dataset.keep = hasAsrKey ? '1' : '0';
-    el.asrModel.value = c.asrModel || 'paraformer-realtime-v2';
-    const sil = c.asrSilenceMs ?? 2000;
-    el.asrSilence.value = sil;
-    el.asrSilenceVal.textContent = (sil / 1000).toFixed(1) + 's';
-
-    el.opacity.value = Math.round((c.ballOpacity ?? 0.92) * 100);
-    el.opacityVal.textContent = Math.round((c.ballOpacity ?? 0.92) * 100) + '%';
-    el.hotkey.value = c.hotkey || 'Alt+Space';
-
-    // 匹配服务商
-    const match = [...el.provider.options].find(
-      (o) => o.value === `${c.apiBaseUrl}|${c.model}`
-    );
-    el.provider.value = match ? match.value : 'custom';
-  }
-
-  fill(cfg);
-
-  window.xw.onConfigUpdate(fill);
-
-  // 服务商切换
-  el.provider.addEventListener('change', () => {
-    const v = el.provider.value;
-    if (v === 'custom') return;
-    const [url, model] = v.split('|');
-    el.baseUrl.value = url;
-    el.model.value = model;
+// ---------- 常规 ----------
+function bindGeneral() {
+  $('stAutoStart').addEventListener('change', async () => {
+    const r = await window.xw.autostartSet($('stAutoStart').checked);
+    if (r && r.ok === false) setToast('设置开机自启失败：' + (r.reason || ''));
   });
 
-  // API Key 显隐
-  el.keyToggle.addEventListener('click', () => {
-    const isPwd = el.apiKey.type === 'password';
-    el.apiKey.type = isPwd ? 'text' : 'password';
-    el.keyToggle.textContent = isPwd ? '隐藏' : '显示';
-  });
-  el.apiKey.addEventListener('input', () => {
-    el.apiKey.dataset.keep = '0';
-  });
-
-  // ---- 语音识别 Key / 服务商 ----
-  function toggleAsrBlock() {
-    const on = el.asrProvider.value === 'dashscope';
-    el.asrDashBlock.style.display = on ? '' : 'none';
-  }
-  el.asrProvider.addEventListener('change', toggleAsrBlock);
-
-  el.asrKeyToggle.addEventListener('click', () => {
-    const isPwd = el.asrKey.type === 'password';
-    el.asrKey.type = isPwd ? 'text' : 'password';
-    el.asrKeyToggle.textContent = isPwd ? '隐藏' : '显示';
-  });
-  el.asrKey.addEventListener('input', () => {
-    el.asrKey.dataset.keep = '0';
-  });
-
-  el.asrSilence.addEventListener('input', () => {
-    el.asrSilenceVal.textContent = (Number(el.asrSilence.value) / 1000).toFixed(1) + 's';
-  });
-
-  el.asrKeyLink.addEventListener('click', (e) => {
-    e.preventDefault();
-    window.xw.openExternal('https://bailian.console.aliyun.com/');
-  });
-
-  // 测试语音识别：只验证握手，不发音频
-  el.asrTest.addEventListener('click', async () => {
-    const keyInput = el.asrKey.value.trim();
-    const apiKey = el.asrKey.dataset.keep === '1'
-      ? '__KEEP__'
-      : (keyInput && !keyInput.includes('***') ? keyInput : '__KEEP__');
-
-    if (el.asrProvider.value !== 'dashscope') {
-      showAsrTest('系统内置识别依赖云端服务，无法离线测试，请直接试用语音输入', 'err');
-      return;
-    }
-    if (!apiKey && !keyInput) {
-      showAsrTest('请先填写百炼 API Key', 'err');
-      return;
-    }
-
-    showAsrTest('正在测试…', 'loading');
-    try {
-      const res = await window.xw.asrTest({ apiKey, model: el.asrModel.value.trim() });
-      if (res && res.ok) showAsrTest(res.text || '连接成功 ✓', 'ok');
-      else showAsrTest('失败：' + ((res && res.error) || '未知错误'), 'err');
-    } catch (e) {
-      showAsrTest('失败：' + e.message, 'err');
-    }
-  });
-
-  function showAsrTest(msg, type) {
-    el.asrTestResult.textContent = msg;
-    el.asrTestResult.className = 'test-result show ' + type;
-  }
-
-  // 滑块
-  el.context.addEventListener('input', () => (el.contextVal.textContent = el.context.value));
-  el.ttsRate.addEventListener('input', () => {
-    el.rateVal.textContent = (1 + Number(el.ttsRate.value) / 10).toFixed(1) + 'x';
-  });
-  el.ttsVolume.addEventListener('input', () => {
-    el.volumeVal.textContent = el.ttsVolume.value + '%';
-  });
-  el.opacity.addEventListener('input', () => {
-    el.opacityVal.textContent = el.opacity.value + '%';
-    window.xw.ballSetOpacity(Number(el.opacity.value) / 100);
-  });
-
-  // 快捷键录制
-  el.hotkey.addEventListener('keydown', (e) => {
+  const hotkey = $('stHotkey');
+  hotkey.addEventListener('keydown', (e) => {
     e.preventDefault();
     const parts = [];
     if (e.ctrlKey) parts.push('Ctrl');
     if (e.altKey) parts.push('Alt');
     if (e.shiftKey) parts.push('Shift');
     if (e.metaKey) parts.push('Super');
-    const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
-    if (!['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) parts.push(key);
-    if (parts.length >= 2) el.hotkey.value = parts.join('+');
-  });
-
-  // 语音音色列表
-  function fillVoices() {
-    const list = speech.getVoices();
-    if (!list.length) return;
-    el.voice.innerHTML = '<option value="">自动选择（推荐）</option>';
-    list.forEach((v) => {
-      const o = document.createElement('option');
-      o.value = v.name;
-      o.textContent = `${v.name} · ${v.lang}${v.localService ? ' (本地)' : ''}`;
-      el.voice.appendChild(o);
-    });
-    el.voice.value = cfg.ttsVoice || '';
-  }
-  fillVoices();
-  document.addEventListener('voices-ready', fillVoices);
-  setTimeout(fillVoices, 700);
-
-  // 试听
-  el.testVoice.addEventListener('click', () => {
-    speech.speak('你好，我是小问，这是语音朗读效果。', {
-      rate: 1 + Number(el.ttsRate.value) / 10,
-      volume: Number(el.ttsVolume.value) / 100,
-      voiceName: el.voice.value
-    });
-  });
-
-  // 测试连接
-  el.test.addEventListener('click', async () => {
-    const baseUrl = el.baseUrl.value.trim();
-    const model = el.model.value.trim();
-    // 用户改过 Key 就传新值；没改过则传 __KEEP__，由主进程用已保存的真实 Key
-    const keyInput = el.apiKey.value.trim();
-    const apiKey = el.apiKey.dataset.keep === '1'
-      ? '__KEEP__'
-      : (keyInput && !keyInput.includes('***') ? keyInput : '__KEEP__');
-
-    if (!baseUrl || !model) {
-      showTest('请先填写接口地址与模型名', 'err');
-      return;
+    if (!['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) {
+      parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
     }
+    if (parts.length >= 2) hotkey.value = parts.join('+');
+  });
+
+  $('stOpacity').addEventListener('input', () => {
+    $('stOpacityVal').textContent = $('stOpacity').value + '%';
+    window.xw.ballSetOpacity(Number($('stOpacity').value) / 100);
+  });
+}
+
+async function fillGeneral() {
+  try {
+    const st = await window.xw.autostartGet();
+    $('stAutoStart').checked = !!st.enabled;
+  } catch (e) { /* ignore */ }
+  $('stOpacity').value = Math.round((cfg.ballOpacity ?? 0.92) * 100);
+  $('stOpacityVal').textContent = Math.round((cfg.ballOpacity ?? 0.92) * 100) + '%';
+  $('stHotkey').value = cfg.hotkey || 'Alt+Space';
+}
+
+// ---------- AI 模型 ----------
+function bindModel() {
+  $('stProvider').addEventListener('change', () => {
+    const v = $('stProvider').value;
+    if (v === 'custom') return;
+    const [url, model] = v.split('|');
+    $('stBaseUrl').value = url;
+    $('stModel').value = model;
+  });
+  $('stKeyToggle').addEventListener('click', () => {
+    const el = $('stApiKey');
+    const isPwd = el.type === 'password';
+    el.type = isPwd ? 'text' : 'password';
+    $('stKeyToggle').textContent = isPwd ? '隐藏' : '显示';
+  });
+  $('stApiKey').addEventListener('input', () => { $('stApiKey').dataset.keep = '0'; });
+  $('stContext').addEventListener('input', () => ($('stContextVal').textContent = $('stContext').value));
+
+  $('stTest').addEventListener('click', async () => {
+    const baseUrl = $('stBaseUrl').value.trim();
+    const model = $('stModel').value.trim();
+    const keyInput = $('stApiKey').value.trim();
+    const apiKey = $('stApiKey').dataset.keep === '1' ? '__KEEP__' : (keyInput || '__KEEP__');
+    if (!baseUrl || !model) return showTest('请先填写接口地址与模型名', 'err');
     showTest('正在测试连接…', 'loading');
     try {
       const reply = await testConnection({ baseUrl, model, apiKey });
@@ -820,108 +875,528 @@ function initSettings() {
       showTest(`连接失败：${e.message}`, 'err');
     }
   });
+}
 
-  function showTest(msg, type) {
-    el.testResult.textContent = msg;
-    el.testResult.className = 'test-result show ' + type;
+function showTest(msg, type) {
+  const el = $('stTestResult');
+  el.textContent = msg;
+  el.className = 'test-result show ' + type;
+}
+
+function fillModel() {
+  $('stBaseUrl').value = cfg.apiBaseUrl || '';
+  $('stModel').value = cfg.model || '';
+  const hasKey = !!cfg.apiKeyMasked;
+  $('stApiKey').value = '';
+  $('stApiKey').placeholder = hasKey
+    ? `已配置：${cfg.apiKeyMasked}（留空保持不变，重新填写则覆盖）`
+    : 'sk-... 请粘贴服务商提供的 API Key';
+  $('stApiKey').dataset.keep = hasKey ? '1' : '0';
+  $('stContext').value = cfg.contextTurns ?? 10;
+  $('stContextVal').textContent = cfg.contextTurns ?? 10;
+  const match = [...$('stProvider').options].find((o) => o.value === `${cfg.apiBaseUrl}|${cfg.model}`);
+  $('stProvider').value = match ? match.value : 'custom';
+}
+
+// ---------- 人格与记忆 ----------
+function bindPersona() {
+  const fields = { pzName: 'assistantName', pzRole: 'assistantRole', pzTraits: 'assistantTraits', pzStyle: 'styleRules', pzCustom: 'customPrompt', pzUser: 'userName', pzAlias: 'userAlias', pzProfile: 'userProfile' };
+  Object.entries(fields).forEach(([id, key]) => {
+    const el = $(id);
+    el.addEventListener('change', async () => {
+      persona = await window.xw.personaSet({ [key]: el.value });
+      setToast('已保存');
+    });
+  });
+
+  const addMem = async () => {
+    const v = $('memInput').value.trim();
+    if (!v) return;
+    await window.xw.memoryAdd({ content: v, category: 'fact', source: 'user' });
+    $('memInput').value = '';
+    fillPersona();
+  };
+  $('memAddBtn').addEventListener('click', addMem);
+  $('memInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') addMem(); });
+  $('memClear').addEventListener('click', async () => {
+    if (!confirm('确定清空全部长期记忆？')) return;
+    await window.xw.memoryClear();
+    fillPersona();
+  });
+}
+
+async function fillPersona() {
+  persona = await window.xw.personaGet();
+  const map = { pzName: 'assistantName', pzRole: 'assistantRole', pzTraits: 'assistantTraits', pzStyle: 'styleRules', pzCustom: 'customPrompt', pzUser: 'userName', pzAlias: 'userAlias', pzProfile: 'userProfile' };
+  Object.entries(map).forEach(([id, key]) => { const el = $(id); if (el) el.value = persona[key] || ''; });
+
+  const list = await window.xw.memoryList();
+  $('memCount').textContent = list.length;
+  const box = $('memList');
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">还没有记忆。让小问记住点什么吧。</div>';
+    return;
   }
+  [...list].reverse().forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'mem-item';
+    const txt = document.createElement('div');
+    txt.className = 'mem-text';
+    txt.textContent = m.content;
+    const tag = document.createElement('span');
+    tag.className = 'mem-tag';
+    tag.textContent = m.category || 'fact';
+    const del = document.createElement('button');
+    del.textContent = '删除';
+    del.onclick = async () => { await window.xw.memoryRemove(m.id); fillPersona(); };
+    row.appendChild(txt);
+    row.appendChild(tag);
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
 
-  el.openData.addEventListener('click', () => window.xw.openUserData());
+// ---------- Agent ----------
+function bindAgent() {
+  const toggles = { agEnabled: 'agentEnabled', agUseTools: 'agentUseTools', agUseMcp: 'agentUseMcp', agUseSkills: 'agentUseSkills', agUseMemory: 'agentUseMemory' };
+  Object.entries(toggles).forEach(([id, key]) => {
+    $(id).addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: $(id).checked });
+      setToast('已保存');
+    });
+  });
+  $('agConfirm').addEventListener('change', async () => {
+    await window.xw.toolsSettingsSet({ confirmMode: $('agConfirm').value });
+  });
+  $('agTimeout').addEventListener('change', async () => {
+    await window.xw.toolsSettingsSet({ shellTimeoutMs: Number($('agTimeout').value) * 1000 });
+  });
+  $('agPaths').addEventListener('change', async () => {
+    const arr = $('agPaths').value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    await window.xw.toolsSettingsSet({ allowPaths: arr });
+  });
+}
 
-  // ---- 显示与兼容性 ----
-  async function refreshGpuStatus() {
-    try {
-      const st = await window.xw.gpuStatus();
-      const enabled = st.hardwareAcceleration;
-      el.gpuDisabled.checked = !enabled;
+async function fillAgent() {
+  $('agEnabled').checked = cfg.agentEnabled !== false;
+  $('agUseTools').checked = cfg.agentUseTools !== false;
+  $('agUseMcp').checked = cfg.agentUseMcp !== false;
+  $('agUseSkills').checked = cfg.agentUseSkills !== false;
+  $('agUseMemory').checked = cfg.agentUseMemory !== false;
 
-      let txt = enabled
-        ? '当前：硬件加速已启用（推荐）'
-        : `当前：已禁用硬件加速\n原因：${st.reason}`;
+  const s = await window.xw.toolsSettingsGet();
+  $('agConfirm').value = s.confirmMode || 'danger';
+  $('agTimeout').value = Math.round((s.shellTimeoutMs || 30000) / 1000);
+  $('agPaths').value = (s.allowPaths || []).join('\n');
 
-      const g = st.gpuFeatureStatus;
-      if (g && g.gpu_compositing) {
-        txt += `\nGPU 合成：${g.gpu_compositing}`;
+  const tools = await window.xw.toolsList();
+  const box = $('toolList');
+  box.innerHTML = '';
+  tools.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'tool-row' + (t.danger ? ' danger' : '');
+    row.innerHTML = `<div><b>${escapeHtml(t.name)}</b><div class="tool-desc">${escapeHtml(t.description || '')}</div></div>`;
+    box.appendChild(row);
+  });
+}
+
+// ---------- MCP ----------
+function bindMcp() {
+  $('mcpTransport').addEventListener('change', () => {
+    const isStdio = $('mcpTransport').value === 'stdio';
+    document.querySelectorAll('.mcp-stdio').forEach((e) => (e.style.display = isStdio ? '' : 'none'));
+    document.querySelectorAll('.mcp-http').forEach((e) => (e.style.display = isStdio ? 'none' : ''));
+  });
+
+  $('mcpAddBtn').addEventListener('click', async () => {
+    const transport = $('mcpTransport').value;
+    const cfgItem = {
+      name: $('mcpName').value.trim() || 'mcp-server',
+      transport,
+      command: $('mcpCommand').value.trim(),
+      args: $('mcpArgs').value.trim() ? $('mcpArgs').value.trim().split(/\s+/) : [],
+      url: $('mcpUrl').value.trim(),
+      enabled: true
+    };
+    if (transport === 'stdio' && !cfgItem.command) return setToast('请填写启动命令');
+    if (transport === 'http' && !cfgItem.url) return setToast('请填写服务地址');
+    setToast('正在连接…');
+    await window.xw.mcpAdd(cfgItem);
+    $('mcpName').value = '';
+    $('mcpCommand').value = '';
+    $('mcpArgs').value = '';
+    $('mcpUrl').value = '';
+    fillMcp();
+  });
+}
+
+async function fillMcp() {
+  const [servers, status] = await Promise.all([window.xw.mcpList(), window.xw.mcpStatus()]);
+  const box = $('mcpList');
+  box.innerHTML = '';
+  if (!servers.length) {
+    box.innerHTML = '<div class="empty">还没有配置 MCP 服务器</div>';
+  }
+  servers.forEach((s) => {
+    const live = status.find((x) => x.id === s.id);
+    const row = document.createElement('div');
+    row.className = 'mcp-item' + (live && live.connected ? ' online' : '');
+    const info = document.createElement('div');
+    info.innerHTML = `<b>${escapeHtml(s.name)}</b>
+      <div class="mcp-meta">${s.transport === 'http' ? escapeHtml(s.url || '') : escapeHtml([s.command, ...(s.args || [])].join(' '))}</div>
+      <div class="mcp-meta">${live && live.connected ? `已连接 · ${live.toolCount} 个工具` : (live && live.lastError ? escapeHtml(String(live.lastError).slice(0, 120)) : '未连接')}</div>`;
+    const ops = document.createElement('div');
+    ops.className = 'mcp-ops';
+    const cbtn = document.createElement('button');
+    cbtn.textContent = live && live.connected ? '断开' : '连接';
+    cbtn.onclick = async () => {
+      if (live && live.connected) await window.xw.mcpDisconnect(s.id);
+      else {
+        const r = await window.xw.mcpConnect(s.id);
+        if (r && r.ok === false) setToast('连接失败：' + r.error);
       }
-      el.gpuStatus.textContent = txt;
-      el.gpuStatus.className = 'gpu-status ' + (enabled ? 'ok' : 'warn');
-    } catch (e) {
-      el.gpuStatus.textContent = '无法获取状态：' + e.message;
-      el.gpuStatus.className = 'gpu-status warn';
-    }
-  }
-  refreshGpuStatus();
+      fillMcp();
+    };
+    const dbtn = document.createElement('button');
+    dbtn.textContent = '删除';
+    dbtn.className = 'danger-text';
+    dbtn.onclick = async () => { await window.xw.mcpRemove(s.id); fillMcp(); };
+    ops.appendChild(cbtn);
+    ops.appendChild(dbtn);
+    row.appendChild(info);
+    row.appendChild(ops);
+    box.appendChild(row);
+  });
+  $('mcpStatus').textContent = `已连接 ${status.filter((s) => s.connected).length} / ${servers.length} 个服务器`;
+}
 
-  el.gpuDisabled.addEventListener('change', async () => {
-    await window.xw.gpuSetDisabled(el.gpuDisabled.checked);
-    const tip = el.gpuDisabled.checked
+// ---------- Skills ----------
+function bindSkills() {
+  $('skillOpenDir').addEventListener('click', () => window.xw.skillsOpenDir());
+  $('skillSaveBtn').addEventListener('click', async () => {
+    const id = $('skillId').value.trim();
+    const name = $('skillName').value.trim();
+    if (!id && !name) return setToast('请填写技能 id 或名称');
+    await window.xw.skillsSave({
+      id: id || name,
+      name: name || id,
+      description: $('skillDesc').value.trim(),
+      content: $('skillBody').value
+    });
+    $('skillId').value = ''; $('skillName').value = ''; $('skillDesc').value = ''; $('skillBody').value = '';
+    fillSkills();
+    setToast('技能已保存');
+  });
+}
+
+async function fillSkills() {
+  const list = await window.xw.skillsList();
+  const box = $('skillList');
+  box.innerHTML = '';
+  if (!list.length) box.innerHTML = '<div class="empty">还没有技能</div>';
+  list.forEach((s) => {
+    const row = document.createElement('div');
+    row.className = 'skill-item';
+    row.innerHTML = `<div><b>${escapeHtml(s.name)}</b> <span class="skill-id">${escapeHtml(s.id)}</span>
+      <div class="skill-desc">${escapeHtml(s.description || '')}</div></div>`;
+    const del = document.createElement('button');
+    del.textContent = '删除';
+    del.className = 'danger-text';
+    del.onclick = async () => { await window.xw.skillsDelete(s.id); fillSkills(); };
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
+// ---------- 语音 ----------
+let voiceCatalog = { dashscope: {}, openai: [] };
+
+function bindVoice() {
+  const toggle = () => {
+    const on = $('stAsrProvider').value === 'dashscope';
+    $('stAsrDashBlock').style.display = on ? '' : 'none';
+  };
+  $('stAsrProvider').addEventListener('change', toggle);
+  $('stAsrKeyToggle').addEventListener('click', () => {
+    const el = $('stAsrKey');
+    const isPwd = el.type === 'password';
+    el.type = isPwd ? 'text' : 'password';
+    $('stAsrKeyToggle').textContent = isPwd ? '隐藏' : '显示';
+  });
+  $('stAsrKey').addEventListener('input', () => { $('stAsrKey').dataset.keep = '0'; });
+  $('stAsrSilence').addEventListener('input', () => {
+    $('stAsrSilenceVal').textContent = (Number($('stAsrSilence').value) / 1000).toFixed(1) + 's';
+  });
+  $('stAsrKeyLink').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.xw.openExternal('https://bailian.console.aliyun.com/');
+  });
+
+  $('stAsrTest').addEventListener('click', async () => {
+    const keyInput = $('stAsrKey').value.trim();
+    const apiKey = $('stAsrKey').dataset.keep === '1' ? '__KEEP__' : (keyInput || '__KEEP__');
+    if ($('stAsrProvider').value !== 'dashscope') {
+      return showAsrTest('系统内置识别依赖云端服务，无法离线测试，请直接试用语音输入', 'err');
+    }
+    showAsrTest('正在测试…', 'loading');
+    try {
+      const res = await window.xw.asrTest({ apiKey, model: $('stAsrModel').value.trim() });
+      if (res && res.ok) showAsrTest(res.text || '连接成功 ✓', 'ok');
+      else showAsrTest('失败：' + ((res && res.error) || '未知错误'), 'err');
+    } catch (e) {
+      showAsrTest('失败：' + e.message, 'err');
+    }
+  });
+
+  $('stTtsProvider').addEventListener('change', toggleTtsBlocks);
+  $('stTtsDashModel').addEventListener('change', fillCosyVoices);
+  $('stTtsKeyToggle').addEventListener('click', () => {
+    const el = $('stTtsKey');
+    const isPwd = el.type === 'password';
+    el.type = isPwd ? 'text' : 'password';
+    $('stTtsKeyToggle').textContent = isPwd ? '隐藏' : '显示';
+  });
+  $('stTtsKey').addEventListener('input', () => { $('stTtsKey').dataset.keep = '0'; });
+  $('stTtsRate').addEventListener('input', () => {
+    $('stRateVal').textContent = (1 + Number($('stTtsRate').value) / 10).toFixed(1) + 'x';
+  });
+  $('stTtsVolume').addEventListener('input', () => ($('stVolumeVal').textContent = $('stTtsVolume').value + '%'));
+
+  $('stTestVoice').addEventListener('click', async () => {
+    const provider = $('stTtsProvider').value;
+    const text = '你好主人，我是小问，这是语音朗读效果。';
+    if (provider === 'web') {
+      speech.speak(text, {
+        rate: 1 + Number($('stTtsRate').value) / 10,
+        volume: Number($('stTtsVolume').value) / 100,
+        voiceName: $('stVoice').value
+      });
+      return;
+    }
+    $('stTtsTestResult').textContent = '正在合成…';
+    $('stTtsTestResult').className = 'test-result show loading';
+    try {
+      // 先用界面上未保存的值测，测完不影响已保存配置
+      const r = await window.xw.ttsTest({
+        provider,
+        apiKey: $('stTtsKey').value.trim() || undefined,
+        model: $('stTtsDashModel').value,
+        voice: $('stTtsDashVoice').value,
+        baseUrl: $('stTtsOpenaiUrl').value.trim() || undefined
+      });
+      if (r && r.ok && r.file) {
+        await playAudioFile(r.file);
+        $('stTtsTestResult').textContent = `合成成功 ✓ ${Math.round(r.bytes / 1024)} KB`;
+        $('stTtsTestResult').className = 'test-result show ok';
+      } else {
+        $('stTtsTestResult').textContent = '失败：' + ((r && r.error) || '未知错误');
+        $('stTtsTestResult').className = 'test-result show err';
+      }
+    } catch (e) {
+      $('stTtsTestResult').textContent = '失败：' + e.message;
+      $('stTtsTestResult').className = 'test-result show err';
+    }
+  });
+}
+
+function toggleTtsBlocks() {
+  const v = $('stTtsProvider').value;
+  $('ttsWebBlock').style.display = v === 'web' ? '' : 'none';
+  $('ttsDashBlock').style.display = v === 'dashscope' ? '' : 'none';
+  $('ttsOpenaiBlock').style.display = v === 'openai' ? '' : 'none';
+}
+
+function fillCosyVoices() {
+  const model = $('stTtsDashModel').value;
+  const list = (voiceCatalog.dashscope && voiceCatalog.dashscope[model]) || [];
+  const sel = $('stTtsDashVoice');
+  sel.innerHTML = '';
+  list.forEach((v) => {
+    const o = document.createElement('option');
+    o.value = v.id;
+    o.textContent = v.name;
+    sel.appendChild(o);
+  });
+  if (cfg.ttsDashVoice) sel.value = cfg.ttsDashVoice;
+}
+
+function fillSystemVoices() {
+  const list = speech.getVoices();
+  const sel = $('stVoice');
+  if (!list.length) return;
+  sel.innerHTML = '<option value="">自动选择（推荐）</option>';
+  list.forEach((v) => {
+    const o = document.createElement('option');
+    o.value = v.name;
+    o.textContent = `${v.name} · ${v.lang}${v.localService ? ' (本地)' : ''}`;
+    sel.appendChild(o);
+  });
+  sel.value = cfg.ttsVoice || '';
+}
+
+async function fillVoice() {
+  $('stAsrProvider').value = cfg.asrProvider || 'dashscope';
+  $('stAsrDashBlock').style.display = cfg.asrProvider === 'system' ? 'none' : '';
+  const hasAsrKey = !!cfg.asrApiKeyMasked;
+  $('stAsrKey').value = '';
+  $('stAsrKey').placeholder = hasAsrKey
+    ? `已配置：${cfg.asrApiKeyMasked}（留空保持不变）`
+    : 'sk-... 请粘贴百炼 API Key';
+  $('stAsrKey').dataset.keep = hasAsrKey ? '1' : '0';
+  $('stAsrModel').value = cfg.asrModel || 'paraformer-realtime-v2';
+  const sil = cfg.asrSilenceMs ?? 2000;
+  $('stAsrSilence').value = sil;
+  $('stAsrSilenceVal').textContent = (sil / 1000).toFixed(1) + 's';
+
+  // TTS
+  try { voiceCatalog = await window.xw.ttsVoices(); } catch (e) { voiceCatalog = { dashscope: {}, openai: [] }; }
+  $('stTtsProvider').value = cfg.ttsProvider || 'web';
+  $('stTtsEnabled').checked = cfg.ttsEnabled !== false;
+  $('stTtsRate').value = cfg.ttsRate || 0;
+  $('stRateVal').textContent = (1 + (cfg.ttsRate || 0) / 10).toFixed(1) + 'x';
+  $('stTtsVolume').value = cfg.ttsVolume ?? 100;
+  $('stVolumeVal').textContent = (cfg.ttsVolume ?? 100) + '%';
+
+  $('stTtsDashModel').value = cfg.ttsDashModel || 'cosyvoice-v2';
+  fillCosyVoices();
+  $('stTtsDashFormat').value = cfg.ttsDashFormat || 'mp3';
+  const hasTtsKey = !!cfg.ttsApiKeyMasked;
+  $('stTtsKey').value = '';
+  $('stTtsKey').placeholder = hasTtsKey ? `已配置：${cfg.ttsApiKeyMasked}（留空则复用识别 Key）` : '留空则复用上面的百炼 Key';
+  $('stTtsKey').dataset.keep = hasTtsKey ? '1' : '0';
+
+  $('stTtsOpenaiUrl').value = cfg.ttsOpenaiBaseUrl || '';
+  $('stTtsOpenaiModel').value = cfg.ttsOpenaiModel || 'tts-1';
+  const osel = $('stTtsOpenaiVoice');
+  osel.innerHTML = '';
+  (voiceCatalog.openai || []).forEach((v) => {
+    const o = document.createElement('option');
+    o.value = v.id;
+    o.textContent = v.name;
+    osel.appendChild(o);
+  });
+  osel.value = cfg.ttsOpenaiVoice || 'alloy';
+
+  toggleTtsBlocks();
+  fillSystemVoices();
+  setTimeout(fillSystemVoices, 700);
+}
+
+function showAsrTest(msg, type) {
+  const el = $('stAsrTestResult');
+  el.textContent = msg;
+  el.className = 'test-result show ' + type;
+}
+
+// ---------- 高级 ----------
+function bindAdvanced() {
+  $('stGpuDisabled').addEventListener('change', async () => {
+    await window.xw.gpuSetDisabled($('stGpuDisabled').checked);
+    const tip = $('stGpuDisabled').checked
       ? '已设置：下次启动将禁用硬件加速。点下方「立即重启程序」生效。'
       : '已设置：下次启动恢复硬件加速。点下方「立即重启程序」生效。';
-    el.gpuStatus.textContent = tip;
-    el.gpuStatus.className = 'gpu-status warn';
+    $('stGpuStatus').textContent = tip;
+    $('stGpuStatus').className = 'gpu-status warn';
   });
-
-  el.restart.addEventListener('click', () => {
-    window.xw.gpuRestart();
-  });
-
-  el.clearHistory.addEventListener('click', async () => {
+  $('stRestart').addEventListener('click', () => window.xw.gpuRestart());
+  $('stOpenData').addEventListener('click', () => window.xw.openUserData());
+  $('stClearHistory').addEventListener('click', async () => {
+    if (!confirm('确定清空所有对话历史？')) return;
     await window.xw.clearHistory();
-    el.clearHistory.textContent = '已清空 ✓';
-    setTimeout(() => (el.clearHistory.textContent = '清空所有对话历史'), 1600);
+    for (const s of (await window.xw.sessionList()).sessions) await window.xw.sessionDelete(s.id);
+    setToast('已清空');
   });
+}
 
-  // 保存
-  el.save.addEventListener('click', async () => {
-    const patch = {
-      apiBaseUrl: el.baseUrl.value.trim(),
-      model: el.model.value.trim(),
-      systemPrompt: el.systemPrompt.value,
-      contextTurns: Number(el.context.value),
-      ttsEnabled: el.ttsEnabled.checked,
-      ttsRate: Number(el.ttsRate.value),
-      ttsVolume: Number(el.ttsVolume.value),
-      ttsVoice: el.voice.value,
-      ballOpacity: Number(el.opacity.value) / 100,
-      hotkey: el.hotkey.value.trim() || 'Alt+Space',
-      // 语音识别
-      asrProvider: el.asrProvider.value,
-      asrModel: el.asrModel.value.trim() || 'paraformer-realtime-v2',
-      asrSilenceMs: Number(el.asrSilence.value) || 2000
-    };
-
-    // 输入框留空 = 沿用已保存的 Key；填了新值才覆盖
-    const keyInput = el.apiKey.value.trim();
-    if (!keyInput) {
-      patch.apiKey = '__KEEP__';
-    } else if (keyInput.includes('***')) {
-      el.apiKey.placeholder = '这个值里包含 ***（是打码文本），请粘贴完整 Key';
-      el.apiKey.classList.add('input-error');
-      setTimeout(() => el.apiKey.classList.remove('input-error'), 2500);
-      return;
-    } else {
-      patch.apiKey = keyInput;
+async function refreshGpuStatus() {
+  try {
+    const st = await window.xw.gpuStatus();
+    const enabled = st.hardwareAcceleration;
+    $('stGpuDisabled').checked = !enabled;
+    let txt = enabled ? '当前：硬件加速已启用（推荐）' : `当前：已禁用硬件加速\n原因：${st.reason}`;
+    if (st.gpuFeatureStatus && st.gpuFeatureStatus.gpu_compositing) {
+      txt += `\nGPU 合成：${st.gpuFeatureStatus.gpu_compositing}`;
     }
+    $('stGpuStatus').textContent = txt;
+    $('stGpuStatus').className = 'gpu-status ' + (enabled ? 'ok' : 'warn');
+  } catch (e) {
+    $('stGpuStatus').textContent = '无法获取状态：' + e.message;
+    $('stGpuStatus').className = 'gpu-status warn';
+  }
+}
 
-    // 语音识别 Key 同理
-    const asrKeyInput = el.asrKey.value.trim();
-    if (!asrKeyInput) {
-      patch.asrApiKey = '__KEEP__';
-    } else if (asrKeyInput.includes('***')) {
-      el.asrKey.placeholder = '这个值里包含 ***（是打码文本），请粘贴完整 Key';
-      el.asrKey.classList.add('input-error');
-      setTimeout(() => el.asrKey.classList.remove('input-error'), 2500);
-      return;
-    } else {
-      patch.asrApiKey = asrKeyInput;
-    }
+// ---------- 保存 ----------
+function collectPatch() {
+  const patch = {
+    apiBaseUrl: $('stBaseUrl').value.trim(),
+    model: $('stModel').value.trim(),
+    contextTurns: Number($('stContext').value),
+    ttsEnabled: $('stTtsEnabled').checked,
+    ttsProvider: $('stTtsProvider').value,
+    ttsRate: Number($('stTtsRate').value),
+    ttsVolume: Number($('stTtsVolume').value),
+    ttsVoice: $('stVoice').value,
+    ttsDashModel: $('stTtsDashModel').value,
+    ttsDashVoice: $('stTtsDashVoice').value,
+    ttsDashFormat: $('stTtsDashFormat').value,
+    ttsOpenaiBaseUrl: $('stTtsOpenaiUrl').value.trim(),
+    ttsOpenaiModel: $('stTtsOpenaiModel').value.trim(),
+    ttsOpenaiVoice: $('stTtsOpenaiVoice').value,
+    ballOpacity: Number($('stOpacity').value) / 100,
+    hotkey: $('stHotkey').value.trim() || 'Alt+Space',
+    asrProvider: $('stAsrProvider').value,
+    asrModel: $('stAsrModel').value.trim() || 'paraformer-realtime-v2',
+    asrSilenceMs: Number($('stAsrSilence').value) || 2000
+  };
 
-    await window.xw.setConfig(patch);
-    el.apiKey.value = '';
-    el.asrKey.value = '';
-    el.save.textContent = '已保存 ✓';
-    setTimeout(() => (el.save.textContent = '保存'), 1500);
-  });
+  const keyInput = $('stApiKey').value.trim();
+  patch.apiKey = !keyInput ? '__KEEP__' : keyInput;
+
+  const asrInput = $('stAsrKey').value.trim();
+  patch.asrApiKey = !asrInput ? '__KEEP__' : asrInput;
+
+  const ttsInput = $('stTtsKey').value.trim();
+  patch.ttsApiKey = !ttsInput ? '__KEEP__' : ttsInput;
+
+  const oaiInput = $('stTtsOpenaiKey').value.trim();
+  patch.ttsOpenaiKey = !oaiInput ? '__KEEP__' : oaiInput;
+
+  return patch;
+}
+
+// 保存按钮（顶部）
+document.addEventListener('DOMContentLoaded', () => {
+  const saveBtn = $('stSave');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      cfg = await window.xw.setConfig(collectPatch());
+      $('stApiKey').value = '';
+      $('stAsrKey').value = '';
+      $('stTtsKey').value = '';
+      $('stTtsOpenaiKey').value = '';
+      saveBtn.textContent = '已保存 ✓';
+      setTimeout(() => (saveBtn.textContent = '保存'), 1500);
+      fillModel();
+      fillVoice();
+    });
+  }
+});
+
+// ---------- 轻提示 ----------
+let toastTimer = null;
+function setToast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
 // ============ 启动 ============

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src *" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' file:; script-src 'self'; connect-src *" />
   <title>小问助手</title>
   <link rel="stylesheet" href="./styles/panel.css" />
 </head>
@@ -12,14 +12,24 @@
     <!-- 标题栏 -->
     <header class="titlebar">
       <div class="tb-left">
+        <button class="icon-btn" id="btnSessions" title="会话列表">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
         <div class="avatar">问</div>
         <div class="tb-title">
-          <span class="name">小问助手</span>
+          <span class="name" id="appName">小问助手</span>
           <span class="model" id="modelTag">deepseek-chat</span>
         </div>
       </div>
       <div class="tb-right">
-        <button class="icon-btn" id="btnVoice" title="语音问答 (Ctrl+Shift+M)">
+        <button class="icon-btn" id="btnAgent" title="Agent 工具能力">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnVoice" title="语音问答 (Alt+Space)">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
@@ -36,7 +46,7 @@
         <button class="icon-btn" id="btnSettings" title="设置">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
         </button>
         <button class="icon-btn" id="btnMin" title="隐藏到托盘">
@@ -52,6 +62,16 @@
         </button>
       </div>
     </header>
+
+    <!-- 会话抽屉 -->
+    <aside class="drawer" id="sessionDrawer">
+      <div class="drawer-head">
+        <span>历史会话</span>
+        <button class="btn-ghost small" id="btnNewSession">+ 新建</button>
+      </div>
+      <div class="drawer-list" id="sessionList"></div>
+    </aside>
+    <div class="drawer-mask" id="drawerMask"></div>
 
     <!-- 语音浮层 -->
     <div class="voice-overlay" id="voiceOverlay">
@@ -69,12 +89,13 @@
     <main class="messages" id="messages">
       <div class="welcome" id="welcome">
         <div class="welcome-logo">问</div>
-        <h2>你好，我是小问</h2>
-        <p>随时问我任何问题。点击右下角悬浮球或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 语音提问。</p>
+        <h2 id="welcomeTitle">你好，我是小问</h2>
+        <p id="welcomeDesc">随时问我任何问题。点击右下角悬浮球或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 语音提问。</p>
         <div class="quick-asks">
-          <button class="quick" data-q="帮我写一封请假邮件">帮我写一封请假邮件</button>
-          <button class="quick" data-q="总结一下今天要做的事">总结今天要做的事</button>
-          <button class="quick" data-q="把这段话翻译成英文：今天天气不错">翻译一句话</button>
+          <button class="quick" data-q="现在几点了？顺便看看电脑内存还剩多少">现在几点 / 内存剩多少</button>
+          <button class="quick" data-q="帮我看看用户目录下有哪些文件夹">看看我的用户目录</button>
+          <button class="quick" data-q="截个屏，保存到用户目录">截个屏</button>
+          <button class="quick" data-q="记住：我喜欢简洁直接的回答">记住一件事</button>
         </div>
       </div>
     </main>
@@ -94,7 +115,7 @@
         <span id="statusTip">就绪</span>
         <span class="spacer"></span>
         <label class="toggle-mini">
-          <input type="checkbox" id="ttsToggle" checked />
+          <input type="checkbox" id="ttsToggle" />
           <span>朗读回答</span>
         </label>
       </div>
@@ -108,146 +129,392 @@
       <button class="btn-primary" id="stSave">保存</button>
     </div>
 
-    <div class="st-body">
-      <section class="st-section">
-        <h3>AI 模型</h3>
-        <div class="field">
-          <label>服务商</label>
-          <select id="stProvider">
-            <option value="https://api.deepseek.com|deepseek-chat">DeepSeek</option>
-            <option value="https://dashscope.aliyuncs.com/compatible-mode/v1|qwen-plus">通义千问 (Qwen)</option>
-            <option value="https://api.moonshot.cn/v1|moonshot-v1-8k">月之暗面 Kimi</option>
-            <option value="https://open.bigmodel.cn/api/paas/v4|glm-4-flash">智谱 GLM</option>
-            <option value="https://api.openai.com/v1|gpt-4o-mini">OpenAI</option>
-            <option value="custom">自定义…</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>API 地址 (Base URL)</label>
-          <input type="text" id="stBaseUrl" placeholder="https://api.deepseek.com" />
-          <div class="hint">兼容 OpenAI 格式的接口地址，末尾无需带 /chat/completions</div>
-        </div>
-        <div class="field">
-          <label>模型名称</label>
-          <input type="text" id="stModel" placeholder="deepseek-chat" />
-        </div>
-        <div class="field">
-          <label>API Key</label>
-          <div class="key-row">
-            <input type="password" id="stApiKey" placeholder="sk-..." />
-            <button class="btn-ghost" id="stKeyToggle">显示</button>
+    <div class="st-wrap">
+      <nav class="st-nav">
+        <button class="st-nav-item active" data-tab="general">常规</button>
+        <button class="st-nav-item" data-tab="model">AI 模型</button>
+        <button class="st-nav-item" data-tab="persona">人格与记忆</button>
+        <button class="st-nav-item" data-tab="agent">Agent 能力</button>
+        <button class="st-nav-item" data-tab="mcp">MCP 服务器</button>
+        <button class="st-nav-item" data-tab="skills">Skills</button>
+        <button class="st-nav-item" data-tab="voice">语音</button>
+        <button class="st-nav-item" data-tab="advanced">显示与数据</button>
+      </nav>
+
+      <div class="st-body">
+
+        <!-- ---------- 常规 ---------- -->
+        <section class="st-section active" data-tab="general">
+          <h3>开机与启动</h3>
+          <div class="field row">
+            <label><b>开机自动启动</b><span class="hint-inline">登录系统后自动在托盘运行</span></label>
+            <label class="switch"><input type="checkbox" id="stAutoStart" /><span></span></label>
           </div>
-          <div class="hint">密钥仅保存在本机 <code>userData/config.json</code>，不会上传</div>
-        </div>
-        <button class="btn-ghost full" id="stTest">测试连接</button>
-        <div class="test-result" id="stTestResult"></div>
-      </section>
-
-      <section class="st-section">
-        <h3>对话行为</h3>
-        <div class="field">
-          <label>系统提示词（决定小问的性格与回答风格）</label>
-          <textarea id="stSystemPrompt" rows="4"></textarea>
-        </div>
-        <div class="field">
-          <label>上下文轮数 <span class="val" id="stContextVal">10</span></label>
-          <input type="range" id="stContext" min="0" max="30" step="1" value="10" />
-          <div class="hint">每次请求携带的历史消息数量，越大越费 token</div>
-        </div>
-      </section>
-
-      <section class="st-section">
-        <h3>语音</h3>
-
-        <div class="field">
-          <label>语音识别方式</label>
-          <select id="stAsrProvider">
-            <option value="dashscope">阿里云百炼（推荐，国内可用）</option>
-            <option value="system">系统内置（依赖云端，国内常不可用）</option>
-          </select>
-          <div class="hint">识别你的说话内容用此项；下面的语速/音色只影响「朗读 AI 回答」</div>
-        </div>
-
-        <div class="asr-block" id="stAsrDashBlock">
           <div class="field">
-            <label>百炼 API Key</label>
+            <label>全局快捷键（语音问答）</label>
+            <input type="text" id="stHotkey" placeholder="Alt+Space" />
+            <div class="hint">点击输入框后按下组合键即可录制。推荐 Alt+Space 或 Ctrl+Alt+Q</div>
+          </div>
+
+          <h3>悬浮球</h3>
+          <div class="field">
+            <label>不透明度 <span class="val" id="stOpacityVal">92%</span></label>
+            <input type="range" id="stOpacity" min="30" max="100" step="1" value="92" />
+          </div>
+        </section>
+
+        <!-- ---------- AI 模型 ---------- -->
+        <section class="st-section" data-tab="model">
+          <div class="field">
+            <label>服务商</label>
+            <select id="stProvider">
+              <option value="https://api.deepseek.com|deepseek-chat">DeepSeek</option>
+              <option value="https://dashscope.aliyuncs.com/compatible-mode/v1|qwen-plus">通义千问 (Qwen)</option>
+              <option value="https://api.moonshot.cn/v1|moonshot-v1-8k">月之暗面 Kimi</option>
+              <option value="https://open.bigmodel.cn/api/paas/v4|glm-4-flash">智谱 GLM</option>
+              <option value="https://api.openai.com/v1|gpt-4o-mini">OpenAI</option>
+              <option value="custom">自定义…</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>API 地址 (Base URL)</label>
+            <input type="text" id="stBaseUrl" placeholder="https://api.deepseek.com" />
+            <div class="hint">兼容 OpenAI 格式的接口地址，末尾无需带 /chat/completions</div>
+          </div>
+          <div class="field">
+            <label>模型名称</label>
+            <input type="text" id="stModel" placeholder="deepseek-chat" />
+          </div>
+          <div class="field">
+            <label>API Key</label>
             <div class="key-row">
-              <input type="password" id="stAsrKey" placeholder="sk-..." />
-              <button class="btn-ghost" id="stAsrKeyToggle">显示</button>
+              <input type="password" id="stApiKey" placeholder="sk-..." />
+              <button class="btn-ghost" id="stKeyToggle">显示</button>
             </div>
-            <div class="hint">
-              在 <a href="#" id="stAsrKeyLink">百炼控制台</a> 右上角「API-KEY」中创建。
-              密钥仅保存在本机，不会上传
+            <div class="hint">密钥仅保存在本机 <code>userData/config.json</code>，不会上传</div>
+          </div>
+          <div class="field">
+            <label>上下文轮数 <span class="val" id="stContextVal">10</span></label>
+            <input type="range" id="stContext" min="0" max="30" step="1" value="10" />
+            <div class="hint">每次请求携带的历史消息数量，越大越费 token</div>
+          </div>
+          <button class="btn-ghost full" id="stTest">测试连接</button>
+          <div class="test-result" id="stTestResult"></div>
+        </section>
+
+        <!-- ---------- 人格与记忆 ---------- -->
+        <section class="st-section" data-tab="persona">
+          <h3>我是谁</h3>
+          <div class="field two">
+            <div>
+              <label>助手名字</label>
+              <input type="text" id="pzName" placeholder="小问" />
+            </div>
+            <div>
+              <label>角色定位</label>
+              <input type="text" id="pzRole" placeholder="贾维斯式的桌面 AI 智能助理" />
             </div>
           </div>
           <div class="field">
-            <label>识别模型</label>
-            <input type="text" id="stAsrModel" placeholder="paraformer-realtime-v2" />
-            <div class="hint">16k 中文场景用 paraformer-realtime-v2；8k 电话录音用 paraformer-realtime-8k-v2</div>
+            <label>性格描述</label>
+            <textarea id="pzTraits" rows="2" placeholder="冷静、高效、可靠，略带幽默"></textarea>
           </div>
           <div class="field">
-            <label>静音自动结束 <span class="val" id="stAsrSilenceVal">2.0s</span></label>
-            <input type="range" id="stAsrSilence" min="500" max="6000" step="100" value="2000" />
-            <div class="hint">停止说话超过该时长即自动发送，无需手动点击</div>
+            <label>说话风格要求</label>
+            <textarea id="pzStyle" rows="3"></textarea>
           </div>
-          <button class="btn-ghost full" id="stAsrTest">测试语音识别</button>
-          <div class="test-result" id="stAsrTestResult"></div>
-        </div>
+          <div class="field">
+            <label>额外要求（可选，会追加到系统提示词）</label>
+            <textarea id="pzCustom" rows="2" placeholder="例如：回答里不要出现 Markdown 符号，因为要朗读出来"></textarea>
+          </div>
 
-        <div class="field row">
-          <label>朗读 AI 回答</label>
-          <label class="switch"><input type="checkbox" id="stTtsEnabled" /><span></span></label>
-        </div>
-        <div class="field">
-          <label>语速 <span class="val" id="stRateVal">1.0x</span></label>
-          <input type="range" id="stTtsRate" min="-10" max="10" step="1" value="0" />
-        </div>
-        <div class="field">
-          <label>音量 <span class="val" id="stVolumeVal">100%</span></label>
-          <input type="range" id="stTtsVolume" min="0" max="100" step="5" value="100" />
-        </div>
-        <div class="field">
-          <label>语音音色</label>
-          <select id="stVoice"></select>
-          <div class="hint">使用系统内置语音引擎（Windows: Microsoft Huihui/Yunxi 等）</div>
-        </div>
-        <button class="btn-ghost full" id="stTestVoice">试听朗读效果</button>
-      </section>
+          <h3>主人是谁</h3>
+          <div class="field two">
+            <div>
+              <label>你的称呼</label>
+              <input type="text" id="pzUser" placeholder="主人" />
+            </div>
+            <div>
+              <label>别名 / 小名</label>
+              <input type="text" id="pzAlias" placeholder="永贵" />
+            </div>
+          </div>
+          <div class="field">
+            <label>关于你的背景（让小问更懂你）</label>
+            <textarea id="pzProfile" rows="3" placeholder="例如：我做 AI 平台产品，前端用 Vue3，后端 Django；喜欢简洁直接的沟通方式"></textarea>
+          </div>
 
-      <section class="st-section">
-        <h3>悬浮球</h3>
-        <div class="field">
-          <label>不透明度 <span class="val" id="stOpacityVal">92%</span></label>
-          <input type="range" id="stOpacity" min="30" max="100" step="1" value="92" />
-        </div>
-        <div class="field">
-          <label>全局快捷键（语音问答）</label>
-          <input type="text" id="stHotkey" placeholder="Alt+Space" />
-          <div class="hint">点击输入框后按下组合键即可录制。推荐 Alt+Space 或 Ctrl+Alt+Q</div>
-        </div>
-        <div class="field">
-          <label>数据目录</label>
+          <h3>长期记忆 <span class="badge" id="memCount">0</span></h3>
+          <div class="hint">小问会记住关于你的事实与偏好，每次对话自动检索相关记忆。</div>
+          <div class="mem-add">
+            <input type="text" id="memInput" placeholder="输入一条要记住的事，回车添加" />
+            <button class="btn-ghost" id="memAddBtn">添加</button>
+          </div>
+          <div class="mem-list" id="memList"></div>
+          <button class="btn-ghost full danger-text" id="memClear">清空全部记忆</button>
+        </section>
+
+        <!-- ---------- Agent 能力 ---------- -->
+        <section class="st-section" data-tab="agent">
+          <div class="field row">
+            <label><b>启用 Agent 模式</b><span class="hint-inline">让小问自主调用工具完成电脑操作</span></label>
+            <label class="switch"><input type="checkbox" id="agEnabled" /><span></span></label>
+          </div>
+          <div class="hint">关闭后退化为普通聊天机器人，不会碰你的电脑。</div>
+
+          <h3>能力开关</h3>
+          <div class="field row">
+            <label>内置工具（命令 / 文件 / 进程 / 截图 / 剪贴板）</label>
+            <label class="switch"><input type="checkbox" id="agUseTools" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>MCP 服务器工具</label>
+            <label class="switch"><input type="checkbox" id="agUseMcp" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>Skills 技能</label>
+            <label class="switch"><input type="checkbox" id="agUseSkills" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>长期记忆注入</label>
+            <label class="switch"><input type="checkbox" id="agUseMemory" /><span></span></label>
+          </div>
+
+          <h3>安全</h3>
+          <div class="field">
+            <label>操作确认方式</label>
+            <select id="agConfirm">
+              <option value="danger">仅高危操作需要确认（推荐）</option>
+              <option value="all">所有工具调用都要确认</option>
+              <option value="none">全部自动执行（谨慎）</option>
+            </select>
+            <div class="hint">高危操作指：执行命令、写/删文件、结束进程。</div>
+          </div>
+          <div class="field">
+            <label>命令超时（秒）</label>
+            <input type="number" id="agTimeout" min="5" max="300" step="5" />
+          </div>
+          <div class="field">
+            <label>额外允许读写的目录（每行一个）</label>
+            <textarea id="agPaths" rows="3" placeholder="D:\work&#10;E:\projects"></textarea>
+            <div class="hint">默认允许：用户目录、下载目录、临时目录</div>
+          </div>
+
+          <h3>工具清单</h3>
+          <div class="tool-list" id="toolList"></div>
+        </section>
+
+        <!-- ---------- MCP ---------- -->
+        <section class="st-section" data-tab="mcp">
+          <h3>MCP 服务器</h3>
+          <div class="hint">
+            MCP（Model Context Protocol）让小问接入外部工具生态。支持 stdio（本地进程）与 http（远程）两种接入方式。
+          </div>
+          <div class="mcp-status" id="mcpStatus"></div>
+
+          <div class="mcp-form">
+            <div class="field two">
+              <div>
+                <label>名称</label>
+                <input type="text" id="mcpName" placeholder="my-mcp" />
+              </div>
+              <div>
+                <label>接入方式</label>
+                <select id="mcpTransport">
+                  <option value="stdio">stdio（本地命令）</option>
+                  <option value="http">http（远程地址）</option>
+                </select>
+              </div>
+            </div>
+            <div class="field mcp-stdio">
+              <label>启动命令</label>
+              <input type="text" id="mcpCommand" placeholder="npx" />
+            </div>
+            <div class="field mcp-stdio">
+              <label>参数（空格分隔）</label>
+              <input type="text" id="mcpArgs" placeholder="-y @modelcontextprotocol/server-filesystem C:\Users\me" />
+            </div>
+            <div class="field mcp-http" style="display:none">
+              <label>服务地址</label>
+              <input type="text" id="mcpUrl" placeholder="http://localhost:3000/mcp" />
+            </div>
+            <button class="btn-ghost full" id="mcpAddBtn">添加并连接</button>
+          </div>
+
+          <h3>已配置</h3>
+          <div class="mcp-list" id="mcpList"></div>
+        </section>
+
+        <!-- ---------- Skills ---------- -->
+        <section class="st-section" data-tab="skills">
+          <h3>Skills 技能包</h3>
+          <div class="hint">
+            技能是给小问的「工作手册」，放在 <code>userData/jarvis/skills/</code> 下。小问会看到技能清单，需要时再加载正文。
+          </div>
+          <button class="btn-ghost full" id="skillOpenDir">打开技能目录</button>
+          <div class="skill-list" id="skillList"></div>
+          <h3>新建技能</h3>
+          <div class="field two">
+            <div><label>标识 id</label><input type="text" id="skillId" placeholder="my-skill" /></div>
+            <div><label>名称</label><input type="text" id="skillName" placeholder="我的技能" /></div>
+          </div>
+          <div class="field">
+            <label>描述（什么时候用）</label>
+            <input type="text" id="skillDesc" placeholder="整理每日工作日报时使用" />
+          </div>
+          <div class="field">
+            <label>指令正文（Markdown）</label>
+            <textarea id="skillBody" rows="6" placeholder="1. 调用 ...&#10;2. 输出 ..."></textarea>
+          </div>
+          <button class="btn-ghost full" id="skillSaveBtn">保存技能</button>
+        </section>
+
+        <!-- ---------- 语音 ---------- -->
+        <section class="st-section" data-tab="voice">
+          <h3>语音识别（听懂你说话）</h3>
+          <div class="field">
+            <label>识别方式</label>
+            <select id="stAsrProvider">
+              <option value="dashscope">阿里云百炼（推荐，国内可用）</option>
+              <option value="system">系统内置（依赖云端，国内常不可用）</option>
+            </select>
+          </div>
+          <div class="asr-block" id="stAsrDashBlock">
+            <div class="field">
+              <label>百炼 API Key</label>
+              <div class="key-row">
+                <input type="password" id="stAsrKey" placeholder="sk-..." />
+                <button class="btn-ghost" id="stAsrKeyToggle">显示</button>
+              </div>
+              <div class="hint">
+                在 <a href="#" id="stAsrKeyLink">百炼控制台</a> 创建。语音合成也可复用这个 Key。
+              </div>
+            </div>
+            <div class="field">
+              <label>识别模型</label>
+              <input type="text" id="stAsrModel" placeholder="paraformer-realtime-v2" />
+            </div>
+            <div class="field">
+              <label>静音自动结束 <span class="val" id="stAsrSilenceVal">2.0s</span></label>
+              <input type="range" id="stAsrSilence" min="500" max="6000" step="100" value="2000" />
+            </div>
+            <button class="btn-ghost full" id="stAsrTest">测试语音识别</button>
+            <div class="test-result" id="stAsrTestResult"></div>
+          </div>
+
+          <h3>语音合成（小问说话）</h3>
+          <div class="field">
+            <label>合成方案</label>
+            <select id="stTtsProvider">
+              <option value="web">系统内置语音（零配置、离线、免费）</option>
+              <option value="dashscope">阿里云百炼 CosyVoice（音质最好，需 Key）</option>
+              <option value="openai">OpenAI 兼容 TTS 接口（自建/中转）</option>
+            </select>
+            <div class="hint">系统内置即用 Windows/macOS 自带语音；CosyVoice 是拟人音色，和识别共用同一个百炼 Key</div>
+          </div>
+
+          <div class="field row">
+            <label>自动朗读回答</label>
+            <label class="switch"><input type="checkbox" id="stTtsEnabled" /><span></span></label>
+          </div>
+
+          <div class="tts-block" id="ttsWebBlock">
+            <div class="field">
+              <label>系统音色</label>
+              <select id="stVoice"></select>
+              <div class="hint">使用系统内置语音引擎（Windows: Microsoft Huihui/Yunxi 等）</div>
+            </div>
+          </div>
+
+          <div class="tts-block" id="ttsDashBlock" style="display:none">
+            <div class="field two">
+              <div>
+                <label>模型</label>
+                <select id="stTtsDashModel">
+                  <option value="cosyvoice-v2">cosyvoice-v2（推荐）</option>
+                  <option value="cosyvoice-v1">cosyvoice-v1</option>
+                </select>
+              </div>
+              <div>
+                <label>音色</label>
+                <select id="stTtsDashVoice"></select>
+              </div>
+            </div>
+            <div class="field">
+              <label>输出格式</label>
+              <select id="stTtsDashFormat">
+                <option value="mp3">mp3</option>
+                <option value="wav">wav</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>API Key（留空则复用上面的百炼 Key）</label>
+              <div class="key-row">
+                <input type="password" id="stTtsKey" placeholder="留空复用识别 Key" />
+                <button class="btn-ghost" id="stTtsKeyToggle">显示</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tts-block" id="ttsOpenaiBlock" style="display:none">
+            <div class="field">
+              <label>接口地址（留空则复用大模型地址）</label>
+              <input type="text" id="stTtsOpenaiUrl" placeholder="https://api.openai.com/v1" />
+            </div>
+            <div class="field two">
+              <div><label>模型</label><input type="text" id="stTtsOpenaiModel" placeholder="tts-1" /></div>
+              <div><label>音色</label><select id="stTtsOpenaiVoice"></select></div>
+            </div>
+            <div class="field">
+              <label>API Key（留空则复用大模型 Key）</label>
+              <input type="password" id="stTtsOpenaiKey" placeholder="留空复用" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label>语速 <span class="val" id="stRateVal">1.0x</span></label>
+            <input type="range" id="stTtsRate" min="-10" max="10" step="1" value="0" />
+          </div>
+          <div class="field">
+            <label>音量 <span class="val" id="stVolumeVal">100%</span></label>
+            <input type="range" id="stTtsVolume" min="0" max="100" step="5" value="100" />
+          </div>
+          <button class="btn-ghost full" id="stTestVoice">试听朗读效果</button>
+          <div class="test-result" id="stTtsTestResult"></div>
+        </section>
+
+        <!-- ---------- 显示与数据 ---------- -->
+        <section class="st-section" data-tab="advanced">
+          <h3>显示与兼容性</h3>
+          <div class="field row">
+            <label>禁用硬件加速 <span class="tag-warn">闪退时开启</span></label>
+            <label class="switch"><input type="checkbox" id="stGpuDisabled" /><span></span></label>
+          </div>
+          <div class="hint">
+            如果程序启动后闪退、界面白屏或花屏，开启此项可解决。修改后需重启程序生效。
+          </div>
+          <div class="gpu-status" id="stGpuStatus">检测中…</div>
+          <button class="btn-ghost full" id="stRestart">立即重启程序</button>
+
+          <h3>数据</h3>
           <button class="btn-ghost full" id="stOpenData">打开数据目录</button>
-        </div>
-      </section>
+          <button class="btn-ghost full danger-text" id="stClearHistory">清空所有对话历史</button>
+        </section>
 
-      <section class="st-section">
-        <h3>显示与兼容性</h3>
-        <div class="field row">
-          <label>禁用硬件加速 <span class="tag-warn">闪退时开启</span></label>
-          <label class="switch"><input type="checkbox" id="stGpuDisabled" /><span></span></label>
-        </div>
-        <div class="hint">
-          如果程序启动后*闪退*、界面白屏或花屏，开启此项可解决。修改后需重启程序生效。
-        </div>
-        <div class="gpu-status" id="stGpuStatus">检测中…</div>
-        <button class="btn-ghost full" id="stRestart">立即重启程序</button>
-      </section>
+      </div>
+    </div>
+  </div>
 
-      <section class="st-section">
-        <h3>数据</h3>
-        <button class="btn-ghost full" id="stClearHistory">清空所有对话历史</button>
-      </section>
+  <!-- ========== 工具确认弹窗 ========== -->
+  <div class="confirm-mask" id="confirmMask">
+    <div class="confirm-card">
+      <div class="confirm-title" id="confirmTitle">需要你的确认</div>
+      <div class="confirm-desc" id="confirmDesc"></div>
+      <pre class="confirm-args" id="confirmArgs"></pre>
+      <div class="confirm-actions">
+        <button class="btn-ghost" id="confirmNo">拒绝</button>
+        <button class="btn-primary" id="confirmYes">允许执行</button>
+      </div>
     </div>
   </div>
 
