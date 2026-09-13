@@ -102,5 +102,77 @@ contextBridge.exposeInMainWorld('xw', {
   // ---- 渲染 / GPU ----
   gpuStatus: () => ipcRenderer.invoke('gpu:status'),
   gpuSetDisabled: (v) => ipcRenderer.invoke('gpu:set-disabled', v),
-  gpuRestart: () => ipcRenderer.invoke('gpu:restart')
+  gpuRestart: () => ipcRenderer.invoke('gpu:restart'),
+
+  // ================= Jarvis 能力 =================
+  // 开机自启
+  autostartGet: () => ipcRenderer.invoke('autostart:get'),
+  autostartSet: (v) => ipcRenderer.invoke('autostart:set', v),
+
+  // 人格（我是谁 / 主人是谁）
+  personaGet: () => ipcRenderer.invoke('persona:get'),
+  personaSet: (patch) => ipcRenderer.invoke('persona:set', patch),
+
+  // 长期记忆
+  memoryList: () => ipcRenderer.invoke('memory:list'),
+  memoryAdd: (m) => ipcRenderer.invoke('memory:add', m),
+  memoryRemove: (id) => ipcRenderer.invoke('memory:remove', id),
+  memoryClear: () => ipcRenderer.invoke('memory:clear'),
+  memorySearch: (q) => ipcRenderer.invoke('memory:search', q),
+
+  // 短期记忆（会话）
+  sessionList: () => ipcRenderer.invoke('session:list'),
+  sessionCreate: (title) => ipcRenderer.invoke('session:create', title),
+  sessionGet: (id) => ipcRenderer.invoke('session:get', id),
+  sessionActive: () => ipcRenderer.invoke('session:active'),
+  sessionSetActive: (id) => ipcRenderer.invoke('session:set-active', id),
+  sessionRename: (id, title) => ipcRenderer.invoke('session:rename', { id, title }),
+  sessionDelete: (id) => ipcRenderer.invoke('session:delete', id),
+  sessionAppend: (id, msg) => ipcRenderer.invoke('session:append', { id, msg }),
+  sessionSetMessages: (id, messages) => ipcRenderer.invoke('session:set-messages', { id, messages }),
+
+  // 内置工具
+  toolsSettingsGet: () => ipcRenderer.invoke('tools:settings-get'),
+  toolsSettingsSet: (patch) => ipcRenderer.invoke('tools:settings-set', patch),
+  toolsList: () => ipcRenderer.invoke('tools:list'),
+  toolsExec: (name, args) => ipcRenderer.invoke('tools:exec', { name, args }),
+  toolsOpenFile: (p) => ipcRenderer.invoke('tools:open-file', p),
+
+  // MCP
+  mcpList: () => ipcRenderer.invoke('mcp:list'),
+  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
+  mcpTools: () => ipcRenderer.invoke('mcp:tools'),
+  mcpAdd: (cfg) => ipcRenderer.invoke('mcp:add', cfg),
+  mcpRemove: (id) => ipcRenderer.invoke('mcp:remove', id),
+  mcpConnect: (id) => ipcRenderer.invoke('mcp:connect', id),
+  mcpDisconnect: (id) => ipcRenderer.invoke('mcp:disconnect', id),
+  mcpConnectAll: () => ipcRenderer.invoke('mcp:connect-all'),
+
+  // Skills
+  skillsList: () => ipcRenderer.invoke('skills:list'),
+  skillsLoad: (id) => ipcRenderer.invoke('skills:load', id),
+  skillsSave: (s) => ipcRenderer.invoke('skills:save', s),
+  skillsDelete: (id) => ipcRenderer.invoke('skills:delete', id),
+  skillsOpenDir: () => ipcRenderer.invoke('skills:open-dir'),
+
+  // 语音合成
+  ttsVoices: () => ipcRenderer.invoke('tts:voices'),
+  ttsSynth: (opts) => ipcRenderer.invoke('tts:synth', opts),
+  ttsTest: (opts) => ipcRenderer.invoke('tts:test', opts),
+
+  // Agent
+  agentRun: (payload) => ipcRenderer.invoke('agent:run', payload),
+  agentConfirmReply: (id, approved) => ipcRenderer.invoke('agent:confirm-reply', { id, approved }),
+  onAgentTool: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('agent:tool', h);
+    return () => ipcRenderer.removeListener('agent:tool', h);
+  },
+  onAgentConfirm: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('agent:confirm', h);
+    return () => ipcRenderer.removeListener('agent:confirm', h);
+  },
+
+  jarvisStatus: () => ipcRenderer.invoke('jarvis:status')
 });

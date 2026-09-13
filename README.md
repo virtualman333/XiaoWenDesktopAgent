@@ -1,6 +1,6 @@
-# 小问助手 · 桌面 AI 问答助手
+# 小问助手 · 桌面 AI 智能体
 
-常驻屏幕右下角的 AI 小助手。随时点击悬浮球或按快捷键语音提问，AI 立刻回答，还能朗读给你听。
+常驻屏幕右下角的「软件贾维斯」：能听、能说、能记住你，还能**真正操作你的电脑**。
 
 ![图标](build/icon-preview.png)
 
@@ -10,16 +10,21 @@
 
 | 功能 | 说明 |
 |---|---|
-| 右下角悬浮球 | 始终置顶，可拖动、自动吸附屏幕边缘、支持透明度调节 |
-| 单击聊天 | 点击悬浮球打开对话面板；双击直接进入语音问答 |
-| 全局快捷键 | 默认 `Alt+Space`，任意界面下按一下就开始语音提问 |
-| 语音提问 | 说话 → 自动转文字 → 发给 AI → 自动发送 |
-| 语音朗读 | AI 回答自动朗读（可关闭），支持语速/音量/音色调节 |
-| 流式输出 | 回答边生成边显示，不用干等 |
-| 多模型支持 | DeepSeek / 通义千问 / Kimi / 智谱 / OpenAI，也可自定义兼容接口 |
-| 对话历史 | 本地保存，重启不丢；一键清空 |
-| 系统托盘 | 托盘图标右键可打开面板、语音问答、设置、退出 |
-| 隐私安全 | API Key 只存在本机，不上传任何服务器 |
+| 🤖 **Agent 模式** | 小问可自主调用工具多步操作：执行命令、读写文件、截屏、管进程、开应用 |
+| 🔌 **MCP 支持** | 接入 MCP 服务器生态（stdio / http），无限扩展工具 |
+| 📦 **Skills 技能** | 用 SKILL.md 给小写「工作手册」，按需加载 |
+| 🧠 **记忆** | 长期记忆（自动检索注入）+ 短期记忆（多会话管理） |
+| 👤 **人格** | 它知道自己是谁、主人是谁；名字、性格、说话风格都可定制 |
+| 🔊 **语音输出三方案** | 系统内置（离线）/ 阿里云 CosyVoice（高音质）/ OpenAI 兼容 TTS |
+| 🎙️ 语音识别 | 阿里云百炼 paraformer-realtime 实时流式识别 |
+| 🚀 **开机自启** | 登录系统自动在托盘运行 |
+| 右下角悬浮球 | 始终置顶，可拖动、自动吸附边缘、透明度调节 |
+| 全局快捷键 | 默认 `Alt+Space`，任意界面语音提问 |
+| 流式输出 | 回答边生成边显示，工具调用过程实时可视化 |
+| 多模型支持 | DeepSeek / 通义千问 / Kimi / 智谱 / OpenAI，兼容接口均可 |
+| 多会话 | 会话抽屉切换/新建/删除，历史自动迁移 |
+| 系统托盘 | 托盘右键：面板、语音问答、设置、退出 |
+| 隐私安全 | API Key 只存本机；高危操作需确认；越权路径写入被拦截 |
 
 ---
 
@@ -112,12 +117,66 @@ npm run dev:electron
 
 ---
 
+## Agent 能力说明（v1.1 新增）
+
+开启 Agent 模式（标题栏扳手图标或设置页）后，小问可以用 17 个内置工具直接操作电脑：
+
+| 类别 | 工具 |
+|---|---|
+| 命令 | `shell_exec`（PowerShell / cmd / bash） |
+| 文件 | `file_read` / `file_write` / `file_delete` / `file_list` |
+| 系统 | `system_info` / `get_datetime` / `process_list` / `process_kill` |
+| 桌面 | `app_open` / `screenshot` / `clipboard_read` / `clipboard_write` / `notify` |
+| 网络 | `http_request` |
+| 记忆 | `memory_add` / `memory_search` |
+
+**安全机制**：
+- 高危命令（format / shutdown / reg / diskpart 等）直接拦截
+- 写/删操作只允许用户目录、下载、临时目录与白名单目录
+- 高危工具执行前弹窗确认（可在设置改为全部确认或全自动）
+
+试试对它说：
+- 「现在几点了？顺便看看内存还剩多少」
+- 「把用户目录里的文件列一下」
+- 「截个屏保存到用户目录」
+- 「记住：我喜欢简洁直接的回答」
+
+### MCP 接入示例
+
+设置 → MCP 服务器 → 添加（stdio 方式）：
+
+```
+名称: filesystem
+命令: npx
+参数: -y @modelcontextprotocol/server-filesystem C:\Users\你的用户名
+```
+
+保存后自动连接，工具会以 `mcp__filesystem__*` 出现在 Agent 工具清单里。
+
+### Skills 编写
+
+在 `userData/jarvis/skills/my-skill/SKILL.md` 写：
+
+```markdown
+---
+name: my-skill
+description: 整理每日工作日报时使用
+---
+1. 调用 get_datetime 获取日期
+2. …
+```
+
+---
+
 ## 语音说明
 
-- **朗读（TTS）**：使用 Windows 系统内置语音引擎，**完全离线**，无需联网。
-  可在设置里试听并选择音色（如 Microsoft Huihui / Yunxi）。
-- **识别（STT）**：使用阿里云百炼 paraformer-realtime，**需要联网**，国内可用。
-  首次使用需在「设置 → 语音」中填入百炼 API Key，然后点「测试语音识别」确认可用。
+| 方案 | 识别（听你说） | 合成（它来说） |
+|---|---|---|
+| 系统内置 | Web Speech（国内常不可用） | ✅ 离线可用，零配置 |
+| 阿里云百炼 | ✅ paraformer-realtime（推荐） | ✅ CosyVoice 高音质（8 音色） |
+| OpenAI 兼容 | — | ✅ `/v1/audio/speech` 自定义 |
+
+一个百炼 Key 可同时用于识别、合成和通义千问对话。
 
 ### 配置语音识别
 
@@ -137,25 +196,31 @@ npm run dev:electron
 小问助手/
 ├── src/
 │   ├── main/
-│   │   ├── main.js         # 主进程：窗口、托盘、快捷键、配置存储
-│   │   └── preload.js      # 安全桥接（contextBridge）
+│   │   ├── main.js         # 主进程：窗口、托盘、快捷键、大模型代理、ASR 代理
+│   │   ├── preload.js      # 安全桥接（contextBridge）
+│   │   └── jarvis/         # v1.1 智能体能力
+│   │       ├── index.js    # IPC 统一注册
+│   │       ├── store.js    # 人格 / 记忆 / 会话 / MCP / 工具设置存储
+│   │       ├── agent.js    # Agent 循环（function calling + 工具确认）
+│   │       ├── tools.js    # 17 个内置工具
+│   │       ├── mcp.js      # MCP 客户端（stdio / http）
+│   │       ├── skills.js   # SKILL.md 技能系统
+│   │       ├── tts.js      # 语音合成三方案
+│   │       └── autostart.js# 开机自启
 │   └── renderer/
 │       ├── ball.html       # 悬浮球页面
-│       ├── panel.html      # 对话面板 + 设置页
+│       ├── panel.html      # 对话面板 + 分组设置页
 │       ├── styles/
 │       │   ├── ball.css
 │       │   └── panel.css
 │       └── js/
-│           ├── ball.js     # 悬浮球交互（拖动/单击/双击/吸附）
-│           ├── panel.js    # 对话逻辑 + 设置逻辑
-│           ├── api.js      # 大模型 API 流式调用
-│           ├── speech.js   # 语音识别 + 语音合成
+│           ├── ball.js     # 悬浮球交互
+│           ├── panel.js    # 对话 + Agent 可视化 + 设置
+│           ├── api.js      # 流式对话 / Agent 调用
+│           ├── speech.js   # 语音识别 + 系统合成
 │           └── markdown.js # Markdown 渲染
-├── build/
-│   ├── icon.ico            # 应用图标
-│   └── gen-icon.py         # 图标生成脚本
+├── build/                  # 图标、构建与验证脚本
 ├── dist/                   # 构建产物（渲染进程）
-├── release-v1.0.3/         # 打包产物（安装包）
 ├── vite.config.mjs
 └── package.json
 ```
@@ -257,13 +322,20 @@ v1.0.2 已处理两类常见原因：GPU 进程崩溃、以及上次被强制结
 
 ## 配置存储位置
 
-配置和对话历史存在：
-
 ```
-%APPDATA%\小问助手\config.json
+%APPDATA%\xiaowen-assistant\
+├── config.json          # 主配置（模型、Key、语音设置）
+└── jarvis\
+    ├── persona.json     # 人格设定（我是谁/主人是谁）
+    ├── memory.json      # 长期记忆
+    ├── sessions.json    # 短期记忆（多会话）
+    ├── mcp.json         # MCP 服务器
+    ├── tools.json       # 工具开关与白名单
+    ├── skills\          # 技能包
+    └── shots\           # 截图
 ```
 
-设置页底部有「打开数据目录」按钮可直接跳转。删除该文件即可重置所有设置。
+设置页底部有「打开数据目录」按钮可直接跳转。
 
 ---
 
@@ -271,8 +343,10 @@ v1.0.2 已处理两类常见原因：GPU 进程崩溃、以及上次被强制结
 
 - **Electron 32** — 桌面容器
 - **原生 JS + Vite 5** — 无框架依赖，启动快、体积小
-- **阿里云百炼 paraformer-realtime** — 实时语音识别（WebSocket 流式）
-- **Web Speech API** — 语音合成（系统引擎，离线）
+- **Function Calling** — Agent 工具循环（OpenAI 协议）
+- **MCP (Model Context Protocol)** — 外部工具生态
+- **阿里云百炼** — paraformer-realtime 识别 + CosyVoice 合成（同一 WebSocket 端点）
+- **Web Speech API** — 系统语音合成（离线）
 - **OpenAI 兼容接口** — 一套代码支持多家大模型
 
 ---

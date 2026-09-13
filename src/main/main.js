@@ -4,6 +4,10 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// Jarvis 扩展能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / 语音合成）
+const jarvis = require('./jarvis');
+const autostart = require('./jarvis/autostart');
+
 const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5199';
 
@@ -288,6 +292,26 @@ const DEFAULT_CONFIG = {
   ttsRate: 0,       // -10 ~ 10
   ttsVolume: 100,
   ttsVoice: '',
+  // ---- 语音合成（TTS）----
+  // provider: 'web'       Web Speech API / 系统内置语音（零配置、离线）
+  //           'dashscope' 阿里云百炼 CosyVoice（高音质，需 Key，可与 ASR 共用）
+  //           'openai'    OpenAI 兼容 /v1/audio/speech（自建或中转都行）
+  ttsProvider: 'web',
+  ttsAutoSpeak: false,        // 回答完成后自动朗读
+  ttsApiKey: '',              // 百炼 TTS 专用 Key；留空则复用 asrApiKey
+  ttsDashModel: 'cosyvoice-v2',
+  ttsDashVoice: 'longxiaochun_v2',
+  ttsDashFormat: 'mp3',
+  ttsOpenaiBaseUrl: '',       // 留空则复用大模型接口地址
+  ttsOpenaiModel: 'tts-1',
+  ttsOpenaiVoice: 'alloy',
+  ttsOpenaiKey: '',           // 留空则复用大模型 Key
+  // ---- Agent（贾维斯模式）----
+  agentEnabled: true,         // 开启后模型可调用工具
+  agentUseTools: true,        // 内置工具（命令 / 文件 / 进程 / 截图 ...）
+  agentUseMcp: true,          // MCP 服务器工具
+  agentUseSkills: true,       // Skills
+  agentUseMemory: true,       // 长期记忆注入
   // ---- 语音识别（ASR）----
   // provider: 'dashscope' 在线识别（阿里云百炼 paraformer-realtime）
   //           'system'    系统内置（Electron 的 Web Speech API，国内网络通常不可用）
@@ -615,7 +639,12 @@ function sanitizeConfig(cfg) {
     apiKey: cfg.apiKey ? '__KEEP__' : '',
     // 语音识别 Key（同样只在主进程保留真值）
     asrApiKeyMasked: maskKey(cfg.asrApiKey),
-    asrApiKey: cfg.asrApiKey ? '__KEEP__' : ''
+    asrApiKey: cfg.asrApiKey ? '__KEEP__' : '',
+    // 语音合成 Key
+    ttsApiKeyMasked: maskKey(cfg.ttsApiKey),
+    ttsApiKey: cfg.ttsApiKey ? '__KEEP__' : '',
+    ttsOpenaiKeyMasked: maskKey(cfg.ttsOpenaiKey),
+    ttsOpenaiKey: cfg.ttsOpenaiKey ? '__KEEP__' : ''
   };
 }
 
@@ -677,6 +706,8 @@ function extractErrorText(status, statusText, raw) {
 let activeChatAbort = null;
 
 ipcMain.handle('chat:abort', () => {
+  // Agent 模式下的请求也要能中断
+  try { jarvis.abortAgent(); } catch (e) { /* ignore */ }
   if (activeChatAbort) {
     try { activeChatAbort.abort(); } catch {}
     activeChatAbort = null;
@@ -836,6 +867,8 @@ ipcMain.handle('config:set', (_e, patch) => {
   // 打码值一旦落盘，后续请求必然鉴权失败，而且从界面上完全看不出问题。
   if ('apiKey' in patch) next.apiKey = resolveKeyPatch(patch.apiKey, cur.apiKey);
   if ('asrApiKey' in patch) next.asrApiKey = resolveKeyPatch(patch.asrApiKey, cur.asrApiKey);
+  if ('ttsApiKey' in patch) next.ttsApiKey = resolveKeyPatch(patch.ttsApiKey, cur.ttsApiKey);
+  if ('ttsOpenaiKey' in patch) next.ttsOpenaiKey = resolveKeyPatch(patch.ttsOpenaiKey, cur.ttsOpenaiKey);
   config = next;
   saveConfig(config);
 
@@ -1462,6 +1495,18 @@ function bootstrapApp() {
     createTray();
     registerHotkeys();
 
+    // ---- Jarvis 能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / TTS）----
+    try {
+      jarvis.bindConfig(() => loadConfig());
+      jarvis.registerAll();
+      // 开机自启以本地标记为准，避免系统项被清理后失效
+      autostart.syncOnBoot();
+      jarvis.boot().catch((e) => logLine('jarvis', 'boot 失败: ' + (e && e.message)));
+      logLine('jarvis', '模块已加载');
+    } catch (e) {
+      logLine('jarvis', '模块加载失败: ' + (e && e.stack || e));
+    }
+
     // 看门狗：确认悬浮球窗口真的建出来了。
     // 曾经出现过「主进程活着但窗口不可见」的情况 —— 用户双击新实例时
     // 会拿到单实例锁并静默退出，表现为「怎么点都打不开」。这里做一次自检。
@@ -1502,6 +1547,7 @@ function bootstrapApp() {
     globalShortcut.unregisterAll();
     // 收掉可能还在跑的语音识别会话，避免 WebSocket 悬挂
     asrCleanup('app-quit');
+    try { jarvis.cleanup(); } catch (e) { /* ignore */ }
     // 正常退出也要清标记
     try {
       if (bootFlagFile && fs.existsSync(bootFlagFile)) fs.unlinkSync(bootFlagFile);
