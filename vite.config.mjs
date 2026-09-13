@@ -10,7 +10,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         panel: resolve(__dirname, 'src/renderer/panel.html'),
-        ball: resolve(__dirname, 'src/renderer/ball.html')
+        ball: resolve(__dirname, 'src/renderer/ball.html'),
+        pet: resolve(__dirname, 'src/renderer/pet.html')
       }
     }
   },

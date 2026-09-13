@@ -104,6 +104,30 @@ contextBridge.exposeInMainWorld('xw', {
   gpuSetDisabled: (v) => ipcRenderer.invoke('gpu:set-disabled', v),
   gpuRestart: () => ipcRenderer.invoke('gpu:restart'),
 
+  // ---- 桌面宠物 ----
+  petStateGet: () => ipcRenderer.invoke('pet:state-get'),
+  petStateSave: (s) => ipcRenderer.invoke('pet:state-save', s),
+  petReady: () => ipcRenderer.invoke('pet:ready'),
+  petSetMouse: (ignore) => ipcRenderer.invoke('pet:set-mouse', ignore),
+  petDragMove: (d) => ipcRenderer.invoke('pet:drag-move', d),
+  petMoveTo: (x, y) => ipcRenderer.invoke('pet:move-to', x, y),
+  petGetBounds: () => ipcRenderer.invoke('pet:get-bounds'),
+  petSnap: () => ipcRenderer.invoke('pet:snap'),
+  petHide: () => ipcRenderer.invoke('pet:hide'),
+  petShow: () => ipcRenderer.invoke('pet:show'),
+  petToggle: () => ipcRenderer.invoke('pet:toggle'),
+  petVisible: () => ipcRenderer.invoke('pet:visible'),
+  petSetOpacity: (v) => ipcRenderer.invoke('pet:set-opacity', v),
+  petSetTop: (v) => ipcRenderer.invoke('pet:set-top', v),
+  petResize: () => ipcRenderer.invoke('pet:resize'),
+  // 让宠物替小问播报（面板 / 任意窗口调用，主进程转发给宠物窗口）
+  petSay: (text) => ipcRenderer.invoke('pet:say-out', text),
+  onPetSay: (cb) => {
+    const h = (_e, text) => cb(text);
+    ipcRenderer.on('pet:say', h);
+    return () => ipcRenderer.removeListener('pet:say', h);
+  },
+
   // ================= Jarvis 能力 =================
   // 开机自启
   autostartGet: () => ipcRenderer.invoke('autostart:get'),

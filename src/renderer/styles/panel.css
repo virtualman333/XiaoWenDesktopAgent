@@ -971,3 +971,17 @@ body { border-radius: 0; }
 /* 欢迎区快捷问题更紧凑 */
 .quick-asks { flex-wrap: wrap; justify-content: center; }
 .quick { font-size: 12px !important; padding: 6px 11px !important; }
+
+/* ---------- 桌面宠物设置 ---------- */
+.pet-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 16px; }
+.pet-chip {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 10px 4px 8px; border: 1.5px solid var(--border, #e3e6ec); border-radius: 12px;
+  background: var(--bg, #fff); cursor: pointer; font-size: 12px;
+  color: var(--text-1, #2c303a); transition: all .15s;
+}
+.pet-chip:hover { border-color: var(--brand); transform: translateY(-2px); }
+.pet-chip.active { border-color: var(--brand); background: var(--brand-soft, #eef3ff); box-shadow: 0 3px 10px rgba(90,140,255,.18); }
+.pet-chip-ico { font-size: 26px; line-height: 1; }
+.pet-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.pet-actions .btn-ghost { flex: 1; min-width: 96px; }
