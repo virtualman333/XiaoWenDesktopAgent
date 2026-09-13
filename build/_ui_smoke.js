@@ -72,11 +72,15 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(__dirname, '_shot_settings.png'), shot2.toPNG());
 
   // 逐个点设置分组，看看有没有报错
-  for (const tab of ['persona', 'agent', 'mcp', 'skills', 'voice']) {
+  for (const tab of ['persona', 'agent', 'mcp', 'skills', 'voice', 'pet']) {
     await win.webContents.executeJavaScript(
       `document.querySelector('.st-nav-item[data-tab="${tab}"]').click();`
     );
     await sleep(450);
+    if (tab === 'pet') {
+      const shotPet = await win.webContents.capturePage();
+      fs.writeFileSync(path.join(__dirname, '_shot_settings_pet.png'), shotPet.toPNG());
+    }
   }
   const shot3 = await win.webContents.capturePage();
   fs.writeFileSync(path.join(__dirname, '_shot_voice.png'), shot3.toPNG());

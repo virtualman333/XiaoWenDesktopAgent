@@ -362,6 +362,8 @@ async function send(textOverride) {
     finalizeAiNode(currentAiNode, full);
     setStatus('就绪');
     if (els.ttsToggle.checked) speakText(full);
+    // 让桌面宠物替小问播报一句（失败静默，宠物窗口可能没开）
+    try { window.xw.petSay && window.xw.petSay(plainForPet(full)); } catch (e) { /* ignore */ }
   } else {
     currentAiNode && currentAiNode.remove();
     setStatus('未收到回复');
@@ -631,6 +633,16 @@ function playAudioFile(file) {
   });
 }
 
+/** 宠物气泡用的纯文本：去 markdown 符号、压成一行、截断 */
+function plainForPet(md) {
+  const t = toPlainText(md)
+    .replace(/[`#>*_~]/g, '')
+    .replace(/!?\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return t.length > 48 ? t.slice(0, 48) + '…' : t;
+}
+
 async function speakText(text) {
   if (cfg.ttsEnabled === false) return;
   const plain = toPlainText(text);
@@ -779,6 +791,7 @@ function initSettings() {
   bindMcp();
   bindSkills();
   bindVoice();
+  bindPet();
   bindAdvanced();
   fillAll();
 }
@@ -1289,6 +1302,100 @@ function showAsrTest(msg, type) {
   el.className = 'test-result show ' + type;
 }
 
+// ---------- 桌面宠物 ----------
+const PET_META = [
+  { id: 'penguin', name: '企鹅', emoji: '🐧' },
+  { id: 'cat', name: '橘猫', emoji: '🐱' },
+  { id: 'panda', name: '熊猫', emoji: '🐼' },
+  { id: 'rabbit', name: '兔子', emoji: '🐰' },
+  { id: 'shiba', name: '柴犬', emoji: '🐶' },
+  { id: 'frog', name: '青蛙', emoji: '🐸' }
+];
+
+function bindPet() {
+  const picker = $('stPetPicker');
+  const renderPicker = (cur) => {
+    picker.innerHTML = '';
+    PET_META.forEach((a) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pet-chip' + (a.id === cur ? ' active' : '');
+      b.innerHTML = `<span class="pet-chip-ico">${a.emoji}</span><span>${a.name}</span>`;
+      b.onclick = async () => {
+        await window.xw.setConfig({ petAnimal: a.id });
+        renderPicker(a.id);
+        setToast(`已切换到${a.name}`);
+      };
+      picker.appendChild(b);
+    });
+  };
+  renderPicker(cfg.petAnimal || 'penguin');
+
+  const on = $('stPetEnabled');
+  on.checked = cfg.petEnabled !== false;
+  on.addEventListener('change', async () => {
+    cfg = await window.xw.setConfig({ petEnabled: on.checked });
+    setToast(on.checked ? '宠物已出现' : '宠物已隐藏');
+  });
+
+  const size = $('stPetSize');
+  const sizeVal = $('stPetSizeVal');
+  size.value = Number(cfg.petSize) || 120;
+  sizeVal.textContent = size.value + 'px';
+  size.addEventListener('input', () => (sizeVal.textContent = size.value + 'px'));
+  size.addEventListener('change', async () => {
+    cfg = await window.xw.setConfig({ petSize: Number(size.value) });
+  });
+
+  const op = $('stPetOpacity');
+  const opVal = $('stPetOpacityVal');
+  op.value = Math.round((Number(cfg.petOpacity) || 1) * 100);
+  opVal.textContent = op.value + '%';
+  op.addEventListener('input', () => (opVal.textContent = op.value + '%'));
+  op.addEventListener('change', async () => {
+    cfg = await window.xw.setConfig({ petOpacity: Number(op.value) / 100 });
+  });
+
+  ['stPetTop', 'stPetWalk', 'stPetInteraction'].forEach((id) => {
+    const el = $(id);
+    const key = id.replace('stPet', 'pet');
+    el.checked = cfg[key] !== false;
+    el.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: el.checked });
+    });
+  });
+
+  $('stPetToggle').addEventListener('click', async () => {
+    await window.xw.petToggle();
+    setToast('已切换宠物显示');
+  });
+
+  $('stPetFeed').addEventListener('click', async () => {
+    try {
+      const s = await window.xw.petStateGet();
+      await window.xw.petStateSave({
+        ...s,
+        hunger: Math.min(100, (s.hunger ?? 70) + 20),
+        mood: Math.min(100, (s.mood ?? 80) + 6)
+      });
+      window.xw.petSay && window.xw.petSay('谢谢主人！');
+      setToast('喂了一口，饱食 +20');
+    } catch (e) {
+      setToast('喂食失败：' + e.message);
+    }
+  });
+
+  $('stPetReset').addEventListener('click', async () => {
+    if (!confirm('确定重置宠物的等级、心情和饱食度？')) return;
+    await window.xw.petStateSave({
+      animal: cfg.petAnimal || 'penguin',
+      mood: 80, hunger: 70, level: 1, exp: 0,
+      lastSeen: Date.now(), autoWalk: false, sleeping: false
+    });
+    setToast('成长数据已重置');
+  });
+}
+
 // ---------- 高级 ----------
 function bindAdvanced() {
   $('stGpuDisabled').addEventListener('change', async () => {
@@ -1347,7 +1454,14 @@ function collectPatch() {
     hotkey: $('stHotkey').value.trim() || 'Alt+Space',
     asrProvider: $('stAsrProvider').value,
     asrModel: $('stAsrModel').value.trim() || 'paraformer-realtime-v2',
-    asrSilenceMs: Number($('stAsrSilence').value) || 2000
+    asrSilenceMs: Number($('stAsrSilence').value) || 2000,
+    // ---- 桌面宠物 ----
+    petEnabled: $('stPetEnabled').checked,
+    petSize: Number($('stPetSize').value) || 120,
+    petOpacity: Number($('stPetOpacity').value) / 100,
+    petTop: $('stPetTop').checked,
+    petWalk: $('stPetWalk').checked,
+    petInteraction: $('stPetInteraction').checked
   };
 
   const keyInput = $('stApiKey').value.trim();

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src *" />
+  <title>小问宠物</title>
+  <link rel="stylesheet" href="./styles/pet.css" />
+</head>
+<body>
+  <!-- 舞台：透明区域不响应鼠标，只有宠物本身可交互 -->
+  <div class="pet-stage" id="stage">
+
+    <!-- 气泡 -->
+    <div class="pet-bubble" id="bubble">
+      <span id="bubbleText"></span>
+      <i class="bubble-tail"></i>
+    </div>
+
+    <!-- 状态飘字（心情/饱食变化） -->
+    <div class="pet-float" id="floatLayer"></div>
+
+    <!-- 宠物本体 -->
+    <div class="pet-body" id="petBody">
+      <div class="pet-sprite" id="sprite"></div>
+      <div class="pet-shadow"></div>
+      <div class="pet-zzz" id="zzz">z z Z</div>
+    </div>
+
+    <!-- 状态条（悬停时显示） -->
+    <div class="pet-stats" id="stats">
+      <div class="stat-row">
+        <span>心情</span>
+        <div class="bar"><i id="barMood"></i></div>
+      </div>
+      <div class="stat-row">
+        <span>饱食</span>
+        <div class="bar"><i id="barHunger"></i></div>
+      </div>
+      <div class="stat-row lv">
+        <span>Lv.<b id="lvNum">1</b></span>
+        <div class="bar"><i id="barExp" class="exp"></i></div>
+      </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div class="pet-menu" id="menu">
+      <div class="menu-title" id="menuTitle">选择动物</div>
+      <div class="menu-animals" id="menuAnimals"></div>
+      <div class="menu-sep"></div>
+      <button class="menu-item" data-act="feed">🍖 喂食</button>
+      <button class="menu-item" data-act="sleep">💤 睡觉 / 起床</button>
+      <button class="menu-item" data-act="walk">🚶 散步开关</button>
+      <button class="menu-item" data-act="chat">💬 找小问聊天</button>
+      <button class="menu-item" data-act="top">📌 置顶开关</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item danger" data-act="hide">🙈 隐藏宠物</button>
+    </div>
+  </div>
+
+  <script type="module" src="./js/pet.js"></script>
+</body>
+</html>

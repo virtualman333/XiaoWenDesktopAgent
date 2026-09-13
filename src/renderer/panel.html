@@ -138,6 +138,7 @@
         <button class="st-nav-item" data-tab="mcp">MCP 服务器</button>
         <button class="st-nav-item" data-tab="skills">Skills</button>
         <button class="st-nav-item" data-tab="voice">语音</button>
+        <button class="st-nav-item" data-tab="pet">🐧 桌面宠物</button>
         <button class="st-nav-item" data-tab="advanced">显示与数据</button>
       </nav>
 
@@ -481,6 +482,49 @@
           </div>
           <button class="btn-ghost full" id="stTestVoice">试听朗读效果</button>
           <div class="test-result" id="stTtsTestResult"></div>
+        </section>
+
+        <!-- ---------- 桌面宠物 ---------- -->
+        <section class="st-section" data-tab="pet">
+          <h3>桌面宠物</h3>
+          <div class="field row">
+            <label><b>显示桌面宠物</b><span class="hint-inline">桌面上养一只会互动的小家伙</span></label>
+            <label class="switch"><input type="checkbox" id="stPetEnabled" /><span></span></label>
+          </div>
+          <div class="hint">
+            默认鼠标穿透，只有把光标移到它身上才会接管点击。拖动可挪位置，右键有菜单，双击找小问聊天。
+          </div>
+
+          <h3>选择动物</h3>
+          <div class="pet-picker" id="stPetPicker"></div>
+
+          <h3>外观</h3>
+          <div class="field">
+            <label>大小 <span class="val" id="stPetSizeVal">120px</span></label>
+            <input type="range" id="stPetSize" min="80" max="240" step="4" value="120" />
+          </div>
+          <div class="field">
+            <label>不透明度 <span class="val" id="stPetOpacityVal">100%</span></label>
+            <input type="range" id="stPetOpacity" min="25" max="100" step="1" value="100" />
+          </div>
+          <div class="field row">
+            <label>窗口置顶</label>
+            <label class="switch"><input type="checkbox" id="stPetTop" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>自动散步</label>
+            <label class="switch"><input type="checkbox" id="stPetWalk" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>互动（心情衰减 / 随机台词）</label>
+            <label class="switch"><input type="checkbox" id="stPetInteraction" /><span></span></label>
+          </div>
+
+          <div class="pet-actions">
+            <button class="btn-ghost" id="stPetToggle">显示 / 隐藏</button>
+            <button class="btn-ghost" id="stPetFeed">🍖 喂一口</button>
+            <button class="btn-ghost" id="stPetReset">重置成长数据</button>
+          </div>
         </section>
 
         <!-- ---------- 显示与数据 ---------- -->

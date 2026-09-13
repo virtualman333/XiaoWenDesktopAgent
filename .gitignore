@@ -16,6 +16,7 @@ builder-debug.yml
 _x*.py
 _*.py
 *.log
+build/_shot_*.png
 
 # ---- 编辑器 / 系统 ----
 .vscode/

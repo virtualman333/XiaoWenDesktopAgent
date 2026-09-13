@@ -7,6 +7,8 @@ const os = require('os');
 // Jarvis 扩展能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / 语音合成）
 const jarvis = require('./jarvis');
 const autostart = require('./jarvis/autostart');
+// 桌面宠物（QQ 企鹅式互动宠物）
+const pet = require('./pet');
 
 const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5199';
@@ -323,6 +325,14 @@ const DEFAULT_CONFIG = {
   contextTurns: 10, // 携带的历史轮数
   ballOpacity: 0.92,
   hotkey: 'Alt+Space',
+  // ---- 桌面宠物 ----
+  petEnabled: true,      // 是否显示桌面宠物
+  petAnimal: 'penguin',  // penguin / cat / panda / rabbit / shiba / frog
+  petSize: 120,          // 80 ~ 240
+  petOpacity: 1,
+  petWalk: false,        // 自动散步
+  petTop: true,          // 窗口置顶
+  petInteraction: true,  // 心情衰减 / 随机台词
   history: [],
   maxHistory: 200
 };
@@ -547,6 +557,19 @@ function createTray() {
       click: () => triggerVoiceAsk()
     },
     { type: 'separator' },
+    {
+      label: '桌面宠物（开 / 关）',
+      click: () => {
+        const c = loadConfig();
+        const on = !(c.petEnabled !== false);
+        config = { ...c, petEnabled: on };
+        saveConfig(config);
+        pet.applyConfig(config);
+        [ballWin, panelWin, settingsWin].forEach((w) => {
+          if (w && !w.isDestroyed()) w.webContents.send('config:update', sanitizeConfig(config));
+        });
+      }
+    },
     {
       label: '设置',
       click: () => createSettingsWindow()
@@ -878,10 +901,26 @@ ipcMain.handle('config:set', (_e, patch) => {
     ballWin && !ballWin.isDestroyed() && ballWin.setOpacity(patch.ballOpacity);
   }
 
+  // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
+  try {
+    if ('petEnabled' in patch || 'petTop' in patch) pet.applyConfig(config);
+    const pw = pet.window;
+    if (pw && !pw.isDestroyed()) {
+      if ('petSize' in patch) pet.resize();
+      if (typeof patch.petOpacity === 'number') {
+        pw.setOpacity(Math.min(Math.max(patch.petOpacity, 0.25), 1));
+      }
+    }
+  } catch (e) { /* ignore */ }
+
   // 广播配置
   [ballWin, panelWin, settingsWin].forEach((w) => {
     if (w && !w.isDestroyed()) w.webContents.send('config:update', sanitizeConfig(config));
   });
+  try {
+    const pw = pet.window;
+    if (pw && !pw.isDestroyed()) pw.webContents.send('config:update', sanitizeConfig(config));
+  } catch (e) { /* ignore */ }
 
   return sanitizeConfig(config);
 });
@@ -980,6 +1019,7 @@ ipcMain.handle('ball:show-menu', () => {
     { label: '语音问答', click: () => triggerVoiceAsk() },
     { type: 'separator' },
     { label: '设置', click: () => createSettingsWindow() },
+    { label: '🐧 桌面宠物（开 / 关）', click: () => pet.togglePet() },
     { label: '隐藏悬浮球', click: () => ballWin.hide() },
     { type: 'separator' },
     { label: '退出', click: () => { app.isQuiting = true; app.quit(); } }
@@ -1495,6 +1535,19 @@ function bootstrapApp() {
     createTray();
     registerHotkeys();
 
+    // ---- 桌面宠物 ----
+    try {
+      pet.init({
+        loadRenderer,
+        getConfig: () => loadConfig(),
+        getSanitizedConfig: () => sanitizeConfig(loadConfig()),
+        log: (m) => logLine('pet', m)
+      });
+      logLine('pet', '桌面宠物已加载');
+    } catch (e) {
+      logLine('pet', '桌面宠物加载失败: ' + (e && e.stack || e));
+    }
+
     // ---- Jarvis 能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / TTS）----
     try {
       jarvis.bindConfig(() => loadConfig());
@@ -1536,6 +1589,7 @@ function bootstrapApp() {
         const ny = Math.min(y, workArea.y + workArea.height - BALL_H);
         ballWin.setPosition(Math.max(workArea.x, nx), Math.max(workArea.y, ny));
       }
+      try { pet.reposition(); } catch (e) { /* ignore */ }
     });
   });
 
