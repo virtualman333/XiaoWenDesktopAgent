@@ -1,0 +1,30 @@
+# ---- 依赖 ----
+node_modules/
+
+# ---- 构建中间产物 ----
+dist/
+dist-app/
+
+# ---- 打包产物（体积大，不入库；安装包通过 Release 分发） ----
+release/
+release-*/
+release-final/
+release-out/
+builder-debug.yml
+
+# ---- 诊断与临时脚本 ----
+_x*.py
+_*.py
+*.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 本地配置（可能含密钥，切勿提交） ----
+config.json
+.env
+.env.*

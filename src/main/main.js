@@ -1,0 +1,1084 @@
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage, shell, dialog } = require('electron');
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+const isDev = process.env.NODE_ENV === 'development';
+const DEV_URL = 'http://localhost:5199';
+
+// ---------- 尽早决定 GPU 策略（必须在 app ready 之前） ----------
+// 有些机器（虚拟机、远程桌面、驱动异常、部分集显）GPU 进程无法启动，
+// 会导致程序启动即闪退。这里用「崩溃标记」做自动降级：
+//   上次如果在初始化阶段异常退出过 → 本次直接禁用硬件加速。
+// 注意：模块顶层 app.getPath 往往还不可用，直接拼 APPDATA 路径，
+// 并与 Electron 实际使用的 userData 目录保持一致。
+const APP_DIR_NAME = 'xiaowen-assistant';
+
+const FLAG_DIR = (() => {
+  try {
+    const p = app.getPath('userData');
+    if (p) return p;
+  } catch {}
+  const roaming = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  return path.join(roaming, APP_DIR_NAME);
+})();
+
+function flagPath(name) {
+  try {
+    if (!fs.existsSync(FLAG_DIR)) fs.mkdirSync(FLAG_DIR, { recursive: true });
+    const p = path.join(FLAG_DIR, name);
+    console.log('[flag] ' + name + ' -> ' + p);
+    return p;
+  } catch (e) {
+    console.error('[flag] ' + name + ' 失败: ' + e.message);
+    return null;
+  }
+}
+
+// ---------- 清理上次异常退出留下的残留状态 ----------
+// Chromium 用 SingletonLock / SingletonCookie / SingletonSocket 做单实例互斥。
+// 进程被强杀（任务管理器结束、崩溃、断电）时这些文件会残留，
+// 下一次启动 Chromium 会认为「已有实例在跑」而直接退出 ——
+// 现象和本次遇到的完全一致：双击后进程瞬间结束，exit code 0，无任何报错。
+//
+// 这里只在「上次确实是异常退出」的前提下清理，避免误伤真正在运行的实例。
+function isProcessAlive(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === 'EPERM';
+  }
+}
+
+function clearStaleSingletonLocks() {
+  try {
+    // Chromium 的单实例锁文件。Electron 在 Windows 上用的是 SingletonLock，
+    // 部分版本/平台还会用 lockfile，两个都清。
+    const LOCK_FILES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+
+    // 能解析出 PID 且该进程还活着 → 确有实例在跑，绝不能动。
+    const readHolderPid = () => {
+      for (const name of LOCK_FILES) {
+        const f = path.join(FLAG_DIR, name);
+        try {
+          if (!fs.existsSync(f)) continue;
+          const raw = fs.readFileSync(f, 'utf-8').trim();
+          if (!raw) continue; // 空文件无可信信息
+          for (const token of raw.split(/[\s,;:_-]+/)) {
+            const n = parseInt(token, 10);
+            if (Number.isFinite(n) && n > 100 && n < 4_000_000) return n;
+          }
+        } catch {}
+      }
+      return 0;
+    };
+
+    const holderPid = readHolderPid();
+    if (holderPid && isProcessAlive(holderPid)) {
+      console.log('[lock] 持有者进程 ' + holderPid + ' 仍在运行，保留锁');
+      return { cleaned: false, aliveHolder: true, failed: false };
+    }
+
+    let cleaned = 0;
+    let failed = 0;
+    for (const name of LOCK_FILES) {
+      const f = path.join(FLAG_DIR, name);
+      try {
+        if (fs.existsSync(f)) {
+          fs.unlinkSync(f);
+          cleaned += 1;
+        }
+      } catch (e) {
+        failed += 1;
+        console.error('[lock] 清除 ' + name + ' 失败: ' + e.message);
+      }
+    }
+    if (cleaned) console.log('[lock] 清除了 ' + cleaned + ' 个残留的 Chromium 单实例锁');
+    return { cleaned: cleaned > 0, aliveHolder: false, failed: failed > 0 };
+  } catch {
+    return { cleaned: false, aliveHolder: false, failed: true };
+  }
+}
+
+// 判断「另一个实例是否真在运行」。
+// Electron 的 requestSingleInstanceLock 只看锁文件，进程被强杀后会误判，
+// 于是新进程 exit(0) 静默退出 —— 用户看到的就是「双击没反应」。
+// 这里用「主进程互斥体」这个独立信号做二次确认，比锁文件可靠。
+function probeRunningInstance() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (!settled) { settled = true; resolve(v); }
+    };
+    let child;
+    try {
+      child = spawn('tasklist', ['/FI', 'IMAGENAME eq 小问助手.exe', '/NH', '/FO', 'CSV'], {
+        windowsHide: true
+      });
+    } catch {
+      return done(true); // 探测方式不可用时，保守认为在运行
+    }
+    let out = '';
+    if (child.stdout) child.stdout.on('data', (b) => { out += b.toString('utf-8'); });
+    child.on('error', () => done(true));
+    child.on('close', () => {
+      const n = (out.match(/小问助手\.exe/gi) || []).length;
+      done(n > 0);
+    });
+    setTimeout(() => {
+      try { child.kill(); } catch {}
+      done(true);
+    }, 5000);
+  });
+}
+
+// ---------------- 渲染模式决定 ----------------
+// 默认策略：优先硬件加速；以下任一情况切到软件渲染：
+//   1) 用户手动开启「禁用硬件加速」
+//   2) 上次启动埋下的标记还在（说明上次没走完初始化就挂了）
+//   3) 命令行/环境变量显式要求
+//
+// 之所以要这么绕，是因为 GPU 进程的崩溃发生在窗口创建阶段，
+// 严重时不会有任何界面提示，用户看到的就是「双击没反应 / 闪退」。
+const gpuOffFile = flagPath('.gpu-off');
+const bootFlagFile = flagPath('.booting');
+const crashFlagFile = flagPath('.crash-count');
+
+// 用户手动关闭开关的标记
+let gpuDisabledByConfig = false;
+try {
+  gpuDisabledByConfig = !!(gpuOffFile && fs.existsSync(gpuOffFile));
+} catch {}
+
+// 上次是否没走完初始化（标记还在 = 上次是崩溃退出的）
+let lastBootCrashed = false;
+try {
+  lastBootCrashed = !!(bootFlagFile && fs.existsSync(bootFlagFile));
+} catch {}
+
+// 连续失败次数，决定降级档位
+let crashCount = 0;
+try {
+  if (crashFlagFile && fs.existsSync(crashFlagFile)) {
+    crashCount = parseInt(fs.readFileSync(crashFlagFile, 'utf-8'), 10) || 0;
+  }
+} catch {}
+
+if (lastBootCrashed) {
+  crashCount += 1;
+  // 注意：某些受限环境下文件写入可能被拦截，失败也不影响本次降级
+  try {
+    if (crashFlagFile) fs.writeFileSync(crashFlagFile, String(crashCount), 'utf-8');
+  } catch {}
+}
+
+const cliDisable = process.argv.includes('--disable-gpu');
+const cliEnable = process.argv.includes('--enable-gpu');
+const envDisable = process.env.XIAOWEN_DISABLE_GPU === '1';
+const envEnable = process.env.XIAOWEN_DISABLE_GPU === '0';
+
+// 决策顺序（先到先得）：
+//   1) 用户手动开关（设置里的「禁用硬件加速」）
+//   2) 上次启动没走完初始化
+//   3) 命令行 / 环境变量显式指定
+//   4) Windows 上默认走软件渲染
+//
+// 第 4 条是刻意的保守选择：这个应用是常驻小工具，界面元素很少，
+// 软件渲染的性能开销可以忽略；但它能避免一部分显卡驱动/虚拟机/
+// 远程桌面环境下「双击无反应」的问题。想要硬件加速的用户，
+// 可以加 --enable-gpu 启动，或在设置里关掉开关（重启生效）。
+const isWindows = process.platform === 'win32';
+const defaultSoftware = isWindows;
+
+const softwareMode = cliDisable || envDisable
+  ? true
+  : (cliEnable || envEnable)
+    ? false
+    : (gpuDisabledByConfig || lastBootCrashed || defaultSoftware);
+
+if (softwareMode) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  console.log('[gpu] 软件渲染（原因：' +
+    (gpuDisabledByConfig ? '用户手动禁用'
+      : lastBootCrashed ? '上次启动异常退出'
+      : (cliDisable || envDisable) ? '命令行/环境变量指定'
+      : '默认使用软件渲染（更稳定）') + '）');
+} else {
+  console.log('[gpu] 硬件加速');
+}
+
+// Windows 上统一关闭 Chromium 的进程沙箱。
+// 原因：部分环境（企业安全软件、虚拟机、远程桌面、受限账户）会拦住
+// Chromium 的子进程沙箱，导致 GPU 进程启动失败、程序直接退出，
+// 用户看到的就是「双击一闪而过」。关闭进程沙箱对这种本机小工具
+// 没有实际安全损失（不加载任何远程页面），但能显著提高启动成功率。
+if (isWindows) {
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-setuid-sandbox');
+  console.log('[sandbox] 已关闭进程沙箱（提升启动兼容性）');
+}
+
+// 埋下本次的启动标记。正常走到 app ready 后会删掉；
+// 若进程半路崩掉，标记会留下，下次启动自动升一级降级。
+try {
+  if (bootFlagFile) fs.writeFileSync(bootFlagFile, String(Date.now()), 'utf-8');
+} catch {}
+
+// ---------- 诊断：把异常退出原因写进日志 ----------
+// 用户反馈「双击没反应」时，这个日志是唯一的线索来源。
+// 注意：不能放进 userData —— Chromium 会扫描/改动该目录里的文件，
+// 用户手写的文件可能被它清理掉。日志放在用户目录下独立位置。
+const LOG_DIR = path.join(os.homedir(), '.xiaowen');
+const LOG_FILE = path.join(LOG_DIR, 'launch.log');
+function logLine(tag, msg) {
+  try {
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] [${tag}] ${msg}\n`, 'utf-8');
+  } catch {}
+}
+try {
+  if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.unlinkSync(LOG_FILE);
+} catch {}
+
+for (const sig of ['uncaughtException', 'unhandledRejection']) {
+  process.on(sig, (err) => {
+    const detail = (err && err.stack) ? err.stack : String(err);
+    logLine('fatal', `${sig}: ${detail}`);
+    console.error(`[fatal] ${sig}:`, detail);
+  });
+}
+app.on('render-process-gone', (_e, _wc, details) => {
+  logLine('render-gone', JSON.stringify(details));
+  console.error('[render-gone]', JSON.stringify(details));
+});
+app.on('child-process-gone', (_e, details) => {
+  logLine('child-gone', JSON.stringify(details));
+  console.error('[child-gone]', JSON.stringify(details));
+});
+app.on('quit', (_e, code) => {
+  logLine('quit', `exitCode=${code} softwareMode=${softwareMode} crashCount=${crashCount}`);
+});
+
+// 监听 GPU 进程异常：一旦发生就落盘降级标记，
+// 这样即使本次没能挽救，下次启动也会自动切到软件渲染。
+app.on('child-process-gone', (_e, details) => {
+  if (details && details.type === 'GPU') {
+    console.error('[gpu] GPU 进程异常退出: ' + details.reason);
+    try {
+      if (gpuOffFile) fs.writeFileSync(gpuOffFile, '1', 'utf-8');
+    } catch {}
+  }
+});
+
+// ---------- 简易配置存储（不依赖 electron-store，避免打包问题） ----------
+const CONFIG_DIR = () => path.join(app.getPath('userData'));
+const CONFIG_FILE = () => path.join(CONFIG_DIR(), 'config.json');
+
+const DEFAULT_CONFIG = {
+  apiBaseUrl: 'https://api.deepseek.com',
+  apiKey: '',
+  model: 'deepseek-chat',
+  systemPrompt: '你是一个常驻桌面的 AI 助手，名字叫「小问」。回答要简洁、直接、口语化，适合语音朗读。除非用户明确要求详细，否则控制在 200 字以内。',
+  ttsEnabled: true,
+  ttsRate: 0,       // -10 ~ 10
+  ttsVolume: 100,
+  ttsVoice: '',
+  contextTurns: 10, // 携带的历史轮数
+  ballOpacity: 0.92,
+  hotkey: 'Alt+Space',
+  history: [],
+  maxHistory: 200
+};
+
+function loadConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_DIR())) fs.mkdirSync(CONFIG_DIR(), { recursive: true });
+    if (!fs.existsSync(CONFIG_FILE())) return { ...DEFAULT_CONFIG };
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE(), 'utf-8'));
+    return { ...DEFAULT_CONFIG, ...raw };
+  } catch (e) {
+    console.error('[config] load failed:', e);
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+function saveConfig(cfg) {
+  try {
+    if (!fs.existsSync(CONFIG_DIR())) fs.mkdirSync(CONFIG_DIR(), { recursive: true });
+    fs.writeFileSync(CONFIG_FILE(), JSON.stringify(cfg, null, 2), 'utf-8');
+    return true;
+  } catch (e) {
+    console.error('[config] save failed:', e);
+    return false;
+  }
+}
+
+let config = loadConfig();
+
+// ---------- 窗口引用 ----------
+let ballWin = null;
+let panelWin = null;
+let tray = null;
+let settingsWin = null;
+
+// 悬浮球尺寸（含阴影留白）
+const BALL_W = 96;
+const BALL_H = 96;
+const PANEL_W = 460;
+const PANEL_H = 640;
+
+// ---------- 悬浮球窗口 ----------
+function createBallWindow() {
+  const { workArea } = screen.getPrimaryDisplay();
+  const cfg = loadConfig();
+
+  ballWin = new BrowserWindow({
+    width: BALL_W,
+    height: BALL_H,
+    x: workArea.x + workArea.width - BALL_W - 12,
+    y: workArea.y + workArea.height - BALL_H - 12,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    focusable: true,
+    show: false,
+    icon: getTrayIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  ballWin.setAlwaysOnTop(true, 'screen-saver');
+  ballWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  loadRenderer(ballWin, 'ball.html');
+
+  ballWin.once('ready-to-show', () => {
+    ballWin.show();
+    ballWin.webContents.send('config:update', sanitizeConfig(cfg));
+  });
+
+  ballWin.on('closed', () => {
+    ballWin = null;
+  });
+}
+
+// ---------- 对话面板窗口 ----------
+function createPanelWindow() {
+  if (panelWin && !panelWin.isDestroyed()) {
+    panelWin.show();
+    panelWin.focus();
+    return panelWin;
+  }
+
+  // 计算位置：靠右下角，在悬浮球左侧
+  const { workArea } = screen.getPrimaryDisplay();
+  let x = workArea.x + workArea.width - PANEL_W - 24;
+  let y = workArea.y + workArea.height - PANEL_H - 24;
+  if (y < workArea.y) y = workArea.y;
+
+  panelWin = new BrowserWindow({
+    width: PANEL_W,
+    height: PANEL_H,
+    x: Math.max(workArea.x, x),
+    y,
+    frame: false,
+    transparent: false,
+    resizable: true,
+    minWidth: 360,
+    minHeight: 420,
+    skipTaskbar: false,
+    alwaysOnTop: true,
+    show: false,
+    backgroundColor: '#ffffff',
+    icon: getTrayIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  panelWin.setAlwaysOnTop(true, 'floating');
+
+  loadRenderer(panelWin, 'panel.html');
+
+  panelWin.once('ready-to-show', () => {
+    panelWin.show();
+    panelWin.webContents.send('config:update', sanitizeConfig(loadConfig()));
+  });
+
+  panelWin.on('closed', () => {
+    panelWin = null;
+  });
+
+  return panelWin;
+}
+
+// ---------- 设置窗口 ----------
+function createSettingsWindow() {
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.show();
+    settingsWin.focus();
+    return settingsWin;
+  }
+
+  settingsWin = new BrowserWindow({
+    width: 620,
+    height: 700,
+    frame: true,
+    resizable: true,
+    minimizable: true,
+    maximizable: false,
+    parent: panelWin && !panelWin.isDestroyed() ? panelWin : undefined,
+    modal: false,
+    show: false,
+    title: '小问助手 · 设置',
+    backgroundColor: '#f5f6f8',
+    icon: getTrayIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  settingsWin.setMenuBarVisibility(false);
+  loadRenderer(settingsWin, 'panel.html', '#settings');
+
+  settingsWin.once('ready-to-show', () => {
+    settingsWin.show();
+    // 双重保险：页面加载完后，明确告知渲染进程「这是设置页」
+    settingsWin.webContents.send('page:mode', 'settings');
+    settingsWin.webContents.send('config:update', sanitizeConfig(loadConfig()));
+  });
+
+  settingsWin.on('closed', () => {
+    settingsWin = null;
+  });
+
+  return settingsWin;
+}
+
+function loadRenderer(win, file, hash = '') {
+  if (isDev) {
+    win.loadURL(`${DEV_URL}/${file}${hash}`);
+    return;
+  }
+
+  const filePath = path.join(__dirname, '../../dist', file);
+
+  if (hash) {
+    // 打包后走 file:// 协议。loadFile 的 hash 选项在部分版本下不生效，
+    // 所以这里直接手工拼 URL 并用 loadURL，兼容性最好。
+    const url = 'file://' + filePath.replace(/\\/g, '/') + hash;
+    win.loadURL(url);
+  } else {
+    win.loadFile(filePath);
+  }
+}
+
+// ---------- 托盘图标 ----------
+function getTrayIcon() {
+  const icoPath = path.join(__dirname, '../../build/icon.ico');
+  if (fs.existsSync(icoPath)) {
+    return nativeImage.createFromPath(icoPath);
+  }
+  // 兜底：内联一个 16x16 蓝色圆形 PNG
+  const b64 = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAv0lEQVQ4y2NgGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFAwHAAA1oAAB0h8m6wAAAABJRU5ErkJggg==';
+  return nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
+}
+
+function createTray() {
+  const icon = getTrayIcon();
+  tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  tray.setToolTip('小问助手 · 按 Alt+Space 快捷问答');
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: '打开对话面板',
+      click: () => createPanelWindow()
+    },
+    {
+      label: '语音问答 (Alt+Space)',
+      click: () => triggerVoiceAsk()
+    },
+    { type: 'separator' },
+    {
+      label: '设置',
+      click: () => createSettingsWindow()
+    },
+    {
+      label: '清空对话历史',
+      click: () => {
+        config.history = [];
+        saveConfig(config);
+        if (panelWin && !panelWin.isDestroyed()) {
+          panelWin.webContents.send('history:cleared');
+        }
+        ballWin && !ballWin.isDestroyed() && ballWin.webContents.send('toast', '对话历史已清空');
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '重新加载界面',
+      click: () => {
+        if (panelWin && !panelWin.isDestroyed()) panelWin.reload();
+        if (ballWin && !ballWin.isDestroyed()) ballWin.reload();
+      }
+    },
+    {
+      label: '退出小问助手',
+      click: () => {
+        app.isQuiting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(menu);
+  tray.on('click', () => {
+    createPanelWindow();
+  });
+  tray.on('double-click', () => {
+    createPanelWindow();
+  });
+}
+
+// ---------- 快捷键 ----------
+function registerHotkeys() {
+  globalShortcut.unregisterAll();
+  const hk = loadConfig().hotkey || 'Alt+Space';
+  try {
+    const ok = globalShortcut.register(hk, () => triggerVoiceAsk());
+    if (!ok) {
+      console.warn('[hotkey] 注册失败:', hk);
+    }
+  } catch (e) {
+    console.error('[hotkey] error:', e);
+  }
+
+  // 备用：Ctrl+Shift+Space 打开面板
+  try {
+    globalShortcut.register('CommandOrControl+Shift+Space', () => createPanelWindow());
+  } catch (_) {}
+}
+
+function triggerVoiceAsk() {
+  const win = createPanelWindow();
+  const send = () => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('voice:start');
+      win.show();
+      win.focus();
+    }
+  };
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => setTimeout(send, 300));
+  } else {
+    setTimeout(send, 120);
+  }
+}
+
+// ---------- 配置脱敏 ----------
+function sanitizeConfig(cfg) {
+  // 把 apiKey 打码后发给渲染进程展示（渲染进程要改时再走 set 通道）
+  const masked = cfg.apiKey
+    ? cfg.apiKey.slice(0, 6) + '***' + cfg.apiKey.slice(-4)
+    : '';
+  return { ...cfg, apiKeyMasked: masked, apiKey: cfg.apiKey ? '__KEEP__' : '' };
+}
+
+// ---------- 大模型请求代理 ----------
+// 为什么放在主进程：
+//   渲染进程拿不到真实 API Key（config:get 返回的是脱敏后的 '__KEEP__' 占位符），
+//   这样 Key 不会暴露在页面上下文 / DevTools 里，更安全。
+//   渲染进程只发「消息内容」，由主进程补上 Key、地址、模型并转发。
+//
+// 返回值统一为 { ok, text?, error? }，避免 IPC 抛异常时丢细节。
+
+function normalizeBaseUrl(base) {
+  let u = String(base || '').trim().replace(/\/+$/, '');
+  // 用户可能直接粘了完整端点
+  u = u.replace(/\/chat\/completions$/, '');
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u;
+}
+
+// 把接口返回的错误体转成人能看懂的一句话
+function extractErrorText(status, statusText, raw) {
+  let detail = '';
+  try {
+    const j = JSON.parse(raw);
+    detail = j?.error?.message || j?.message || j?.error || raw;
+  } catch {
+    detail = raw || '';
+  }
+  detail = String(detail).slice(0, 300);
+  let hint = '';
+  if (status === 401) {
+    hint = '（API Key 无效或已过期，请到服务商后台重新生成后填入设置）';
+  } else if (status === 402) {
+    hint = '（账户余额不足）';
+  } else if (status === 403) {
+    hint = '（无权限访问该模型，或 Key 被限制）';
+  } else if (status === 404) {
+    hint = '（接口地址或模型名不对，检查 BaseURL 是否需要带 /v1）';
+  } else if (status === 429) {
+    hint = '（请求过于频繁或超出配额，稍后再试）';
+  }
+  return `HTTP ${status}${statusText ? ' ' + statusText : ''}${detail ? ' · ' + detail : ''}${hint}`;
+}
+
+// 流式对话：边收边通过 chat:delta 事件推给渲染进程
+// 当前进行中的请求（用于「停止」按钮中断）
+let activeChatAbort = null;
+
+ipcMain.handle('chat:abort', () => {
+  if (activeChatAbort) {
+    try { activeChatAbort.abort(); } catch {}
+    activeChatAbort = null;
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
+  const cfg = loadConfig();
+  const baseUrl = normalizeBaseUrl(cfg.apiBaseUrl);
+  const apiKey = cfg.apiKey;
+  const model = cfg.model;
+
+  if (!baseUrl || !model) return { ok: false, error: '请先在设置中填写接口地址与模型名' };
+  if (!apiKey) return { ok: false, error: '请先在设置中配置 API Key' };
+
+  const sender = event.sender;
+  let full = '';
+
+  // 上一个请求若还在跑，先中断
+  if (activeChatAbort) {
+    try { activeChatAbort.abort(); } catch {}
+  }
+  const controller = new AbortController();
+  activeChatAbort = controller;
+
+  try {
+    const res = await fetch(baseUrl + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: Array.isArray(messages) ? messages : [],
+        stream: true,
+        temperature: 0.7
+      }),
+      signal: controller.signal
+    });
+
+    if (!res.ok || !res.body) {
+      const raw = await res.text().catch(() => '');
+      return { ok: false, error: extractErrorText(res.status, res.statusText, raw) };
+    }
+
+    // Node 的 fetch 返回 Web ReadableStream，做 SSE 逐行解析
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const json = JSON.parse(payload);
+          const delta = json?.choices?.[0]?.delta?.content
+            || json?.choices?.[0]?.message?.content
+            || '';
+          if (delta) {
+            full += delta;
+            if (!sender.isDestroyed()) sender.send('chat:delta', delta);
+          }
+        } catch {
+          // 忽略无法解析的分片
+        }
+      }
+    }
+    return { ok: true, text: full };
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || /aborted/i.test(String(e.message || e)))) {
+      return { ok: false, aborted: true, error: '已停止' };
+    }
+    const m = String(e && e.message || e);
+    const hint = /ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(m)
+      ? '（域名解析失败，检查接口地址是否写错、或本机网络/DNS 是否正常）'
+      : /ECONNREFUSED|ETIMEDOUT|ECONNRESET|socket hang up/i.test(m)
+        ? '（连接不上服务器，检查网络、代理，或该地址是否需要代理才能访问）'
+        : /certificate|SSL|TLS/i.test(m)
+          ? '（证书校验失败，可能是代理软件拦截了 HTTPS）'
+          : '';
+    return { ok: false, error: m + hint };
+  } finally {
+    if (activeChatAbort === controller) activeChatAbort = null;
+  }
+});
+
+// 测试连接：同样在主进程发出，Key 不落到页面里
+ipcMain.handle('chat:test', async (_e, { baseUrl: rawBase, model: rawModel, apiKey: rawKey } = {}) => {
+  const cfg = loadConfig();
+  const baseUrl = normalizeBaseUrl(rawBase || cfg.apiBaseUrl);
+  const model = (rawModel || cfg.model || '').trim();
+  // 允许界面传入「正在输入但还没保存」的 Key；占位符则回退到已保存的
+  const key = (!rawKey || rawKey === '__KEEP__') ? cfg.apiKey : String(rawKey).trim();
+
+  if (!baseUrl || !model) return { ok: false, error: '请先填写接口地址与模型名' };
+  if (!key) return { ok: false, error: '请先填写 API Key' };
+  if (key.includes('***')) return { ok: false, error: 'API Key 里包含 *** —— 请重新粘贴完整的 Key（可能是复制了打码后的文本）' };
+
+  try {
+    const res = await fetch(baseUrl + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: '你好' }],
+        max_tokens: 16,
+        stream: false
+      })
+    });
+
+    const raw = await res.text();
+    if (!res.ok) return { ok: false, error: extractErrorText(res.status, res.statusText, raw) };
+
+    let reply = '';
+    try {
+      const json = JSON.parse(raw);
+      reply = json?.choices?.[0]?.message?.content || '';
+    } catch {}
+    return { ok: true, text: reply };
+  } catch (e) {
+    const m = String(e && e.message || e);
+    return { ok: false, error: m };
+  }
+});
+
+// ---------- IPC ----------
+ipcMain.handle('config:get', () => sanitizeConfig(loadConfig()));
+
+ipcMain.handle('config:set', (_e, patch) => {
+  const cur = loadConfig();
+  const next = { ...cur, ...patch };
+  // 处理 __KEEP__ 占位
+  if (patch.apiKey === '__KEEP__') {
+    next.apiKey = cur.apiKey;
+  } else if (typeof patch.apiKey === 'string') {
+    const k = patch.apiKey.trim();
+    // 兜底防御：绝不允许把打码文本（含 ***）或占位符当成真 Key 存下来。
+    // 这类值一旦落盘，后续请求必然 401，而且从界面上看不出问题。
+    if (!k || k.includes('***')) {
+      next.apiKey = cur.apiKey;
+    } else {
+      next.apiKey = k;
+    }
+  }
+  config = next;
+  saveConfig(config);
+
+  // 热更新快捷键 / 悬浮球透明度
+  if (patch.hotkey && patch.hotkey !== cur.hotkey) registerHotkeys();
+  if (typeof patch.ballOpacity === 'number') {
+    ballWin && !ballWin.isDestroyed() && ballWin.setOpacity(patch.ballOpacity);
+  }
+
+  // 广播配置
+  [ballWin, panelWin, settingsWin].forEach((w) => {
+    if (w && !w.isDestroyed()) w.webContents.send('config:update', sanitizeConfig(config));
+  });
+
+  return sanitizeConfig(config);
+});
+
+// 对话历史
+ipcMain.handle('history:get', () => loadConfig().history || []);
+
+ipcMain.handle('history:add', (_e, msg) => {
+  const cfg = loadConfig();
+  cfg.history = cfg.history || [];
+  cfg.history.push({ ...msg, ts: Date.now() });
+  if (cfg.history.length > (cfg.maxHistory || 200)) {
+    cfg.history = cfg.history.slice(-cfg.maxHistory);
+  }
+  config = cfg;
+  saveConfig(cfg);
+  return true;
+});
+
+ipcMain.handle('history:clear', () => {
+  const cfg = loadConfig();
+  cfg.history = [];
+  config = cfg;
+  saveConfig(cfg);
+  return true;
+});
+
+// 窗口控制
+ipcMain.handle('win:panel-open', () => createPanelWindow());
+ipcMain.handle('win:panel-open-voice', () => triggerVoiceAsk());
+ipcMain.handle('win:panel-hide', () => {
+  panelWin && !panelWin.isDestroyed() && panelWin.hide();
+});
+ipcMain.handle('win:panel-close', () => {
+  panelWin && !panelWin.isDestroyed() && panelWin.close();
+});
+ipcMain.handle('win:settings-open', () => createSettingsWindow());
+ipcMain.handle('win:settings-close', () => {
+  settingsWin && !settingsWin.isDestroyed() && settingsWin.close();
+});
+
+// 悬浮球拖动
+ipcMain.handle('ball:drag-move', (_e, { dx, dy }) => {
+  if (!ballWin || ballWin.isDestroyed()) return;
+  const [x, y] = ballWin.getPosition();
+  ballWin.setPosition(x + dx, y + dy);
+});
+
+ipcMain.handle('ball:get-position', () => {
+  if (!ballWin || ballWin.isDestroyed()) return [0, 0];
+  return ballWin.getPosition();
+});
+
+// 智能吸附：松手时贴到屏幕边缘
+ipcMain.handle('ball:snap', () => {
+  if (!ballWin || ballWin.isDestroyed()) return;
+  const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const [x, y] = ballWin.getPosition();
+  const [w, h] = ballWin.getSize();
+  const cx = x + w / 2;
+
+  let nx = x;
+  let ny = y;
+  const EDGE = 12;
+  const SNAP_THRESHOLD = 60;
+
+  // 左右吸附
+  if (Math.abs(x - workArea.x) < SNAP_THRESHOLD) nx = workArea.x + EDGE;
+  else if (Math.abs(x + w - (workArea.x + workArea.width)) < SNAP_THRESHOLD) {
+    nx = workArea.x + workArea.width - w - EDGE;
+  }
+
+  // 上下吸附
+  if (Math.abs(y - workArea.y) < SNAP_THRESHOLD) ny = workArea.y + EDGE;
+  else if (Math.abs(y + h - (workArea.y + workArea.height)) < SNAP_THRESHOLD) {
+    ny = workArea.y + workArea.height - h - EDGE;
+  }
+
+  // 边界限制
+  nx = Math.min(Math.max(nx, workArea.x), workArea.x + workArea.width - w);
+  ny = Math.min(Math.max(ny, workArea.y), workArea.y + workArea.height - h);
+
+  ballWin.setPosition(Math.round(nx), Math.round(ny));
+  return true;
+});
+
+ipcMain.handle('ball:set-opacity', (_e, val) => {
+  if (ballWin && !ballWin.isDestroyed()) ballWin.setOpacity(val);
+  return true;
+});
+
+ipcMain.handle('ball:show-menu', () => {
+  if (!ballWin || ballWin.isDestroyed()) return;
+  const menu = Menu.buildFromTemplate([
+    { label: '打开对话面板', click: () => createPanelWindow() },
+    { label: '语音问答', click: () => triggerVoiceAsk() },
+    { type: 'separator' },
+    { label: '设置', click: () => createSettingsWindow() },
+    { label: '隐藏悬浮球', click: () => ballWin.hide() },
+    { type: 'separator' },
+    { label: '退出', click: () => { app.isQuiting = true; app.quit(); } }
+  ]);
+  menu.popup({ window: ballWin });
+});
+
+// 外部链接
+ipcMain.handle('open:external', (_e, url) => {
+  if (/^https?:\/\//.test(url)) shell.openExternal(url);
+});
+
+// 打开日志目录
+ipcMain.handle('open:userdata', () => shell.openPath(app.getPath('userData')));
+
+// GPU / 渲染模式
+ipcMain.handle('gpu:status', () => ({
+  hardwareAcceleration: !softwareMode,
+  gpuFeatureStatus: (() => {
+    try {
+      return app.getGPUFeatureStatus();
+    } catch {
+      return null;
+    }
+  })(),
+  reason: softwareMode
+    ? (lastBootCrashed ? '检测到上次启动异常，已自动降级为软件渲染'
+       : gpuDisabledByConfig ? '已手动禁用硬件加速'
+       : '命令行/环境变量指定')
+    : '正常（硬件加速）'
+}));
+
+// 手动切换「禁用硬件加速」——写入标记后需重启生效
+ipcMain.handle('gpu:set-disabled', (_e, disabled) => {
+  try {
+    if (disabled) {
+      if (gpuOffFile) fs.writeFileSync(gpuOffFile, '1', 'utf-8');
+    } else {
+      if (gpuOffFile && fs.existsSync(gpuOffFile)) fs.unlinkSync(gpuOffFile);
+    }
+    return true;
+  } catch (e) {
+    console.error('[gpu] write flag failed:', e);
+    return false;
+  }
+});
+
+ipcMain.handle('gpu:restart', () => {
+  app.relaunch();
+  app.isQuiting = true;
+  app.exit(0);
+});
+
+// 语音识别（Windows 端）：渲染进程用 Web Speech API，
+// 这里提供备用：调 PowerShell 做系统级识别（可选扩展点）
+ipcMain.handle('speech:is-available', () => {
+  return process.platform === 'win32';
+});
+
+// ---------- 应用生命周期 ----------
+async function startApp() {
+  // 先清残留的 Chromium 单实例锁（上次被强杀会留下，导致本次误判为「已有实例」）
+  const lockInfo = clearStaleSingletonLocks();
+
+  const gotTheLock = app.requestSingleInstanceLock();
+  if (gotTheLock) {
+    bootstrapApp();
+    return;
+  }
+
+  // 没拿到锁。可能是真有实例在跑，也可能是锁文件残留。
+  // 用独立信号（主进程是否存在）做二次确认，避免「双击无反应」。
+  logLine('lock', '首次取锁失败，开始二次确认（holder=' + JSON.stringify(lockInfo) + '）');
+  const running = await probeRunningInstance();
+  if (running) {
+    logLine('lock', '确认已有实例在运行，本次正常退出');
+    app.quit();
+    return;
+  }
+
+  logLine('lock', '未发现运行中的实例 —— 判定为残留锁，清理后重试');
+  clearStaleSingletonLocks();
+  const retryLock = app.requestSingleInstanceLock();
+  if (retryLock) {
+    logLine('lock', '重试取锁成功');
+    bootstrapApp();
+  } else {
+    logLine('lock', '重试仍失败，为避免多开冲突，本次退出（已在日志中记录）');
+    app.quit();
+  }
+}
+
+startApp();
+
+function bootstrapApp() {
+  // 用户再次双击图标时走到这里。曾经出现「已有实例但窗口不可见」的情况，
+  // 所以这里不只是开面板，还要确保悬浮球一定可见。
+  app.on('second-instance', () => {
+    logLine('second-instance', '收到第二次启动请求，确保界面可见');
+    if (!ballWin || ballWin.isDestroyed()) {
+      createBallWindow();
+    } else if (!ballWin.isVisible()) {
+      ballWin.show();
+    }
+    createPanelWindow();
+  });
+
+  app.whenReady().then(() => {
+    app.setAppUserModelId('ai.unihub.xiaowen');
+
+    // 走到这里说明初始化成功 —— 清除「启动中」标记与失败计数，
+    // 下次启动就不会误判为崩溃。
+    try {
+      if (bootFlagFile && fs.existsSync(bootFlagFile)) fs.unlinkSync(bootFlagFile);
+      if (crashFlagFile && fs.existsSync(crashFlagFile)) fs.unlinkSync(crashFlagFile);
+    } catch {}
+    logLine('ready', '初始化成功');
+
+    createBallWindow();
+    createTray();
+    registerHotkeys();
+
+    // 看门狗：确认悬浮球窗口真的建出来了。
+    // 曾经出现过「主进程活着但窗口不可见」的情况 —— 用户双击新实例时
+    // 会拿到单实例锁并静默退出，表现为「怎么点都打不开」。这里做一次自检。
+    setTimeout(() => {
+      const ballOk = ballWin && !ballWin.isDestroyed();
+      const visible = ballOk ? ballWin.isVisible() : false;
+      if (!ballOk || !visible) {
+        logLine('watchdog', `悬浮球异常 ballOk=${ballOk} visible=${visible}，尝试重建`);
+        if (!ballOk) {
+          createBallWindow();
+          logLine('watchdog', '已重建悬浮球窗口');
+        } else {
+          ballWin.show();
+          logLine('watchdog', '已强制显示悬浮球窗口');
+        }
+      } else {
+        logLine('watchdog', '悬浮球正常');
+      }
+    }, 6000);
+
+    screen.on('display-metrics-changed', () => {
+      // 分辨率变化时把球拉回可见区域
+      if (ballWin && !ballWin.isDestroyed()) {
+        const { workArea } = screen.getPrimaryDisplay();
+        const [x, y] = ballWin.getPosition();
+        const nx = Math.min(x, workArea.x + workArea.width - BALL_W);
+        const ny = Math.min(y, workArea.y + workArea.height - BALL_H);
+        ballWin.setPosition(Math.max(workArea.x, nx), Math.max(workArea.y, ny));
+      }
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    // 常驻托盘，不退出
+  });
+
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    // 正常退出也要清标记
+    try {
+      if (bootFlagFile && fs.existsSync(bootFlagFile)) fs.unlinkSync(bootFlagFile);
+    } catch {}
+  });
+}

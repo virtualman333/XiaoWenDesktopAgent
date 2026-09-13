@@ -1,0 +1,55 @@
+{
+  "name": "xiaowen-assistant",
+  "version": "1.0.3",
+  "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
+  "main": "src/main/main.js",
+  "author": "yonggui",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build:renderer": "vite build",
+    "start": "electron .",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
+    "preview": "npm run build:renderer && electron .",
+    "dist": "npm run build:renderer && electron-builder --win nsis",
+    "dist:dir": "npm run build:renderer && electron-builder --win dir"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^32.2.7",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "ai.unihub.xiaowen",
+    "productName": "小问助手",
+    "directories": {
+      "output": "release-v1.0.3",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "小问助手"
+    }
+  }
+}

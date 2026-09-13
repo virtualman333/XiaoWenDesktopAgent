@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src *" />
+  <title>小问助手</title>
+  <link rel="stylesheet" href="./styles/panel.css" />
+</head>
+<body>
+  <!-- ========== 对话界面 ========== -->
+  <div id="app" class="app">
+    <!-- 标题栏 -->
+    <header class="titlebar">
+      <div class="tb-left">
+        <div class="avatar">问</div>
+        <div class="tb-title">
+          <span class="name">小问助手</span>
+          <span class="model" id="modelTag">deepseek-chat</span>
+        </div>
+      </div>
+      <div class="tb-right">
+        <button class="icon-btn" id="btnVoice" title="语音问答 (Ctrl+Shift+M)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnNew" title="新建对话">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnSettings" title="设置">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnMin" title="隐藏到托盘">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button class="icon-btn danger" id="btnClose" title="关闭">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 语音浮层 -->
+    <div class="voice-overlay" id="voiceOverlay">
+      <div class="voice-card">
+        <div class="voice-waves">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div class="voice-text" id="voiceText">正在聆听…</div>
+        <div class="voice-hint">说完自动发送 · 按 Esc 取消</div>
+        <button class="voice-cancel" id="voiceCancel">取消</button>
+      </div>
+    </div>
+
+    <!-- 消息区 -->
+    <main class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div class="welcome-logo">问</div>
+        <h2>你好，我是小问</h2>
+        <p>随时问我任何问题。点击右下角悬浮球或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 语音提问。</p>
+        <div class="quick-asks">
+          <button class="quick" data-q="帮我写一封请假邮件">帮我写一封请假邮件</button>
+          <button class="quick" data-q="总结一下今天要做的事">总结今天要做的事</button>
+          <button class="quick" data-q="把这段话翻译成英文：今天天气不错">翻译一句话</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- 输入区 -->
+    <footer class="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button class="send-btn" id="btnSend" title="发送">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+      <div class="composer-tips">
+        <span id="statusTip">就绪</span>
+        <span class="spacer"></span>
+        <label class="toggle-mini">
+          <input type="checkbox" id="ttsToggle" checked />
+          <span>朗读回答</span>
+        </label>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ========== 设置界面 ========== -->
+  <div id="settings" class="settings-page" style="display:none">
+    <div class="st-header">
+      <h1>设置</h1>
+      <button class="btn-primary" id="stSave">保存</button>
+    </div>
+
+    <div class="st-body">
+      <section class="st-section">
+        <h3>AI 模型</h3>
+        <div class="field">
+          <label>服务商</label>
+          <select id="stProvider">
+            <option value="https://api.deepseek.com|deepseek-chat">DeepSeek</option>
+            <option value="https://dashscope.aliyuncs.com/compatible-mode/v1|qwen-plus">通义千问 (Qwen)</option>
+            <option value="https://api.moonshot.cn/v1|moonshot-v1-8k">月之暗面 Kimi</option>
+            <option value="https://open.bigmodel.cn/api/paas/v4|glm-4-flash">智谱 GLM</option>
+            <option value="https://api.openai.com/v1|gpt-4o-mini">OpenAI</option>
+            <option value="custom">自定义…</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>API 地址 (Base URL)</label>
+          <input type="text" id="stBaseUrl" placeholder="https://api.deepseek.com" />
+          <div class="hint">兼容 OpenAI 格式的接口地址，末尾无需带 /chat/completions</div>
+        </div>
+        <div class="field">
+          <label>模型名称</label>
+          <input type="text" id="stModel" placeholder="deepseek-chat" />
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <div class="key-row">
+            <input type="password" id="stApiKey" placeholder="sk-..." />
+            <button class="btn-ghost" id="stKeyToggle">显示</button>
+          </div>
+          <div class="hint">密钥仅保存在本机 <code>userData/config.json</code>，不会上传</div>
+        </div>
+        <button class="btn-ghost full" id="stTest">测试连接</button>
+        <div class="test-result" id="stTestResult"></div>
+      </section>
+
+      <section class="st-section">
+        <h3>对话行为</h3>
+        <div class="field">
+          <label>系统提示词（决定小问的性格与回答风格）</label>
+          <textarea id="stSystemPrompt" rows="4"></textarea>
+        </div>
+        <div class="field">
+          <label>上下文轮数 <span class="val" id="stContextVal">10</span></label>
+          <input type="range" id="stContext" min="0" max="30" step="1" value="10" />
+          <div class="hint">每次请求携带的历史消息数量，越大越费 token</div>
+        </div>
+      </section>
+
+      <section class="st-section">
+        <h3>语音</h3>
+        <div class="field row">
+          <label>朗读 AI 回答</label>
+          <label class="switch"><input type="checkbox" id="stTtsEnabled" /><span></span></label>
+        </div>
+        <div class="field">
+          <label>语速 <span class="val" id="stRateVal">1.0x</span></label>
+          <input type="range" id="stTtsRate" min="-10" max="10" step="1" value="0" />
+        </div>
+        <div class="field">
+          <label>音量 <span class="val" id="stVolumeVal">100%</span></label>
+          <input type="range" id="stTtsVolume" min="0" max="100" step="5" value="100" />
+        </div>
+        <div class="field">
+          <label>语音音色</label>
+          <select id="stVoice"></select>
+          <div class="hint">使用系统内置语音引擎（Windows: Microsoft Huihui/Yunxi 等）</div>
+        </div>
+        <button class="btn-ghost full" id="stTestVoice">试听</button>
+      </section>
+
+      <section class="st-section">
+        <h3>悬浮球</h3>
+        <div class="field">
+          <label>不透明度 <span class="val" id="stOpacityVal">92%</span></label>
+          <input type="range" id="stOpacity" min="30" max="100" step="1" value="92" />
+        </div>
+        <div class="field">
+          <label>全局快捷键（语音问答）</label>
+          <input type="text" id="stHotkey" placeholder="Alt+Space" />
+          <div class="hint">点击输入框后按下组合键即可录制。推荐 Alt+Space 或 Ctrl+Alt+Q</div>
+        </div>
+        <div class="field">
+          <label>数据目录</label>
+          <button class="btn-ghost full" id="stOpenData">打开数据目录</button>
+        </div>
+      </section>
+
+      <section class="st-section">
+        <h3>显示与兼容性</h3>
+        <div class="field row">
+          <label>禁用硬件加速 <span class="tag-warn">闪退时开启</span></label>
+          <label class="switch"><input type="checkbox" id="stGpuDisabled" /><span></span></label>
+        </div>
+        <div class="hint">
+          如果程序启动后*闪退*、界面白屏或花屏，开启此项可解决。修改后需重启程序生效。
+        </div>
+        <div class="gpu-status" id="stGpuStatus">检测中…</div>
+        <button class="btn-ghost full" id="stRestart">立即重启程序</button>
+      </section>
+
+      <section class="st-section">
+        <h3>数据</h3>
+        <button class="btn-ghost full" id="stClearHistory">清空所有对话历史</button>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="./js/panel.js"></script>
+</body>
+</html>
