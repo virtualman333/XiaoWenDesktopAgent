@@ -65,6 +65,35 @@ contextBridge.exposeInMainWorld('xw', {
     return () => ipcRenderer.removeListener('chat:delta', handler);
   },
 
+  // ---- 语音识别（阿里云百炼 paraformer-realtime） ----
+  // 渲染进程只负责「采集 PCM 音频」和「展示识别文本」，
+  // WebSocket 连接与 API Key 都留在主进程。
+  asrStart: (opts) => ipcRenderer.invoke('asr:start', opts || {}),
+  asrAudio: (chunk) => ipcRenderer.invoke('asr:audio', chunk),
+  asrStop: () => ipcRenderer.invoke('asr:stop'),
+  asrCancel: () => ipcRenderer.invoke('asr:cancel'),
+  asrTest: (opts) => ipcRenderer.invoke('asr:test', opts || {}),
+  onAsrStarted: (cb) => {
+    const handler = (_e, info) => cb(info);
+    ipcRenderer.on('asr:started', handler);
+    return () => ipcRenderer.removeListener('asr:started', handler);
+  },
+  onAsrResult: (cb) => {
+    const handler = (_e, res) => cb(res);
+    ipcRenderer.on('asr:result', handler);
+    return () => ipcRenderer.removeListener('asr:result', handler);
+  },
+  onAsrEnd: (cb) => {
+    const handler = (_e, info) => cb(info);
+    ipcRenderer.on('asr:end', handler);
+    return () => ipcRenderer.removeListener('asr:end', handler);
+  },
+  onAsrError: (cb) => {
+    const handler = (_e, msg) => cb(msg);
+    ipcRenderer.on('asr:error', handler);
+    return () => ipcRenderer.removeListener('asr:error', handler);
+  },
+
   // ---- 其他 ----
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   openUserData: () => ipcRenderer.invoke('open:userdata'),

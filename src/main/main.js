@@ -288,6 +288,14 @@ const DEFAULT_CONFIG = {
   ttsRate: 0,       // -10 ~ 10
   ttsVolume: 100,
   ttsVoice: '',
+  // ---- 语音识别（ASR）----
+  // provider: 'dashscope' 在线识别（阿里云百炼 paraformer-realtime）
+  //           'system'    系统内置（Electron 的 Web Speech API，国内网络通常不可用）
+  asrProvider: 'dashscope',
+  asrApiKey: '',
+  asrModel: 'paraformer-realtime-v2',
+  asrLanguage: 'zh',
+  asrSilenceMs: 2000, // 说话停止多久后自动结束识别
   contextTurns: 10, // 携带的历史轮数
   ballOpacity: 0.92,
   hotkey: 'Alt+Space',
@@ -592,12 +600,35 @@ function triggerVoiceAsk() {
 }
 
 // ---------- 配置脱敏 ----------
+// 通用脱敏：前 6 位 + *** + 后 4 位。短于 12 位的不做前后缀（避免暴露全部内容）。
+function maskKey(k) {
+  if (!k) return '';
+  if (k.length < 12) return '******';
+  return k.slice(0, 6) + '***' + k.slice(-4);
+}
+
 function sanitizeConfig(cfg) {
-  // 把 apiKey 打码后发给渲染进程展示（渲染进程要改时再走 set 通道）
-  const masked = cfg.apiKey
-    ? cfg.apiKey.slice(0, 6) + '***' + cfg.apiKey.slice(-4)
-    : '';
-  return { ...cfg, apiKeyMasked: masked, apiKey: cfg.apiKey ? '__KEEP__' : '' };
+  return {
+    ...cfg,
+    // 大模型 Key
+    apiKeyMasked: maskKey(cfg.apiKey),
+    apiKey: cfg.apiKey ? '__KEEP__' : '',
+    // 语音识别 Key（同样只在主进程保留真值）
+    asrApiKeyMasked: maskKey(cfg.asrApiKey),
+    asrApiKey: cfg.asrApiKey ? '__KEEP__' : ''
+  };
+}
+
+// 应用一个「可能被脱敏过」的 Key 补丁。
+// 规则：'__KEEP__' / 空 / 含 *** 一律沿用旧值；其余视为新值。
+// 返回落盘用的真实值。
+function resolveKeyPatch(patchValue, currentValue) {
+  if (patchValue === undefined) return currentValue;
+  if (patchValue === '__KEEP__') return currentValue;
+  if (typeof patchValue !== 'string') return currentValue;
+  const k = patchValue.trim();
+  if (!k || k.includes('***')) return currentValue;
+  return k;
 }
 
 // ---------- 大模型请求代理 ----------
@@ -673,6 +704,15 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
   const controller = new AbortController();
   activeChatAbort = controller;
 
+  // 把 'ai' 这类界面内部用的角色名换成接口要求的 'assistant'。
+  // 老版本的历史记录里存的是 'ai'，不转换会直接被服务端拒：
+  //   HTTP 400 · ai is not one of ['system','assistant','user','tool','function']
+  const ROLE_MAP = { ai: 'assistant' };
+  const safeMessages = (Array.isArray(messages) ? messages : [])
+    .map((m) => ({ ...m, role: ROLE_MAP[m.role] || m.role }))
+    .filter((m) => m.role === 'system' || m.role === 'user' || m.role === 'assistant'
+      || m.role === 'tool' || m.role === 'function');
+
   try {
     const res = await fetch(baseUrl + '/chat/completions', {
       method: 'POST',
@@ -682,7 +722,7 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
       },
       body: JSON.stringify({
         model,
-        messages: Array.isArray(messages) ? messages : [],
+        messages: safeMessages,
         stream: true,
         temperature: 0.7
       }),
@@ -792,19 +832,10 @@ ipcMain.handle('config:get', () => sanitizeConfig(loadConfig()));
 ipcMain.handle('config:set', (_e, patch) => {
   const cur = loadConfig();
   const next = { ...cur, ...patch };
-  // 处理 __KEEP__ 占位
-  if (patch.apiKey === '__KEEP__') {
-    next.apiKey = cur.apiKey;
-  } else if (typeof patch.apiKey === 'string') {
-    const k = patch.apiKey.trim();
-    // 兜底防御：绝不允许把打码文本（含 ***）或占位符当成真 Key 存下来。
-    // 这类值一旦落盘，后续请求必然 401，而且从界面上看不出问题。
-    if (!k || k.includes('***')) {
-      next.apiKey = cur.apiKey;
-    } else {
-      next.apiKey = k;
-    }
-  }
+  // 处理 __KEEP__ 占位与打码文本兜底防御：
+  // 打码值一旦落盘，后续请求必然鉴权失败，而且从界面上完全看不出问题。
+  if ('apiKey' in patch) next.apiKey = resolveKeyPatch(patch.apiKey, cur.apiKey);
+  if ('asrApiKey' in patch) next.asrApiKey = resolveKeyPatch(patch.asrApiKey, cur.asrApiKey);
   config = next;
   saveConfig(config);
 
@@ -969,6 +1000,399 @@ ipcMain.handle('gpu:restart', () => {
   app.exit(0);
 });
 
+// ---------- 语音识别代理（阿里云百炼 paraformer-realtime） ----------
+// 为什么放在主进程：
+//   1) 与 chat:* 一致 —— 真实 API Key 只留在主进程，渲染进程拿不到；
+//   2) 音频帧需要 WebSocket 长连接，主进程持有更稳（窗口刷新不会断流）。
+//
+// 协议要点（实测通过）：
+//   - 连接 wss://dashscope.aliyuncs.com/api-ws/v1/inference/?api_key=<KEY>
+//   - 连上后立即发 run-task（JSON 文本帧）
+//   - 收到 task-started 后才能发音频；音频为 16kHz 单声道 PCM，直接发二进制帧
+//   - 发完音频发 finish-task，服务端回 task-finished
+//   - 识别结果走 result-generated 事件，文本在 payload.output.sentence.text
+const DASHSCOPE_ASR_URL = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference';
+
+// WebSocket 实现来源（重要）：
+//   Electron 32 内置的是 Node 20，而全局 WebSocket 要到 Node 22 才默认可用，
+//   所以主进程里 typeof WebSocket === 'undefined' —— 必须依赖 ws 包。
+//   这里做一次懒加载，优先 ws；万一打包漏了依赖，再退回全局实现（不报错，
+//   只是给出可读的提示，而不是让语音功能静默失效）。
+let WebSocketCtor = null;
+let webSocketSource = '';
+(function resolveWebSocket() {
+  try {
+    const ws = require('ws');
+    const Ctor = ws.WebSocket || ws;
+    if (typeof Ctor === 'function') {
+      WebSocketCtor = Ctor;
+      webSocketSource = 'ws';
+      return;
+    }
+  } catch (e) {
+    logLine('asr', 'require(ws) 失败: ' + (e && e.code || e && e.message));
+  }
+  if (typeof globalThis.WebSocket === 'function') {
+    WebSocketCtor = globalThis.WebSocket;
+    webSocketSource = 'global';
+  }
+})();
+
+// 统一构造 WebSocket。ws 与浏览器实现的构造签名兼容，
+// 但 ws 支持在 options 里传 headers，这里保留扩展位。
+function createWebSocket(url) {
+  if (!WebSocketCtor) {
+    throw new Error('没有可用的 WebSocket 实现（ws 模块缺失），请重新安装依赖后打包');
+  }
+  return new WebSocketCtor(url);
+}
+
+// 当前会话（一次语音问答对应一个）
+let asrSession = null;
+
+function asrSend(sender, channel, payload) {
+  try {
+    if (sender && !sender.isDestroyed()) sender.send(channel, payload);
+  } catch {}
+}
+
+function asrCleanup(reason) {
+  if (!asrSession) return;
+  const s = asrSession;
+  asrSession = null;
+  s.closed = true;
+  try {
+    if (s.timer) clearInterval(s.timer);
+  } catch {}
+  try {
+    if (s.ws && s.ws.readyState === 1) {
+      // 尽量礼貌收尾；失败也无所谓，下面直接 close
+      s.ws.send(JSON.stringify({
+        header: { action: 'finish-task', task_id: s.taskId, streaming: 'duplex' },
+        payload: { input: {} }
+      }));
+    }
+  } catch {}
+  try {
+    s.ws && s.ws.close();
+  } catch {}
+  logLine('asr', `会话结束 reason=${reason} 收到${s.frames}帧 bytes=${s.bytes}`);
+}
+
+ipcMain.handle('asr:start', async (event, opts = {}) => {
+  const cfg = loadConfig();
+  const key = (opts && opts.apiKey) ? String(opts.apiKey).trim() : cfg.asrApiKey;
+  const model = (opts && opts.model) || cfg.asrModel || 'paraformer-realtime-v2';
+  const sampleRate = Number(opts.sampleRate) || 16000;
+  const lang = (opts && opts.language) || cfg.asrLanguage || 'zh';
+
+  if (!key) return { ok: false, error: '尚未配置语音识别 API Key，请在设置 → 语音中填写' };
+  if (key.includes('***')) return { ok: false, error: '语音识别 Key 里包含 *** —— 请重新粘贴完整的 Key' };
+  if (!WebSocketCtor) return { ok: false, error: '当前运行环境缺少 WebSocket 支持，无法使用语音识别' };
+
+  // 上一个会话未清干净时先收掉
+  asrCleanup('restart');
+
+  const sender = event.sender;
+  const taskId = (() => {
+    try { return require('crypto').randomUUID(); } catch {}
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  })();
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => {
+      if (!settled) { settled = true; resolve(v); }
+    };
+
+    let ws;
+    try {
+      ws = createWebSocket(`${DASHSCOPE_ASR_URL}/?api_key=${encodeURIComponent(key)}`);
+    } catch (e) {
+      return settle({ ok: false, error: '无法建立语音识别连接：' + (e && e.message) });
+    }
+
+    ws.binaryType = 'arraybuffer';
+
+    const session = {
+      ws, taskId, sender, model, sampleRate, lang,
+      started: false, closed: false, frames: 0, bytes: 0,
+      timer: null
+    };
+    asrSession = session;
+
+    // 握手超时保护
+    const handshakeTimer = setTimeout(() => {
+      if (!session.started && !session.closed) {
+        logLine('asr', '握手超时');
+        asrSend(sender, 'asr:error', '连接语音识别服务超时，请检查网络');
+        try { ws.close(); } catch {}
+        asrCleanup('handshake-timeout');
+        settle({ ok: false, error: '连接超时' });
+      }
+    }, 10000);
+
+    ws.onopen = () => {
+      logLine('asr', 'WebSocket 已连接，发送 run-task');
+      try {
+        ws.send(JSON.stringify({
+          header: { action: 'run-task', task_id: taskId, streaming: 'duplex' },
+          payload: {
+            task_group: 'audio',
+            task: 'asr',
+            function: 'recognition',
+            model,
+            parameters: {
+              format: 'pcm',
+              sample_rate: sampleRate,
+              language_hints: [lang],
+              // 打开心跳：用户停顿期间保持连接不被服务端超时断开
+              heartbeat: true,
+              // VAD 切句，交互场景延迟更低
+              semantic_punctuation_enabled: false,
+              punctuation_prediction_enabled: true
+            },
+            input: {}
+          }
+        }));
+      } catch (e) {
+        asrSend(sender, 'asr:error', '发送启动指令失败：' + (e && e.message));
+        asrCleanup('send-run-task-failed');
+        settle({ ok: false, error: '发送启动指令失败' });
+      }
+    };
+
+    // 统一取文本帧内容的兼容层：
+    //   ws 包的回调签名是 (data, isBinary)，data 直接就是内容；
+    //   浏览器/全局实现的回调签名是 (event)，内容在 event.data。
+    // 两种都处理，避免依赖来源变化时静默失效。
+    const readTextFrame = (payload) => {
+      if (typeof payload === 'string') return payload;
+      if (payload && typeof payload.data === 'string') return payload.data;
+      if (Buffer.isBuffer(payload)) {
+        try { return payload.toString('utf-8'); } catch { return ''; }
+      }
+      return '';
+    };
+
+    ws.onmessage = (ev) => {
+      const raw = readTextFrame(ev);
+      if (!raw) return; // 二进制的下行帧本项目用不到
+
+      let msg;
+      try { msg = JSON.parse(raw); } catch { return; }
+      const e = msg && msg.header && msg.header.event;
+
+      if (e === 'task-started') {
+        session.started = true;
+        clearTimeout(handshakeTimer);
+        logLine('asr', 'task-started，可以发送音频');
+        asrSend(sender, 'asr:started', { taskId });
+        settle({ ok: true, taskId });
+        return;
+      }
+
+      if (e === 'result-generated') {
+        const out = msg.payload && msg.payload.output;
+        const sen = out && out.sentence;
+        if (!sen) return;
+        // 心跳包没有实际文本，直接丢弃
+        if (out.heartbeat) return;
+        asrSend(sender, 'asr:result', {
+          text: sen.text || '',
+          isFinal: !!sen.sentence_end,
+          beginTime: sen.begin_time,
+          endTime: sen.end_time
+        });
+        return;
+      }
+
+      if (e === 'task-finished') {
+        logLine('asr', 'task-finished');
+        asrSend(sender, 'asr:end', { reason: 'finished' });
+        asrCleanup('task-finished');
+        return;
+      }
+
+      if (e === 'task-failed') {
+        const code = (msg.header && msg.header.error_code) || '';
+        const detail = (msg.header && msg.header.error_message) || '';
+        logLine('asr', `task-failed code=${code} msg=${detail}`);
+        let hint = detail || code || '识别失败';
+        if (/NO_VALID_AUDIO/i.test(code)) hint = '没有采集到有效音频，请确认麦克风是否被占用或静音';
+        else if (/InvalidApiKey|Unauthorized|401/i.test(code + detail)) hint = '语音识别 API Key 无效，请在设置中重新填写';
+        else if (/Throttling|429/i.test(code + detail)) hint = '语音识别请求过于频繁，稍后再试';
+        asrSend(sender, 'asr:error', hint);
+        asrCleanup('task-failed');
+        settle({ ok: false, error: hint });
+        return;
+      }
+    };
+
+    ws.onerror = () => {
+      logLine('asr', 'WebSocket 出错');
+      clearTimeout(handshakeTimer);
+      if (!session.started) {
+        asrSend(sender, 'asr:error', '无法连接语音识别服务，请检查网络或代理设置');
+        settle({ ok: false, error: '连接失败' });
+      } else {
+        asrSend(sender, 'asr:error', '语音识别连接中断');
+      }
+      asrCleanup('ws-error');
+    };
+
+    ws.onclose = (ev) => {
+      clearTimeout(handshakeTimer);
+      if (!session.started) {
+        asrSend(sender, 'asr:error', `语音识别服务未响应（代码 ${ev && ev.code}）`);
+        settle({ ok: false, error: '连接被关闭' });
+      } else {
+        asrSend(sender, 'asr:end', { reason: 'closed' });
+      }
+      asrCleanup('ws-close');
+    };
+  });
+});
+
+// 音频帧：渲染进程传来 Int16Array，直接二进制转发
+ipcMain.handle('asr:audio', (_e, chunk) => {
+  const s = asrSession;
+  if (!s || s.closed || !s.started) return false;
+  try {
+    if (s.ws.readyState !== 1) return false;
+    // 统一转成 Buffer 再发。
+    // ws 对 ArrayBuffer 也支持，但 Buffer 是最稳的路径（且避免 Node 版本差异）。
+    let view;
+    if (chunk instanceof ArrayBuffer) view = new Uint8Array(chunk);
+    else if (ArrayBuffer.isView(chunk)) view = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    else if (chunk && chunk.buffer instanceof ArrayBuffer) view = new Uint8Array(chunk.buffer);
+    else return false;
+
+    // 注意：ws 在收到非 Buffer 的二进制时会以 binary 帧发出，但显式转 Buffer
+    // 可以确保「永远走二进制帧」，不会因为类型判断失误变成文本帧。
+    const buf = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+    s.ws.send(buf, { binary: true });
+    s.frames += 1;
+    s.bytes += buf.byteLength;
+    return true;
+  } catch (e) {
+    logLine('asr', '发送音频帧失败: ' + (e && e.message));
+    return false;
+  }
+});
+
+// 结束识别：通知服务端把最后一段音频也吐出来
+ipcMain.handle('asr:stop', () => {
+  if (!asrSession) return false;
+  const s = asrSession;
+  logLine('asr', '用户结束识别，发送 finish-task');
+  try {
+    if (s.ws.readyState === 1) {
+      s.ws.send(JSON.stringify({
+        header: { action: 'finish-task', task_id: s.taskId, streaming: 'duplex' },
+        payload: { input: {} }
+      }));
+      // 等 task-finished 回来收尾；若迟迟不回则强制关掉
+      setTimeout(() => { if (asrSession === s) asrCleanup('stop-timeout'); }, 6000);
+      return true;
+    }
+  } catch {}
+  asrCleanup('stop-failed');
+  return false;
+});
+
+// 直接取消（不发 finish-task，立即断）
+ipcMain.handle('asr:cancel', () => {
+  asrCleanup('cancel');
+  return true;
+});
+
+// 测试语音识别 Key：只做「握手 + run-task → task-started」这一小步，
+// 不发送任何音频，验证完立即取消。廉价且能准确区分「Key 错」和「网络错」。
+ipcMain.handle('asr:test', async (_e, opts = {}) => {
+  const cfg = loadConfig();
+  const key = (opts && opts.apiKey && opts.apiKey !== '__KEEP__') ? String(opts.apiKey).trim() : cfg.asrApiKey;
+  const model = (opts && opts.model) || cfg.asrModel || 'paraformer-realtime-v2';
+
+  if (!key) return { ok: false, error: '请先填写语音识别 API Key' };
+  if (key.includes('***')) return { ok: false, error: 'Key 里包含 *** —— 请重新粘贴完整的 Key' };
+  if (!WebSocketCtor) return { ok: false, error: '当前运行环境缺少 WebSocket 支持（ws 模块未安装）' };
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const taskId = (() => {
+      try { return require('crypto').randomUUID(); } catch {}
+      return 'test-' + Date.now();
+    })();
+
+    let ws;
+    try {
+      ws = createWebSocket(`${DASHSCOPE_ASR_URL}/?api_key=${encodeURIComponent(key)}`);
+    } catch (e) {
+      return settle({ ok: false, error: '无法建立连接：' + (e && e.message) });
+    }
+    ws.binaryType = 'arraybuffer';
+
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      settle({ ok: false, error: '连接超时（10 秒无响应），请检查网络或代理' });
+    }, 10000);
+
+    ws.onopen = () => {
+      try {
+        ws.send(JSON.stringify({
+          header: { action: 'run-task', task_id: taskId, streaming: 'duplex' },
+          payload: {
+            task_group: 'audio', task: 'asr', function: 'recognition', model,
+            parameters: { format: 'pcm', sample_rate: 16000, language_hints: [cfg.asrLanguage || 'zh'], heartbeat: true },
+            input: {}
+          }
+        }));
+      } catch (e) {
+        clearTimeout(timer);
+        settle({ ok: false, error: '发送指令失败：' + (e && e.message) });
+      }
+    };
+
+    ws.onmessage = (ev) => {
+      const raw = typeof ev === 'string' ? ev
+        : (ev && typeof ev.data === 'string') ? ev.data
+        : Buffer.isBuffer(ev) ? ev.toString('utf-8') : '';
+      if (!raw) return;
+      let msg; try { msg = JSON.parse(raw); } catch { return; }
+      const e = msg && msg.header && msg.header.event;
+      if (e === 'task-started') {
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+        settle({ ok: true, text: `连接成功 ✓ 模型 ${model}` });
+      } else if (e === 'task-failed') {
+        clearTimeout(timer);
+        const code = (msg.header && msg.header.error_code) || '';
+        const detail = (msg.header && msg.header.error_message) || '';
+        let hint = detail || code;
+        if (/InvalidApiKey|Unauthorized|401/i.test(code + detail)) hint = 'API Key 无效';
+        else if (/Model.*not.*(exist|found)|InvalidParameter/i.test(code + detail)) hint = `模型名无效：${model}`;
+        else if (/Throttling|429/i.test(code + detail)) hint = '请求过于频繁';
+        try { ws.close(); } catch {}
+        settle({ ok: false, error: `HTTP 服务端拒绝 · ${hint}` });
+      }
+    };
+
+    ws.onerror = () => {
+      clearTimeout(timer);
+      settle({ ok: false, error: '无法连接 dashscope.aliyuncs.com，请检查网络或代理' });
+    };
+    ws.onclose = () => {
+      clearTimeout(timer);
+      settle({ ok: false, error: '连接被服务端关闭（可能是 Key 无效或网络受限）' });
+    };
+  });
+});
+
 // 语音识别（Windows 端）：渲染进程用 Web Speech API，
 // 这里提供备用：调 PowerShell 做系统级识别（可选扩展点）
 ipcMain.handle('speech:is-available', () => {
@@ -1076,6 +1500,8 @@ function bootstrapApp() {
 
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    // 收掉可能还在跑的语音识别会话，避免 WebSocket 悬挂
+    asrCleanup('app-quit');
     // 正常退出也要清标记
     try {
       if (bootFlagFile && fs.existsSync(bootFlagFile)) fs.unlinkSync(bootFlagFile);

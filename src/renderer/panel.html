@@ -158,6 +158,42 @@
 
       <section class="st-section">
         <h3>语音</h3>
+
+        <div class="field">
+          <label>语音识别方式</label>
+          <select id="stAsrProvider">
+            <option value="dashscope">阿里云百炼（推荐，国内可用）</option>
+            <option value="system">系统内置（依赖云端，国内常不可用）</option>
+          </select>
+          <div class="hint">识别你的说话内容用此项；下面的语速/音色只影响「朗读 AI 回答」</div>
+        </div>
+
+        <div class="asr-block" id="stAsrDashBlock">
+          <div class="field">
+            <label>百炼 API Key</label>
+            <div class="key-row">
+              <input type="password" id="stAsrKey" placeholder="sk-..." />
+              <button class="btn-ghost" id="stAsrKeyToggle">显示</button>
+            </div>
+            <div class="hint">
+              在 <a href="#" id="stAsrKeyLink">百炼控制台</a> 右上角「API-KEY」中创建。
+              密钥仅保存在本机，不会上传
+            </div>
+          </div>
+          <div class="field">
+            <label>识别模型</label>
+            <input type="text" id="stAsrModel" placeholder="paraformer-realtime-v2" />
+            <div class="hint">16k 中文场景用 paraformer-realtime-v2；8k 电话录音用 paraformer-realtime-8k-v2</div>
+          </div>
+          <div class="field">
+            <label>静音自动结束 <span class="val" id="stAsrSilenceVal">2.0s</span></label>
+            <input type="range" id="stAsrSilence" min="500" max="6000" step="100" value="2000" />
+            <div class="hint">停止说话超过该时长即自动发送，无需手动点击</div>
+          </div>
+          <button class="btn-ghost full" id="stAsrTest">测试语音识别</button>
+          <div class="test-result" id="stAsrTestResult"></div>
+        </div>
+
         <div class="field row">
           <label>朗读 AI 回答</label>
           <label class="switch"><input type="checkbox" id="stTtsEnabled" /><span></span></label>
@@ -175,7 +211,7 @@
           <select id="stVoice"></select>
           <div class="hint">使用系统内置语音引擎（Windows: Microsoft Huihui/Yunxi 等）</div>
         </div>
-        <button class="btn-ghost full" id="stTestVoice">试听</button>
+        <button class="btn-ghost full" id="stTestVoice">试听朗读效果</button>
       </section>
 
       <section class="st-section">

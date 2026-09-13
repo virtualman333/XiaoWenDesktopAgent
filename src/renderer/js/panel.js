@@ -12,6 +12,20 @@ let lastUserText = '';
 
 const $ = (id) => document.getElementById(id);
 
+/**
+ * 角色名归一化。
+ *
+ * 界面内部一直用 'ai' 表示助手（气泡 CSS 类名、历史记录都这么写），
+ * 但 OpenAI 兼容接口只接受 system / assistant / user / tool / function，
+ * 直接把 'ai' 发出去会得到：
+ *   HTTP 400 · ai is not one of ['system','assistant','user','tool','function']
+ * 所以凡是「要发往网络」的地方，都必须先过一遍这里。
+ */
+function normalizeRole(role) {
+  if (role === 'ai') return 'assistant';
+  return role;
+}
+
 const els = {
   messages: $('messages'),
   welcome: $('welcome'),
@@ -109,8 +123,9 @@ async function initChat() {
   if (history && history.length) {
     els.welcome.style.display = 'none';
     history.slice(-20).forEach((m) => {
-      addMessageBubble(m.role, m.content, { save: false, animate: false });
-      messages.push({ role: m.role, content: m.content });
+      const role = normalizeRole(m.role);
+      addMessageBubble(role, m.content, { save: false, animate: false });
+      messages.push({ role, content: m.content });
     });
     scrollToBottom();
   }
@@ -128,6 +143,9 @@ async function initChat() {
     clearMessageNodes();
     els.welcome.style.display = '';
   });
+
+  // 语音识别结果由主进程推送（WebSocket 在主进程侧）
+  bindAsrEvents();
 }
 
 function bindEvents() {
@@ -215,7 +233,10 @@ async function send(textOverride) {
   const payload = [
     { role: 'system', content: cfg.systemPrompt || '' },
     ...recent
-  ].filter((m) => m.content);
+  ]
+    .filter((m) => m.content)
+    // 兜底归一化：老版本的历史记录里存的是 'ai'，不转换会直接 400
+    .map((m) => ({ ...m, role: normalizeRole(m.role) }));
 
   // 占位气泡
   currentAiNode = addMessageBubble('ai', '', { thinking: true });
@@ -241,8 +262,8 @@ async function send(textOverride) {
       if (full) {
         renderStreaming(currentAiNode, full, true);
         finalizeAiNode(currentAiNode, full);
-        messages.push({ role: 'ai', content: full });
-        window.xw.addHistory({ role: 'ai', content: full });
+        messages.push({ role: 'assistant', content: full });
+        window.xw.addHistory({ role: 'assistant', content: full });
       } else {
         els.messages.removeChild(currentAiNode);
       }
@@ -262,8 +283,8 @@ async function send(textOverride) {
   updateSendBtn(false);
 
   if (full) {
-    messages.push({ role: 'ai', content: full });
-    window.xw.addHistory({ role: 'ai', content: full });
+    messages.push({ role: 'assistant', content: full });
+    window.xw.addHistory({ role: 'assistant', content: full });
     finalizeAiNode(currentAiNode, full);
     setStatus('就绪');
 
@@ -304,8 +325,10 @@ function stopStreaming() {
 
 // ---------- 气泡渲染 ----------
 function addMessageBubble(role, content, { save = true, animate = true, thinking = false } = {}) {
+  // 归一化后再判断：兼容历史上存过的 'ai'
+  const r = normalizeRole(role);
   const wrap = document.createElement('div');
-  wrap.className = `msg ${role}`;
+  wrap.className = `msg ${r === 'user' ? 'user' : 'ai'}`;
   if (!animate) wrap.style.animation = 'none';
 
   const avatar = document.createElement('div');
@@ -320,7 +343,7 @@ function addMessageBubble(role, content, { save = true, animate = true, thinking
 
   if (thinking) {
     bubble.innerHTML = `<span class="thinking-dots"><i></i><i></i><i></i></span>`;
-  } else if (role === 'ai') {
+  } else if (r === 'assistant') {
     bubble.innerHTML = renderMarkdown(content);
   } else {
     bubble.textContent = content;
@@ -329,7 +352,7 @@ function addMessageBubble(role, content, { save = true, animate = true, thinking
   body.appendChild(bubble);
 
   // AI 消息操作条
-  if (role === 'ai' && !thinking) {
+  if (r === 'assistant' && !thinking) {
     body.appendChild(buildActions(content, bubble));
   }
 
@@ -401,7 +424,10 @@ function buildActions(text, bubble) {
     if (streaming) return;
     // 移除当前 AI 消息
     const wrap = bar.closest('.msg');
-    const idx = messages.findIndex((m) => m.role === 'ai' && m.content === text);
+    // 历史数据可能是 'ai'，新数据是 'assistant'，两种都要能匹配上
+    const idx = messages.findIndex(
+      (m) => normalizeRole(m.role) === 'assistant' && m.content === text
+    );
     if (idx >= 0) messages.splice(idx, 1);
     wrap && wrap.remove();
     // 用最后一个用户消息重发
@@ -447,49 +473,106 @@ function newChat() {
 
 // ================== 语音问答 ==================
 let voiceFinalText = '';
+let voiceActive = false;
 
 function startVoice() {
+  if (voiceActive) return;
+
+  const provider = cfg.asrProvider || 'dashscope';
+  if (provider === 'dashscope' && !cfg.asrApiKeyMasked) {
+    setStatus('请先在设置 → 语音中配置语音识别 API Key');
+    window.xw.openSettings();
+    return;
+  }
   if (!speech.isRecognitionSupported()) {
     setStatus('当前环境不支持语音识别');
     return;
   }
+
   speech.stopSpeaking();
   voiceFinalText = '';
+  voiceActive = true;
   els.voiceText.textContent = '正在聆听…';
-  els.voiceOverlay.classList.add('show');
+  els.voiceText.classList.add('live');
+  els.voiceOverlay.classList.add('show', 'recording');
   els.btnVoice.classList.add('active');
 
-  speech.startRecognition({
-    lang: 'zh-CN',
+  const started = speech.startRecognition({
+    provider,
+    lang: cfg.asrLanguage || 'zh',
+    silenceMs: cfg.asrSilenceMs || 2000,
     onResult: (text, isFinal) => {
+      // 实时显示识别中的文本；中间结果带光标，成品句子去掉光标
       els.voiceText.textContent = text || '正在聆听…';
-      if (isFinal) voiceFinalText = text;
+      els.voiceText.classList.toggle('live', !isFinal);
+      voiceFinalText = text;
+    },
+    onLevel: (lv) => {
+      // 音量驱动波纹动画
+      els.voiceOverlay.style.setProperty('--voice-level', String(lv));
     },
     onError: (msg) => {
+      voiceActive = false;
       els.voiceText.textContent = msg;
       setStatus(msg);
-      setTimeout(() => closeVoiceOverlay(), 1400);
+      setTimeout(() => closeVoiceOverlay(), 2000);
     },
     onEnd: (finalText) => {
-      const t = (finalText || voiceFinalText || els.voiceText.textContent || '').trim();
+      voiceActive = false;
+      const t = (finalText || voiceFinalText || '').trim();
       closeVoiceOverlay();
-      if (t && t !== '正在聆听…' && !t.startsWith('识别') && !t.startsWith('没有') && !t.startsWith('麦克风') && !t.startsWith('网络') && !t.startsWith('未找到')) {
+      if (t) {
         send(t);
       } else {
         setStatus('未识别到内容');
       }
     }
   });
+
+  // startRecognition 是异步的，失败会走 onError
+  Promise.resolve(started).catch((e) => {
+    voiceActive = false;
+    setStatus('语音识别启动失败：' + (e && e.message));
+    closeVoiceOverlay();
+  });
 }
 
 function cancelVoice() {
+  voiceActive = false;
   speech.abortRecognition();
   closeVoiceOverlay();
+  setStatus('已取消');
 }
 
 function closeVoiceOverlay() {
-  els.voiceOverlay.classList.remove('show');
+  els.voiceOverlay.classList.remove('show', 'recording');
+  els.voiceText.classList.remove('live');
   els.btnVoice.classList.remove('active');
+  els.voiceOverlay.style.removeProperty('--voice-level');
+}
+
+/** 主进程推送的识别事件（在 initChat 里订阅） */
+function bindAsrEvents() {
+  window.xw.onAsrResult((res) => {
+    if (!voiceActive) return;
+    speech.pushAsrResult(res);
+  });
+  window.xw.onAsrEnd(() => {
+    // 只有还在语音态时才需要收尾，避免与 onError 重复
+    if (!voiceActive) {
+      speech.handleAsrEnd();
+      return;
+    }
+    voiceActive = false;
+    speech.handleAsrEnd();
+  });
+  window.xw.onAsrError((msg) => {
+    voiceActive = false;
+    speech.handleAsrError(msg);
+    els.voiceText.textContent = msg;
+    setStatus(msg);
+    setTimeout(() => closeVoiceOverlay(), 2000);
+  });
 }
 
 // ================== 设置页 ==================
@@ -517,6 +600,16 @@ function initSettings() {
     volumeVal: $('stVolumeVal'),
     voice: $('stVoice'),
     testVoice: $('stTestVoice'),
+    asrProvider: $('stAsrProvider'),
+    asrDashBlock: $('stAsrDashBlock'),
+    asrKey: $('stAsrKey'),
+    asrKeyToggle: $('stAsrKeyToggle'),
+    asrKeyLink: $('stAsrKeyLink'),
+    asrModel: $('stAsrModel'),
+    asrSilence: $('stAsrSilence'),
+    asrSilenceVal: $('stAsrSilenceVal'),
+    asrTest: $('stAsrTest'),
+    asrTestResult: $('stAsrTestResult'),
     opacity: $('stOpacity'),
     opacityVal: $('stOpacityVal'),
     hotkey: $('stHotkey'),
@@ -548,6 +641,21 @@ function initSettings() {
     el.rateVal.textContent = (1 + (c.ttsRate || 0) / 10).toFixed(1) + 'x';
     el.ttsVolume.value = c.ttsVolume ?? 100;
     el.volumeVal.textContent = (c.ttsVolume ?? 100) + '%';
+
+    // ---- 语音识别 ----
+    el.asrProvider.value = c.asrProvider || 'dashscope';
+    toggleAsrBlock();
+    const hasAsrKey = !!(c.asrApiKeyMasked || (c.asrApiKey && c.asrApiKey !== '__KEEP__'));
+    el.asrKey.value = '';
+    el.asrKey.placeholder = hasAsrKey
+      ? `已配置：${c.asrApiKeyMasked || '••••••'}（留空保持不变，重新填写则覆盖）`
+      : 'sk-... 请粘贴百炼 API Key';
+    el.asrKey.dataset.keep = hasAsrKey ? '1' : '0';
+    el.asrModel.value = c.asrModel || 'paraformer-realtime-v2';
+    const sil = c.asrSilenceMs ?? 2000;
+    el.asrSilence.value = sil;
+    el.asrSilenceVal.textContent = (sil / 1000).toFixed(1) + 's';
+
     el.opacity.value = Math.round((c.ballOpacity ?? 0.92) * 100);
     el.opacityVal.textContent = Math.round((c.ballOpacity ?? 0.92) * 100) + '%';
     el.hotkey.value = c.hotkey || 'Alt+Space';
@@ -581,6 +689,62 @@ function initSettings() {
   el.apiKey.addEventListener('input', () => {
     el.apiKey.dataset.keep = '0';
   });
+
+  // ---- 语音识别 Key / 服务商 ----
+  function toggleAsrBlock() {
+    const on = el.asrProvider.value === 'dashscope';
+    el.asrDashBlock.style.display = on ? '' : 'none';
+  }
+  el.asrProvider.addEventListener('change', toggleAsrBlock);
+
+  el.asrKeyToggle.addEventListener('click', () => {
+    const isPwd = el.asrKey.type === 'password';
+    el.asrKey.type = isPwd ? 'text' : 'password';
+    el.asrKeyToggle.textContent = isPwd ? '隐藏' : '显示';
+  });
+  el.asrKey.addEventListener('input', () => {
+    el.asrKey.dataset.keep = '0';
+  });
+
+  el.asrSilence.addEventListener('input', () => {
+    el.asrSilenceVal.textContent = (Number(el.asrSilence.value) / 1000).toFixed(1) + 's';
+  });
+
+  el.asrKeyLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.xw.openExternal('https://bailian.console.aliyun.com/');
+  });
+
+  // 测试语音识别：只验证握手，不发音频
+  el.asrTest.addEventListener('click', async () => {
+    const keyInput = el.asrKey.value.trim();
+    const apiKey = el.asrKey.dataset.keep === '1'
+      ? '__KEEP__'
+      : (keyInput && !keyInput.includes('***') ? keyInput : '__KEEP__');
+
+    if (el.asrProvider.value !== 'dashscope') {
+      showAsrTest('系统内置识别依赖云端服务，无法离线测试，请直接试用语音输入', 'err');
+      return;
+    }
+    if (!apiKey && !keyInput) {
+      showAsrTest('请先填写百炼 API Key', 'err');
+      return;
+    }
+
+    showAsrTest('正在测试…', 'loading');
+    try {
+      const res = await window.xw.asrTest({ apiKey, model: el.asrModel.value.trim() });
+      if (res && res.ok) showAsrTest(res.text || '连接成功 ✓', 'ok');
+      else showAsrTest('失败：' + ((res && res.error) || '未知错误'), 'err');
+    } catch (e) {
+      showAsrTest('失败：' + e.message, 'err');
+    }
+  });
+
+  function showAsrTest(msg, type) {
+    el.asrTestResult.textContent = msg;
+    el.asrTestResult.className = 'test-result show ' + type;
+  }
 
   // 滑块
   el.context.addEventListener('input', () => (el.contextVal.textContent = el.context.value));
@@ -719,7 +883,11 @@ function initSettings() {
       ttsVolume: Number(el.ttsVolume.value),
       ttsVoice: el.voice.value,
       ballOpacity: Number(el.opacity.value) / 100,
-      hotkey: el.hotkey.value.trim() || 'Alt+Space'
+      hotkey: el.hotkey.value.trim() || 'Alt+Space',
+      // 语音识别
+      asrProvider: el.asrProvider.value,
+      asrModel: el.asrModel.value.trim() || 'paraformer-realtime-v2',
+      asrSilenceMs: Number(el.asrSilence.value) || 2000
     };
 
     // 输入框留空 = 沿用已保存的 Key；填了新值才覆盖
@@ -735,8 +903,22 @@ function initSettings() {
       patch.apiKey = keyInput;
     }
 
+    // 语音识别 Key 同理
+    const asrKeyInput = el.asrKey.value.trim();
+    if (!asrKeyInput) {
+      patch.asrApiKey = '__KEEP__';
+    } else if (asrKeyInput.includes('***')) {
+      el.asrKey.placeholder = '这个值里包含 ***（是打码文本），请粘贴完整 Key';
+      el.asrKey.classList.add('input-error');
+      setTimeout(() => el.asrKey.classList.remove('input-error'), 2500);
+      return;
+    } else {
+      patch.asrApiKey = asrKeyInput;
+    }
+
     await window.xw.setConfig(patch);
     el.apiKey.value = '';
+    el.asrKey.value = '';
     el.save.textContent = '已保存 ✓';
     setTimeout(() => (el.save.textContent = '保存'), 1500);
   });

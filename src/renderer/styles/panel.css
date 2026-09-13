@@ -357,12 +357,48 @@ body { border-radius: 0; }
   width: 5px; border-radius: 3px;
   background: linear-gradient(180deg, #5b9dff, #7c5cf6);
   animation: wave 1.15s ease-in-out infinite;
+  transform-origin: center;
 }
 .voice-waves span:nth-child(1) { height: 14px; animation-delay: 0s; }
 .voice-waves span:nth-child(2) { height: 26px; animation-delay: .13s; }
 .voice-waves span:nth-child(3) { height: 38px; animation-delay: .26s; }
 .voice-waves span:nth-child(4) { height: 26px; animation-delay: .39s; }
 .voice-waves span:nth-child(5) { height: 14px; animation-delay: .52s; }
+@keyframes wave {
+  0%, 100% { transform: scaleY(.42); opacity: .55; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
+/* 真人说话时：由 JS 写入 --voice-level（0~1），让波纹跟着音量起伏，
+   静音时自动衰减回基线 —— 用户能一眼看出「有没有在收音」 */
+@keyframes voicePulse {
+  0%, 100% { transform: scaleY(calc(.35 + var(--voice-level, 0) * .35)); }
+  50%      { transform: scaleY(calc(.75 + var(--voice-level, 0) * .85)); }
+}
+.voice-overlay.recording .voice-waves span {
+  animation: voicePulse .34s ease-in-out infinite;
+}
+.voice-overlay.recording .voice-waves span:nth-child(2) { animation-delay: .05s; }
+.voice-overlay.recording .voice-waves span:nth-child(3) { animation-delay: .1s; }
+.voice-overlay.recording .voice-waves span:nth-child(4) { animation-delay: .15s; }
+.voice-overlay.recording .voice-waves span:nth-child(5) { animation-delay: .2s; }
+
+/* 识别中的中间结果：浅色 + 结尾光标，和已确认文本区分开 */
+.voice-text.live::after {
+  content: ''; display: inline-block; width: 2px; height: 13px;
+  background: var(--brand); margin-left: 3px; vertical-align: -2px;
+  animation: blink .9s steps(1) infinite;
+}
+
+/* ---- 设置页：语音识别块 ---- */
+.asr-block {
+  padding: 12px; margin: 4px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft, #f8f9fb);
+}
+.asr-block .field:last-child { margin-bottom: 0; }
+.asr-block .test-result { margin-top: 8px; }
 @keyframes wave {
   0%, 100% { transform: scaleY(.42); opacity: .55; }
   50% { transform: scaleY(1); opacity: 1; }
