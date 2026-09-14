@@ -377,3 +377,36 @@ html, body {
 
 /* 被拖动时禁止所有过渡，避免卡顿感 */
 body.dragging * { transition: none !important; }
+
+/* ---------- 常驻聆听指示（宠物代替悬浮球时可见） ---------- */
+/* 悬浮球上有 wake-on / wake-active 两个小状态点，宠物这边做成一只「竖起来的耳朵」，
+   和它的画风一致，也不会挡到脸。 */
+.pet-ear {
+  position: absolute;
+  right: -10px;
+  top: -4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  background: rgba(255, 255, 255, .95);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(20, 28, 50, .16);
+  font-size: 10px;
+  line-height: 1.5;
+  color: #6b7280;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s;
+  z-index: 5;
+}
+.pet-ear.show { opacity: 1; }
+.pet-ear .ear-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #9aa3b2; flex-shrink: 0;
+}
+/* 正在识别：红点呼吸，说明这会儿真在听 */
+.pet-ear.active { color: #b45309; }
+.pet-ear.active .ear-dot { background: #ef4444; animation: earPulse 1.1s ease-in-out infinite; }
+@keyframes earPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.7); } }

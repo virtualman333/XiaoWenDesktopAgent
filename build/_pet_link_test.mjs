@@ -19,8 +19,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = path.join(here, '..', 'src', 'renderer', 'js', 'pet.js');
-const tmp = path.join(here, '_pet_tmp.mjs');
+const srcDir = path.join(here, '..', 'src', 'renderer', 'js');
+const src = path.join(srcDir, 'pet.js');
+// 临时副本必须**挨着原文件**放：pet.js 里有 `./wake.js`、`./entry-rule.js` 这种
+// 相对 import，放到 build/ 下就会解析到 build/wake.js 而报 MODULE_NOT_FOUND。
+const tmp = path.join(srcDir, '_pet_tmp.mjs');
 
 // 最小 DOM 桩：让 pet.js 停在「等 DOMContentLoaded」，不会真的 init
 globalThis.document = {

@@ -26,6 +26,11 @@
         <i></i><i></i><i></i>
         <span id="badgeTip">思考中</span>
       </div>
+      <!-- 常驻聆听指示：宠物开着时它就是悬浮球的替代入口，
+           语音唤醒也由它托管，所以得让人看得出来麦克风是开着的 -->
+      <div class="pet-ear" id="ear" title="正在等你说「小问」">
+        <span class="ear-dot"></span><span>听着呢</span>
+      </div>
       <div class="pet-sprite" id="sprite"></div>
       <div class="pet-shadow"></div>
       <div class="pet-zzz" id="zzz">z z Z</div>
@@ -55,10 +60,16 @@
       <button class="menu-item" data-act="feed">🍖 喂食</button>
       <button class="menu-item" data-act="sleep">💤 睡觉 / 起床</button>
       <button class="menu-item" data-act="walk">🚶 散步开关</button>
-      <button class="menu-item" data-act="chat">💬 找小问聊天</button>
-      <button class="menu-item" data-act="top">📌 置顶开关</button>
       <div class="menu-sep"></div>
-      <button class="menu-item danger" data-act="hide">🙈 隐藏宠物</button>
+      <button class="menu-item" data-act="chat">💬 找小问聊天</button>
+      <button class="menu-item" data-act="voice">🎤 语音问答</button>
+      <button class="menu-item" data-act="settings">⚙️ 设置</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" data-act="top">📌 置顶开关</button>
+      <button class="menu-item" data-act="ball">🎈 显示悬浮球</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" data-act="hide">🔄 换成悬浮球（隐藏宠物）</button>
+      <button class="menu-item danger" data-act="quit">🚪 退出小问</button>
     </div>
   </div>
 

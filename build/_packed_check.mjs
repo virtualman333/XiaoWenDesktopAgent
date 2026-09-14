@@ -22,6 +22,8 @@ const REQUIRED = [
   'src/main/preload.js',
   'src/main/tray-icon.js',
   'src/main/meeting.js',
+  // 桌面入口分工规则（main.js require 它算「球该不该显示」）
+  'src/main/entry.js',
   'src/main/jarvis/meeting-detect.js',
   'src/main/jarvis/minutes.js',
   'src/assets/tray.ico',

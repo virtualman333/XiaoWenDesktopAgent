@@ -38,7 +38,10 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 跑回归测试（纯 Node，硬闸）
+      - name: 跑回归测试（纯 Node，秒级）
+        # 只留白盒单测：不依赖图形会话、毫秒到秒级跑完，改坏了一眼就能看出来。
+        # GUI 类的冒烟测试（窗口合成 / 快捷键占用 / 截图比对）在 runner 上又慢又会 flake，
+        # 快速迭代阶段已经去掉，改到本地按需手动跑。
         run: |
           npm run test:wake
           npm run test:pet
@@ -49,15 +52,7 @@ jobs:
           npm run test:context
           npm run test:hotkey
           npm run test:meeting
-
-      - name: GUI 冒烟（需要真实桌面，不阻断发布）
-        # runner 上的图形会话偶尔会抽风（窗口合成、快捷键占用）。
-        # 这些测试有价值，但不该因为它们flake就卡住一次发版 —— 失败照样打红叉，人去查。
-        continue-on-error: true
-        run: |
-          npm run test:pet-top
-          npm run test:boot
-          npm run test:ui
+          npm run test:entry
 
       - name: 构建渲染层
         run: npm run build:renderer

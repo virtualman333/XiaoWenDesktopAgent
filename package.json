@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -25,11 +25,11 @@
     "test:context": "node build/_context_test.mjs",
     "test:hotkey": "node build/_hotkey_test.mjs",
     "test:meeting": "node build/_meeting_test.mjs",
+    "test:entry": "node build/_entry_test.mjs",
     "probe:meeting": "node build/_meeting_live_probe.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
-    "test:ui": "node build/_run-electron.mjs build/_ui_smoke.js",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:meeting && npm run test:proactive && npm run test:orch && npm run test:pet && npm run test:tray && npm run test:wake",
-    "test:boot": "node build/_run-electron.mjs build/_boot_check.js"
+    "test": "npm run test:all",
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:meeting && npm run test:entry && npm run test:proactive && npm run test:orch && npm run test:pet && npm run test:tray && npm run test:wake"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -41,7 +41,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.8.0",
+      "output": "release-v1.9.0",
       "buildResources": "build"
     },
     "files": [

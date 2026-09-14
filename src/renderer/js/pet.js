@@ -8,7 +8,18 @@
  *  - 窗口整体鼠标穿透，只有宠物身体区域接管鼠标（mouseenter/leave 动态开关）
  *  - 眨眼 = 缩放 .eyeball；眼神跟随 = 平移 .eye（两个 transform 分层，互不覆盖）
  *  - 散步由渲染层算路径，通过增量 IPC 移动窗口
+ *
+ * 它还是「悬浮球的替身」：宠物开着时悬浮球会自动退场，所以悬浮球那套能力
+ * 这里都得有 —— 单击聊天、双击语音、拖动、右键菜单，以及最要紧的
+ * **语音唤醒常驻监听**（唤醒引擎复用 wake.js，宿主由主进程指定）。
  */
+
+import {
+  startWake, stopWake, isWakeRunning, isWakeSupported,
+  suspendWake, setPanelPaused, updateWakeConfig
+} from './wake.js';
+// 桌面入口的分工规则（和主进程 src/main/entry.js 是同一套，单测会断言两边一致）
+import { shouldHostWake, ballWanted } from './entry-rule.js';
 
 // ==================== 动物库 ====================
 const EYE = (x, y, r, color, extra = '') =>
@@ -224,6 +235,13 @@ let lastInteract = Date.now();
 let busyCls = '';        // 当前持续的「忙碌」演出（think / work / listen）
 let busyResetTimer = null; // 兜底：长时间没收到收尾事件就自己回待机
 
+// ---- 语音唤醒（宠物代替悬浮球时由它托管麦克风）----
+let wakeCfg = { wakeEnabled: false, wakeWords: [], wakeSensitivity: 60, wakeSound: true };
+let wakeBooted = false;   // 首次启动失败时只提示一次，免得刷屏
+let amWakeHost = false;   // 主进程定的：现在是不是宠物在听
+let entryInfo = {};       // 主进程回报的「谁在当桌面入口」
+let clickTimer = null;    // 单击 / 双击判定
+
 const $ = (id) => document.getElementById(id);
 const els = {};
 
@@ -240,6 +258,7 @@ async function init() {
   els.floatLayer = $('floatLayer');
   els.badge = $('badge');
   els.badgeTip = $('badgeTip');
+  els.ear = $('ear');
 
   try { cfg = await window.xw.getConfig(); } catch (e) { cfg = {}; }
   try {
@@ -277,6 +296,42 @@ async function init() {
   try {
     window.xw.onPetAct && window.xw.onPetAct((p) => agentAct(p));
   } catch (e) { /* ignore */ }
+
+  // ---- 悬浮球那套广播，宠物这边也得收（它代替了球）----
+  // 主进程的 toast（「对话历史已清空」这类）原来只发给球，现在改成两边都发
+  try {
+    window.xw.onToast && window.xw.onToast((msg) => showToast(msg));
+  } catch (e) { /* ignore */ }
+  // 开始录音 / 面板同步让麦克风
+  try {
+    window.xw.onVoiceStart && window.xw.onVoiceStart(() => {
+      showToast('正在聆听…');
+      setEarIndicator(true, true, '在听…');
+      suspendWake(true, 25000);
+    });
+  } catch (e) { /* ignore */ }
+  try {
+    window.xw.onWakeSync && window.xw.onWakeSync(({ paused }) => setPanelPaused(!!paused));
+  } catch (e) { /* ignore */ }
+
+  // ---- 谁是桌面入口 / 谁托管唤醒 ----
+  // 主进程广播只是「提醒重新算一次」：真正怎么算看 shouldHostWake(配置)，
+  // 这样就不会因为广播比渲染层订阅早一步而漏掉唤醒。
+  try {
+    window.xw.onEntryHost && window.xw.onEntryHost((info) => {
+      entryInfo = { ...entryInfo, ...(info || {}) };
+      syncWakeHost();
+      paintBallMenu();
+    });
+  } catch (e) { /* ignore */ }
+
+  // 启动时先问一次实际分工（广播可能在我们加载完之前就发过了）
+  try {
+    const st = await window.xw.entryState();
+    if (st) entryInfo = { ...entryInfo, ...st };
+  } catch (e) { /* ignore */ }
+  paintBallMenu();
+  bootWake(cfg).catch(() => {});
 
   // 让主进程把鼠标事件转发进来（窗口默认穿透）
   try { window.xw.petReady && window.xw.petReady(); } catch (e) { /* ignore */ }
@@ -535,6 +590,91 @@ function setFace(d) {
   document.documentElement.style.setProperty('--face', String(d));
 }
 
+// ==================== 语音唤醒（宠物代替悬浮球时由它常驻监听） ====================
+//
+// 用的还是悬浮球那套引擎（wake.js），只是换了个宿主。什么时候轮到宠物托管
+// 由主进程说了算（`entry:host`），因为只有它知道悬浮球到底建没建出来 ——
+// 两个窗口同时抢麦克风会互相顶掉对方的识别会话，谁也醒不了。
+
+function showToast(msg) {
+  say(String(msg || ''), 2800);
+}
+
+/**
+ * 宠物该不该托管唤醒监听 —— 规则在 entry-rule.js（和主进程同一套）。
+ * 这里只包一层，方便日志和测试；判断本身是纯函数，不看广播的到达时机。
+ */
+function amHostNow(c) {
+  return shouldHostWake(c);
+}
+
+function setEarIndicator(on, active, text) {
+  const el = els.ear;
+  if (!el) return;
+  el.classList.toggle('show', !!on);
+  el.classList.toggle('active', !!active);
+  const label = el.querySelector('span:last-child');
+  if (label && text) label.textContent = text;
+}
+
+async function bootWake(c) {
+  wakeCfg = {
+    wakeEnabled: !!c.wakeEnabled,
+    wakeWords: Array.isArray(c.wakeWords) ? c.wakeWords : [],
+    wakeSensitivity: c.wakeSensitivity != null ? c.wakeSensitivity : 60,
+    wakeSound: c.wakeSound !== false
+  };
+  amWakeHost = amHostNow(c);
+
+  // 不是宿主（悬浮球在场）或者用户根本没开唤醒 → 别占着麦克风
+  if (!amWakeHost || !wakeCfg.wakeEnabled) {
+    if (isWakeRunning()) stopWake();
+    setEarIndicator(false, false);
+    return;
+  }
+
+  if (!isWakeSupported()) {
+    setEarIndicator(false, false);
+    return;
+  }
+
+  if (isWakeRunning()) {
+    updateWakeConfig({
+      wakeWords: wakeCfg.wakeWords.length ? wakeCfg.wakeWords : undefined,
+      sensitivity: wakeCfg.wakeSensitivity,
+      sound: wakeCfg.wakeSound
+    });
+    return;
+  }
+
+  const ok = await startWake({
+    wakeWords: wakeCfg.wakeWords,
+    sensitivity: wakeCfg.wakeSensitivity,
+    sound: wakeCfg.wakeSound,
+    onState: (s) => setEarIndicator(true, s === 'recognizing' || s === 'waiting', s === 'recognizing' ? '在听…' : '听着呢'),
+    onWake: ({ word }) => {
+      showToast(`唤醒成功：${word}`);
+      setEarIndicator(true, true, '在听…');
+      // 唤醒成功后立刻把麦克风让给面板的录音，否则它会听见自己
+      suspendWake(true, 25000);
+      agentAct({ action: 'listen' });
+      window.xw.openPanelVoice && window.xw.openPanelVoice();
+    },
+    onError: (msg) => {
+      // 环境嘈杂时引擎会反复报错，只在第一次提示一下
+      if (!wakeBooted) showToast(String(msg).slice(0, 40));
+    }
+  });
+
+  wakeBooted = true;
+  if (!ok) setEarIndicator(false, false);
+}
+
+/** 主进程改了口径（宠物/悬浮球换人）→ 立刻起停监听 */
+function syncWakeHost() {
+  if (!amWakeHost && isWakeRunning()) stopWake();
+  bootWake(cfg).catch(() => {});
+}
 // ==================== 事件 ====================
 function bindEvents() {
   // 悬停：接管鼠标 / 显示状态条
@@ -558,6 +698,9 @@ function bindEvents() {
     dragging = true;
     moved = false;
     dragStart = { x: e.screenX, y: e.screenY };
+    // 拖动不是点击：把待判定的单击掐掉，免得松手后突然冒出个面板
+    clearTimeout(clickTimer);
+    clickTimer = null;
     document.body.classList.add('dragging');
     els.body.classList.add('dragging');
     hideMenu();
@@ -597,15 +740,25 @@ function bindEvents() {
     }
   });
 
-  // 点击互动
+  // 点击：语义和悬浮球完全一致（宠物就是球的替身）
+  //   单击 → 摸一把 + 打开对话面板
+  //   双击 → 语音问答（开面板并直接开录）
+  // 单击得等 260ms 才知道是不是双击，正好把「摸头」的反馈塞进这个空档，
+  // 手不会觉得空着，而面板该开还是会开。
   els.body.addEventListener('click', (e) => {
     if (moved) { moved = false; return; }
+    if (clickTimer) {
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      showToast('语音问答…');
+      window.xw.openPanelVoice && window.xw.openPanelVoice();
+      return;
+    }
     interact();
-  });
-
-  // 双击：找小问
-  els.body.addEventListener('dblclick', () => {
-    window.xw.openPanel && window.xw.openPanel();
+    clickTimer = setTimeout(() => {
+      clickTimer = null;
+      window.xw.openPanel && window.xw.openPanel();
+    }, 260);
   });
 
   // 右键菜单
@@ -643,6 +796,8 @@ function bindEvents() {
         clearTimeout(busyResetTimer);
         setBusy('');
       }
+      // 唤醒开关 / 唤醒词 / 灵敏度改了要立刻生效（不用重启监听）
+      bootWake(c).catch(() => {});
     });
   } catch (e) { /* ignore */ }
 }
@@ -714,17 +869,58 @@ function buildMenu() {
   });
 
   els.menu.querySelectorAll('.menu-item').forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const act = btn.dataset.act;
       hideMenu();
       if (act === 'feed') feed();
       else if (act === 'sleep') toggleSleep();
       else if (act === 'walk') toggleWalk();
       else if (act === 'chat') window.xw.openPanel && window.xw.openPanel();
+      else if (act === 'voice') window.xw.openPanelVoice && window.xw.openPanelVoice();
+      else if (act === 'settings') window.xw.openSettings && window.xw.openSettings('pet');
       else if (act === 'top') toggleTop();
-      else if (act === 'hide') window.xw.petHide && window.xw.petHide();
+      else if (act === 'ball') await toggleBall();
+      else if (act === 'hide') switchToBall();
+      else if (act === 'quit') window.xw.quitApp && window.xw.quitApp();
     };
   });
+  paintBallMenu();
+}
+
+/** 「显示悬浮球」那项跟着实际状态换文案：球在场时是「藏起来」，反之是「找回来」 */
+function paintBallMenu() {
+  const btn = els.menu && els.menu.querySelector('.menu-item[data-act="ball"]');
+  if (!btn) return;
+  // 以主进程回报的实际情况为准；还没拿到就按配置推一下（同一套规则）
+  const shown = entryInfo.host ? !!entryInfo.ballShown : ballWanted(cfg);
+  btn.textContent = shown ? '🎈 隐藏悬浮球（只用宠物）' : '🎈 找回悬浮球';
+}
+
+/** 宠物菜单里的悬浮球开关（走主进程统一入口，配置一起落盘） */
+async function toggleBall() {
+  try {
+    if (entryInfo.ballShown) {
+      entryInfo = { ...entryInfo, ...(await window.xw.entryBallSet(false)) };
+      showToast('悬浮球收起来了，交给我吧～');
+    } else {
+      entryInfo = { ...entryInfo, ...(await window.xw.entryBallShow()) };
+      showToast('悬浮球回来了（两个都在，会有点挤）');
+    }
+    // 唤醒托管跟着「谁在场」走，syncWakeHost 会自己按最新配置重算
+    syncWakeHost();
+    paintBallMenu();
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * 「换成悬浮球」：把宠物关掉。
+ * 主进程会把悬浮球放回来 —— 桌面上总得留一个能点的入口，不会两个都没有。
+ */
+function switchToBall() {
+  say('那我先退场，悬浮球来接班～', 1200);
+  setTimeout(() => {
+    try { window.xw.petHide && window.xw.petHide(); } catch (e) { /* ignore */ }
+  }, 700);
 }
 
 function selectAnimal(id) {
@@ -767,7 +963,7 @@ function hideMenu() {
 }
 
 // 供回归测试 import（浏览器里作为模块加载，多几个导出没有副作用）
-export { AGENT_ACT, TOOL_LABEL, toolLabel, agentAct };
+export { AGENT_ACT, TOOL_LABEL, toolLabel, agentAct, paintBallMenu };
 
 // ==================== 启动 ====================
 if (document.readyState === 'loading') {

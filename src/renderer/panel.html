@@ -243,9 +243,23 @@
 
           <h3>悬浮球</h3>
           <div class="field">
+            <label>什么时候显示 <span class="hint-inline">它和桌面宠物是同一个入口的两种样子</span></label>
+            <select id="stBallMode">
+              <option value="auto">自动：开着宠物就隐藏它（推荐）</option>
+              <option value="true">总是显示（和宠物并存）</option>
+              <option value="false">不显示（只用宠物）</option>
+            </select>
+            <div class="hint">
+              宠物开着时，悬浮球会自动退场 —— 单击聊天、双击语音、拖动、右键菜单、
+              语音唤醒监听，宠物全部接管，桌面上不用摆两个重叠的入口。
+              宠物关掉后悬浮球会自动回来，保证桌面上总有一个能点的东西。
+            </div>
+          </div>
+          <div class="field">
             <label>不透明度 <span class="val" id="stOpacityVal">92%</span></label>
             <input type="range" id="stOpacity" min="30" max="100" step="1" value="92" />
           </div>
+          <div class="hint" id="stBallState">当前状态：—</div>
 
           <h3>系统托盘</h3>
           <div class="field">
@@ -742,7 +756,10 @@
             <label class="switch"><input type="checkbox" id="stPetEnabled" /><span></span></label>
           </div>
           <div class="hint">
-            默认鼠标穿透，只有把光标移到它身上才会接管点击。拖动可挪位置，右键有菜单，双击找小问聊天。
+            默认鼠标穿透，只有把光标移到它身上才会接管点击。
+            <b>开着宠物时，悬浮球会自动隐藏</b>——单击宠物打开对话、双击语音问答、
+            拖动换位置、右键是一整套菜单，和悬浮球的操作完全一致；
+            语音唤醒也由它接管。想两个都留着，去「通用 → 悬浮球」里改成「总是显示」。
           </div>
 
           <h3>选择动物</h3>

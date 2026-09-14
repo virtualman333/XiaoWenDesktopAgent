@@ -297,6 +297,12 @@ function revealPet(reason = '') {
     petWin.webContents.send('config:update', (api.getSanitizedConfig || api.getConfig)());
   } catch (e) { /* ignore */ }
 
+  // 顺手告诉渲染层「现在谁是桌面入口 / 谁来托管唤醒监听」。
+  // 窗口可能是刚重建的，它得知道自己要不要把语音唤醒接过来。
+  try {
+    if (api.entryStatus) petWin.webContents.send('entry:host', api.entryStatus());
+  } catch (e) { /* ignore */ }
+
   if (reason) log(`宠物已显示（${reason}）`);
   return true;
 }
@@ -645,9 +651,30 @@ function registerPetIpc() {
   // 任意窗口请求宠物演出 Agent 状态
   ipcMain.handle('pet:act-out', (_e, p) => petAct(p && p.action, p || {}));
 
-  ipcMain.handle('pet:hide', () => hidePet());
-  ipcMain.handle('pet:show', () => showPet());
-  ipcMain.handle('pet:toggle', () => togglePet());
+  ipcMain.handle('pet:hide', () => {
+    // 隐藏宠物和「关掉宠物」是同一件事：桌面上不能两个入口都没有。
+    // 走统一开关 → 配置落盘 + 悬浮球自动回来接班。
+    if (api && api.setEnabled) {
+      api.setEnabled(false);
+      return true;
+    }
+    return hidePet();
+  });
+  ipcMain.handle('pet:show', () => {
+    if (api && api.setEnabled) {
+      api.setEnabled(true);
+      return true;
+    }
+    return showPet();
+  });
+  ipcMain.handle('pet:toggle', () => {
+    if (api && api.setEnabled && api.getConfig) {
+      const on = api.getConfig().petEnabled !== false;
+      api.setEnabled(!on);
+      return !on;
+    }
+    return togglePet();
+  });
   ipcMain.handle('pet:visible', () => isVisible());
   ipcMain.handle('pet:rescue', () => rescue());
   ipcMain.handle('pet:reload', () => reloadPet());
@@ -722,7 +749,10 @@ function init(opts = {}) {
     loadRenderer: opts.loadRenderer,
     getConfig: opts.getConfig,
     getSanitizedConfig: opts.getSanitizedConfig,
-    log: opts.log || (() => {})
+    log: opts.log || (() => {}),
+    // 桌面上「宠物 ⇄ 悬浮球」的开关由主进程统一管，这里只留个入口给 IPC 用
+    setEnabled: opts.setEnabled || null,
+    entryStatus: opts.entryStatus || null
   };
   registerPetIpc();
 

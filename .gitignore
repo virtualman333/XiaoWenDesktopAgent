@@ -39,3 +39,4 @@ config.json
 # ---- 打包/构建临时残留 ----
 vite.config.mjs.timestamp-*.mjs
 build/_*.tmp
+src/renderer/js/_pet_tmp.mjs

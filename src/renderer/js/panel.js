@@ -981,6 +981,22 @@ function paletteCommands() {
     { g: '常用', ico: '📷', title: '框选截图后提问', sub: 'Alt+Shift+A', run: () => window.xw.captureRegion() },
     { g: '常用', ico: '🖼️', title: '全屏截图后提问', sub: 'Alt+Shift+F', run: () => window.xw.captureFull() },
     { g: '常用', ico: '🐧', title: '召唤桌面宠物到鼠标处', sub: 'Alt+Ctrl+P', run: () => { window.xw.petSummon(); setToast('宠物已召唤到鼠标处'); } },
+    {
+      g: '常用', ico: '🎈', title: '悬浮球 / 宠物 换个班',
+      sub: '同一时刻只留一个入口',
+      run: async () => {
+        const st = await window.xw.entryState();
+        if (st.ballShown) {
+          await window.xw.entryBallSet(false);
+          await window.xw.setConfig({ petEnabled: true });
+          setToast('悬浮球收起来了，入口交给桌面宠物');
+        } else {
+          await window.xw.entryBallShow();
+          setToast('悬浮球回来了（现在两个入口都在）');
+        }
+        refreshBallState();
+      }
+    },
     { g: '定时', ico: '⏰', title: '新建一个定时任务', run: () => openQuickSchedule('', '') },
     { g: '定时', ico: '📋', title: '看所有定时任务', sub: '设置 · 定时任务', run: () => window.xw.openSettings('schedule') },
     { g: '定时', ico: '▶️', title: '立刻把定时任务跑一遍', run: () => window.xw.openSettings('schedule') },
@@ -1457,6 +1473,20 @@ function bindGeneral() {
     $('stOpacityVal').textContent = $('stOpacity').value + '%';
     window.xw.ballSetOpacity(Number($('stOpacity').value) / 100);
   });
+
+  // 悬浮球 ⇄ 宠物 的分工（同一时刻只出一个）
+  const mode = $('stBallMode');
+  if (mode) {
+    mode.addEventListener('change', async () => {
+      const v = mode.value;
+      try {
+        cfg = await window.xw.setConfig({ ballEnabled: v === 'true' ? true : v === 'false' ? false : 'auto' });
+        setToast(v === 'auto' ? '已设为自动：宠物在场时隐藏悬浮球'
+          : v === 'true' ? '悬浮球会一直显示' : '悬浮球不再显示，入口交给宠物');
+      } catch (e) { /* ignore */ }
+      refreshBallState();
+    });
+  }
 }
 
 async function fillGeneral() {
@@ -1467,6 +1497,26 @@ async function fillGeneral() {
   $('stOpacity').value = Math.round((cfg.ballOpacity ?? 0.92) * 100);
   $('stOpacityVal').textContent = Math.round((cfg.ballOpacity ?? 0.92) * 100) + '%';
   $('stHotkey').value = cfg.hotkey || 'Alt+Space';
+  if ($('stBallMode')) {
+    const mode = cfg.ballEnabled === true || cfg.ballEnabled === false ? cfg.ballEnabled : 'auto';
+    $('stBallMode').value = String(mode);
+  }
+  refreshBallState();
+}
+
+/** 把「现在桌面上到底是谁」摊在设置页上，省得用户到处找球 */
+async function refreshBallState() {
+  const el = $('stBallState');
+  if (!el) return;
+  try {
+    const st = await window.xw.entryState();
+    if (!st) return;
+    const who = st.ballShown ? '悬浮球' : '桌面宠物';
+    const why = st.petOn ? '宠物开着，所以入口是它' : '宠物关着，所以悬浮球顶班';
+    el.textContent = `当前桌面入口：${who}（${why}）` + (st.ballShown && st.petOn ? '；两个都开着，会比较挤' : '');
+  } catch (e) {
+    el.textContent = '当前状态：读取失败';
+  }
 }
 
 // ---------- AI 模型 ----------
@@ -2053,7 +2103,10 @@ function bindPet() {
   on.checked = cfg.petEnabled !== false;
   on.addEventListener('change', async () => {
     cfg = await window.xw.setConfig({ petEnabled: on.checked });
-    setToast(on.checked ? '宠物已出现' : '宠物已隐藏');
+    setToast(on.checked
+      ? '宠物已出现（悬浮球已自动隐藏，入口交给它）'
+      : '宠物已隐藏，悬浮球回来接班');
+    refreshBallState();
   });
 
   const size = $('stPetSize');
@@ -2109,8 +2162,9 @@ function bindPet() {
     const next = cfg.petEnabled === false;
     cfg = await window.xw.setConfig({ petEnabled: next });
     on.checked = next;
-    setToast(next ? '宠物已出现' : '宠物已隐藏');
+    setToast(next ? '宠物已出现（悬浮球已让位）' : '宠物已隐藏，悬浮球回来接班');
     refreshPetDiag();
+    refreshBallState();
   });
 
   $('stPetRescue').addEventListener('click', async () => {
@@ -2124,6 +2178,7 @@ function bindPet() {
       setToast('叫回失败：' + ((e && e.message) || e));
     }
     refreshPetDiag();
+    refreshBallState();
   });
 
   $('stPetSummon').addEventListener('click', async () => {
@@ -2137,6 +2192,7 @@ function bindPet() {
       setToast('召唤失败：' + ((e && e.message) || e));
     }
     refreshPetDiag();
+    refreshBallState();
   });
 
   $('stPetTopNow').addEventListener('click', async () => {
@@ -2148,7 +2204,7 @@ function bindPet() {
   $('stPetRebuild').addEventListener('click', async () => {
     await window.xw.petHardRecover();
     setToast('宠物窗口已重建');
-    setTimeout(refreshPetDiag, 900);
+    setTimeout(() => { refreshPetDiag(); refreshBallState(); }, 900);
   });
 
   $('stPetFeed').addEventListener('click', async () => {
@@ -2212,7 +2268,10 @@ async function refreshPetHealth() {
     }
     const head = `体检：${bits.join(' · ')}。`;
     const hint = (h.hints || []).join(' ');
-    el.innerHTML = `${escapeHtml(head)}${hint ? '<br>' + escapeHtml(hint) : ''}`;
+    const ent = h.entry
+      ? `桌面入口：${h.entry.ballShown ? '悬浮球' : '桌面宠物'}（${h.entry.petOn ? '宠物开着，球已让位' : '宠物关着，球顶班'}）。`
+      : '';
+    el.innerHTML = `${escapeHtml(head + ent)}${hint ? '<br>' + escapeHtml(hint) : ''}`;
   } catch (e) {
     el.textContent = '体检失败：' + ((e && e.message) || e);
   }
@@ -3314,6 +3373,10 @@ function collectPatch() {
     ttsOpenaiModel: $('stTtsOpenaiModel').value.trim(),
     ttsOpenaiVoice: $('stTtsOpenaiVoice').value,
     ballOpacity: Number($('stOpacity').value) / 100,
+    // 悬浮球 ⇄ 宠物 的分工（'auto' / true / false）
+    ballEnabled: $('stBallMode')
+      ? ($('stBallMode').value === 'true' ? true : ($('stBallMode').value === 'false' ? false : 'auto'))
+      : undefined,
     hotkey: $('stHotkey').value.trim() || 'Alt+Space',
     asrProvider: $('stAsrProvider').value,
     asrModel: $('stAsrModel').value.trim() || 'paraformer-realtime-v2',

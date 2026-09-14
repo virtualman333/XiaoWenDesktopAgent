@@ -14,6 +14,8 @@ const pet = require('./pet');
 const capture = require('./capture');
 const updater = require('./updater');
 const meeting = require('./meeting');
+// 桌面入口规则：悬浮球 ⇄ 宠物 谁上场（纯函数，可单测）
+const entry = require('./entry');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -338,6 +340,11 @@ const DEFAULT_CONFIG = {
   contextTurns: 10, // 携带的历史轮数
   ballOpacity: 0.92,
   hotkey: 'Alt+Space',
+  // ---- 桌面入口：悬浮球 / 宠物，同一时刻只出现一个 ----
+  // 'auto'（默认）：宠物开着就让悬浮球退场（宠物完全代替它）；
+  // true：两个都显示（把悬浮球当快捷入口留着）；false：永远不显示悬浮球。
+  // 注意：宠物关掉时悬浮球一定会回来 —— 桌面上总得留一个能点的入口。
+  ballEnabled: 'auto',
   // ---- 桌面宠物 ----
   petEnabled: true,      // 是否显示桌面宠物
   petAnimal: 'penguin',  // penguin / cat / panda / rabbit / shiba / frog
@@ -487,7 +494,13 @@ function createBallWindow() {
 
   ballWin.once('ready-to-show', () => {
     ballWin.show();
-    ballWin.webContents.send('config:update', sanitizeConfig(cfg));
+    // 重建时要按当前配置恢复透明度，不然用户调成半透明的一重启就变实心
+    try {
+      const op = Number(loadConfig().ballOpacity);
+      ballWin.setOpacity(Number.isFinite(op) ? Math.min(Math.max(op, 0.2), 1) : 0.92);
+    } catch (e) { /* ignore */ }
+    ballWin.webContents.send('config:update', sanitizeConfig(loadConfig()));
+    broadcastEntryHost();
   });
 
   ballWin.on('closed', () => {
@@ -495,14 +508,102 @@ function createBallWindow() {
   });
 }
 
+// ---------- 桌面入口：悬浮球 ⇄ 宠物 ----------
+//
+// 这两个其实是「同一个入口的两种样子」：都能单击聊天、双击语音、右键菜单、
+// 拖着走、常驻监听唤醒词。既然功能重叠，同时摆在桌面上就是互相抢地方，
+// 所以规则定成「同一时刻只出现一个」：
+//
+//   宠物开着  → 悬浮球退场（宠物完全代替它）
+//   宠物关掉  → 悬浮球回来（桌面上总得留一个能点的东西）
+//
+// 唤醒监听（那个常驻开麦的模块）跟着宿主走：球不在时由宠物窗口托管，
+// 否则用户把球藏了、唤醒词也就哑了。
+
+/** 简短提示：悬浮球和宠物两边都发（它们在同一时刻只有一个在场，发两边最省心） */
+function toastBoth(msg) {
+  const m = String(msg == null ? '' : msg);
+  for (const w of [ballWin, pet.window]) {
+    if (w && !w.isDestroyed()) {
+      try { w.webContents.send('toast', m); } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+/** 现在该不该显示悬浮球 */
+function ballWanted(c = null) {
+  return entry.ballWanted(c || loadConfig());
+}
+
+/** 唤醒监听的宿主：球在就归球（一直如此，最稳），否则归宠物 */
+function entryHost() {
+  return entry.entryHost(loadConfig(), !!(ballWin && !ballWin.isDestroyed()));
+}
+
+/** 把「谁是宿主」告诉宠物和悬浮球两边 */
+function broadcastEntryHost() {
+  const host = entryHost();
+  const info = { host, ballShown: host === 'ball' };
+  try {
+    const pw = pet.window;
+    if (pw && !pw.isDestroyed()) pw.webContents.send('entry:host', info);
+  } catch (e) { /* ignore */ }
+  if (ballWin && !ballWin.isDestroyed()) {
+    try { ballWin.webContents.send('entry:host', info); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 让悬浮球的实际存在与否跟配置对齐。
+ * 不用 hide() 而是直接销毁：隐藏的窗口里跑语音唤醒会被 Chromium 限流、
+ * 麦克风也一直占着，倒不如彻底收掉，需要时再建（一个 96×96 的小窗，代价很低）。
+ *
+ * 「球在场 / 不在场」只在**状态真的翻转**时记一条日志：syncEntry 会被配置保存、
+ * 开关宠物、托盘菜单反复调用，每次都记会把启动日志刷爆。
+ */
+let lastEntryLog = '';
+function syncEntry(reason = '') {
+  const want = ballWanted();
+  const alive = !!(ballWin && !ballWin.isDestroyed());
+
+  if (want && !alive) {
+    createBallWindow();
+  } else if (!want && alive) {
+    ballWin.destroy();
+    ballWin = null;
+  }
+
+  const nowAlive = !!(ballWin && !ballWin.isDestroyed());
+  const snap = nowAlive ? 'on' : 'off';
+  if (snap !== lastEntryLog) {
+    lastEntryLog = snap;
+    logLine('entry', nowAlive
+      ? `显示悬浮球（${reason}）`
+      : `悬浮球退场，由宠物接管桌面入口（${reason}）`);
+  }
+  broadcastEntryHost();
+  return { ballShown: nowAlive };
+}
+
+/** 悬浮球 / 宠物的当前分工，设置页与宠物菜单都用它 */
+function entryStatus() {
+  return entry.entryStatus(loadConfig(), !!(ballWin && !ballWin.isDestroyed()));
+}
+
 // ---------- 对话面板窗口 ----------
 // 面板打开时唤醒监听要让出麦克风：否则 AI 朗读 / 用户对话会被自己的麦克风
 // 听见，造成反复误唤醒。面板关闭或隐藏后再恢复。
+// 悬浮球不一定是唤醒宿主（宠物开着时就是宠物在听），所以两边都要通知。
 function syncWake(paused) {
+  const msg = { paused: !!paused };
   try {
     if (ballWin && !ballWin.isDestroyed()) {
-      ballWin.webContents.send('wake:sync', { paused: !!paused });
+      ballWin.webContents.send('wake:sync', msg);
     }
+  } catch (e) { /* ignore */ }
+  try {
+    const pw = pet.window;
+    if (pw && !pw.isDestroyed()) pw.webContents.send('wake:sync', msg);
   } catch (e) { /* ignore */ }
 }
 
@@ -704,6 +805,47 @@ function createTray() {
       click: (item) => setPetEnabled(item.checked)
     },
     {
+      // 悬浮球和宠物是「同一个入口的两种样子」，同一时刻只出一个。
+      // 这里用单选把三档策略摊开，免得用户找不到球去哪了。
+      label: '🎈 悬浮球',
+      submenu: [
+        {
+          label: '自动（宠物在场时隐藏）',
+          type: 'radio',
+          checked: entryStatus().mode === 'auto',
+          click: () => { config = { ...loadConfig(), ballEnabled: 'auto' }; saveConfig(config); syncEntry('托盘'); }
+        },
+        {
+          label: '总是显示（和宠物并存）',
+          type: 'radio',
+          checked: loadConfig().ballEnabled === true,
+          click: () => { config = { ...loadConfig(), ballEnabled: true }; saveConfig(config); syncEntry('托盘'); }
+        },
+        {
+          label: '不显示（只用宠物）',
+          type: 'radio',
+          checked: loadConfig().ballEnabled === false,
+          click: () => { config = { ...loadConfig(), ballEnabled: false }; saveConfig(config); syncEntry('托盘'); }
+        },
+        { type: 'separator' },
+        {
+          label: entryStatus().ballShown ? '把悬浮球藏起来（宠物接手）' : '现在显示悬浮球',
+          click: () => {
+            if (entryStatus().ballShown) {
+              config = { ...loadConfig(), ballEnabled: false };
+              saveConfig(config);
+              // 关掉球的同时把宠物叫出来，否则桌面上就没入口了
+              setPetEnabled(true);
+            } else {
+              config = { ...loadConfig(), ballEnabled: true };
+              saveConfig(config);
+              syncEntry('托盘');
+            }
+          }
+        }
+      ]
+    },
+    {
       label: '把宠物叫回主屏',
       click: () => { setPetEnabled(true); pet.rescue(); }
     },
@@ -732,7 +874,7 @@ function createTray() {
         if (panelWin && !panelWin.isDestroyed()) {
           panelWin.webContents.send('history:cleared');
         }
-        ballWin && !ballWin.isDestroyed() && ballWin.webContents.send('toast', '对话历史已清空');
+        toastBoth('对话历史已清空');
       }
     },
     { type: 'separator' },
@@ -1062,15 +1204,22 @@ function setPetEnabled(on) {
   if ((c.petEnabled !== false) === next) {
     // 状态没变也要保证窗口真的在（可能被别处 hide 掉了）
     if (next) pet.applyConfig(c);
+    syncEntry('pet-enabled-unchanged');
     return next;
   }
   config = { ...c, petEnabled: next };
   saveConfig(config);
   pet.applyConfig(config);
+  // 宠物一开一关，桌面入口就换人了：宠物开了球退场，宠物关了球回来
+  syncEntry(next ? 'pet-on' : 'pet-off');
   const safe = sanitizeConfig(config);
   [ballWin, panelWin, settingsWin].forEach((w) => {
     if (w && !w.isDestroyed()) w.webContents.send('config:update', safe);
   });
+  try {
+    const pw = pet.window;
+    if (pw && !pw.isDestroyed()) pw.webContents.send('config:update', safe);
+  } catch (e) { /* ignore */ }
   return next;
 }
 
@@ -1303,6 +1452,9 @@ ipcMain.handle('config:set', (_e, patch) => {
     }
   } catch (e) { /* ignore */ }
 
+  // 悬浮球 / 宠物的分工变了：等宠物窗口的状态落定再对齐，免得算错宿主
+  if ('ballEnabled' in patch || 'petEnabled' in patch) syncEntry('config:set');
+
   // 广播配置
   [ballWin, panelWin, settingsWin].forEach((w) => {
     if (w && !w.isDestroyed()) w.webContents.send('config:update', sanitizeConfig(config));
@@ -1360,6 +1512,7 @@ ipcMain.handle('pet:health', () => {
     ...d,
     keepTop: loadConfig().petKeepTop !== false,
     summonHotkey: petSummonHotkey || loadConfig().petSummonHotkey || '',
+    entry: entryStatus(),
     hints
   };
 });
@@ -1452,13 +1605,45 @@ ipcMain.handle('ball:show-menu', () => {
     { type: 'separator' },
     { label: '设置', click: () => createSettingsWindow() },
     { label: '🐧 显示桌面宠物', type: 'checkbox', checked: petOn, click: () => setPetEnabled(!petOn) },
+    {
+      // 宠物和球功能完全重叠，同时摆着只互相抢位置 —— 给一个一键换人的入口
+      label: '🔄 用宠物代替悬浮球（隐藏它）',
+      click: () => {
+        setPetEnabled(true);
+        config = { ...loadConfig(), ballEnabled: false };
+        saveConfig(config);
+        syncEntry('球右键菜单');
+      }
+    },
+    { type: 'separator' },
     { label: '把宠物叫回主屏', click: () => { setPetEnabled(true); pet.rescue(); } },
     { label: '召唤宠物到鼠标处', click: () => { setPetEnabled(true); pet.summon(); } },
-    { label: '隐藏悬浮球', click: () => ballWin.hide() },
     { type: 'separator' },
     { label: '退出', click: () => { app.isQuiting = true; app.quit(); } }
   ]);
   menu.popup({ window: ballWin });
+});
+
+// 桌面入口（宠物 ⇄ 悬浮球）的当前分工，宠物菜单和设置页都要读
+ipcMain.handle('entry:state', () => entryStatus());
+
+ipcMain.handle('entry:ball-set', (_e, v) => {
+  const mode = v === true || v === false ? v : 'auto';
+  config = { ...loadConfig(), ballEnabled: mode };
+  saveConfig(config);
+  // 「不显示悬浮球」必须保证宠物在场，不然桌面上就什么都不剩了
+  if (mode !== true && loadConfig().petEnabled === false) setPetEnabled(true);
+  syncEntry('entry:ball-set');
+  return entryStatus();
+});
+
+// 宠物右键菜单里的「找回悬浮球」：把球拉回来，并把分工改成「两个都要」，
+// 免得下次又把球收掉，用户以为按了没用
+ipcMain.handle('entry:ball-show', () => {
+  config = { ...loadConfig(), ballEnabled: true };
+  saveConfig(config);
+  syncEntry('entry:ball-show');
+  return entryStatus();
 });
 
 // 外部链接
@@ -1505,6 +1690,13 @@ ipcMain.handle('gpu:restart', () => {
   app.relaunch();
   app.isQuiting = true;
   app.exit(0);
+});
+
+// 宠物右键菜单里的「退出」：悬浮球不在场时它是唯一顺手的退出入口
+ipcMain.handle('app:quit', () => {
+  app.isQuiting = true;
+  app.quit();
+  return true;
 });
 
 // ---------- 语音识别代理（阿里云百炼 paraformer-realtime） ----------
@@ -1952,13 +2144,18 @@ startApp();
 
 function bootstrapApp() {
   // 用户再次双击图标时走到这里。曾经出现「已有实例但窗口不可见」的情况，
-  // 所以这里不只是开面板，还要确保悬浮球一定可见。
+  // 所以这里不只是开面板，还要确保「桌面入口」（宠物或悬浮球，二选一）一定在。
   app.on('second-instance', () => {
     logLine('second-instance', '收到第二次启动请求，确保界面可见');
-    if (!ballWin || ballWin.isDestroyed()) {
-      createBallWindow();
-    } else if (!ballWin.isVisible()) {
-      ballWin.show();
+    // 宠物开着时入口是宠物，别硬把悬浮球拉出来
+    if (ballWanted()) {
+      if (!ballWin || ballWin.isDestroyed()) {
+        createBallWindow();
+      } else if (!ballWin.isVisible()) {
+        ballWin.show();
+      }
+    } else {
+      try { setPetEnabled(true); } catch (e) { /* ignore */ }
     }
     createPanelWindow();
   });
@@ -1974,7 +2171,8 @@ function bootstrapApp() {
     } catch {}
     logLine('ready', '初始化成功');
 
-    createBallWindow();
+    // 桌面入口只出现一个：宠物开着就是宠物，否则是悬浮球
+    syncEntry('boot');
     // 托盘单独包一层：托盘建不出来也不该拖垮后面的宠物 / Jarvis 初始化
     try {
       createTray();
@@ -2003,9 +2201,15 @@ function bootstrapApp() {
         loadRenderer,
         getConfig: () => loadConfig(),
         getSanitizedConfig: () => sanitizeConfig(loadConfig()),
-        log: (m) => logLine('pet', m)
+        log: (m) => logLine('pet', m),
+        // 宠物右键菜单里的「隐藏宠物 / 找回悬浮球」也走这套统一开关，
+        // 保证「配置 = 实际状态」，重启后不会错乱
+        setEnabled: (on) => setPetEnabled(on),
+        entryStatus
       });
       logLine('pet', '桌面宠物已加载');
+      // 宠物窗口起来了，重新告诉两边：现在谁是桌面入口、谁托管唤醒监听
+      broadcastEntryHost();
     } catch (e) {
       logLine('pet', '桌面宠物加载失败: ' + (e && e.stack || e));
     }
@@ -2103,7 +2307,14 @@ function bootstrapApp() {
       petTicks++;
       const ballOk = ballWin && !ballWin.isDestroyed();
       const visible = ballOk ? ballWin.isVisible() : false;
-      if (!ballOk || !visible) {
+      // 宠物开着时悬浮球是「故意不在的」，别把它又救回来 —— 否则桌面上会突然
+      // 冒出两个入口，用户还以为见鬼了。
+      if (!ballWanted()) {
+        if (ballOk) {
+          logLine('watchdog', '悬浮球不该在场（宠物已接管桌面入口），收掉');
+          syncEntry('watchdog');
+        }
+      } else if (!ballOk || !visible) {
         logLine('watchdog', `悬浮球异常 ballOk=${ballOk} visible=${visible}，尝试重建`);
         if (!ballOk) {
           createBallWindow();

@@ -44,6 +44,18 @@ contextBridge.exposeInMainWorld('xw', {
   ballSetOpacity: (v) => ipcRenderer.invoke('ball:set-opacity', v),
   ballShowMenu: () => ipcRenderer.invoke('ball:show-menu'),
 
+  // ---- 桌面入口分工（宠物 ⇄ 悬浮球，同一时刻只出现一个）----
+  // 宠物开着时悬浮球退场、由宠物接管全部交互（含语音唤醒监听）；
+  // 宠物关掉时悬浮球自动回来，保证桌面上总有一个能点的入口。
+  entryState: () => ipcRenderer.invoke('entry:state'),
+  entryBallSet: (v) => ipcRenderer.invoke('entry:ball-set', v),
+  entryBallShow: () => ipcRenderer.invoke('entry:ball-show'),
+  onEntryHost: (cb) => {
+    const h = (_e, info) => cb(info || {});
+    ipcRenderer.on('entry:host', h);
+    return () => ipcRenderer.removeListener('entry:host', h);
+  },
+
   // ---- 事件订阅 ----
   onVoiceStart: (cb) => {
     const handler = () => cb();
@@ -137,6 +149,7 @@ contextBridge.exposeInMainWorld('xw', {
   // ---- 其他 ----
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   openUserData: () => ipcRenderer.invoke('open:userdata'),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
   isDev: process.env.NODE_ENV === 'development',
 
   // ---- 渲染 / GPU ----
