@@ -21,9 +21,14 @@ const REQUIRED = [
   'src/main/main.js',
   'src/main/preload.js',
   'src/main/tray-icon.js',
+  'src/main/meeting.js',
+  'src/main/jarvis/meeting-detect.js',
+  'src/main/jarvis/minutes.js',
   'src/assets/tray.ico',
   'src/assets/tray.png',
   'dist/panel.html',
+  // 会议记录的隐藏采集页：新加的窗口页面，漏打包就会「检测到会议但录不了」
+  'dist/minutes.html',
   'package.json'
 ];
 

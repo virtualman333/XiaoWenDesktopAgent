@@ -122,6 +122,12 @@
         <span class="intent-text" id="intentText"></span>
         <button class="intent-go" id="intentGo" hidden>就这么办</button>
       </div>
+      <!-- 录音中的实时条：在记录会议纪要时常驻在输入框上方 -->
+      <div class="mt-live" id="mtLive" hidden>
+        <span class="dot"></span>
+        <span class="mt-live-text" id="mtLiveText">正在记录…</span>
+        <button class="btn-ghost" id="mtLiveStop" style="padding:2px 8px;font-size:11px">结束并出纪要</button>
+      </div>
       <div class="composer-inner">
         <textarea id="input" rows="1" placeholder="想做点什么？Enter 发送 · Ctrl+K 命令面板 · / 看能力"></textarea>
         <button class="icon-btn" id="btnCtx" title="上下文用量">
@@ -216,6 +222,7 @@
         <button class="st-nav-item" data-tab="pet">🐧 桌面宠物</button>
         <button class="st-nav-item" data-tab="schedule">⏰ 定时任务</button>
         <button class="st-nav-item" data-tab="watch">🔔 主动关注</button>
+        <button class="st-nav-item" data-tab="meeting">🎙 会议纪要</button>
         <button class="st-nav-item" data-tab="advanced">显示与数据</button>
       </nav>
 
@@ -947,6 +954,94 @@
             <button class="btn-ghost" id="wCheckHot">立即检查热搜</button>
           </div>
           <div class="hint" id="wStatus">状态：—</div>
+        </section>
+
+        <!-- ---------- 会议纪要 ---------- -->
+        <section class="st-section" data-tab="meeting">
+          <h3>会议自动记录</h3>
+          <div class="hint">
+            小问会自动判断你是不是在开会 / 视频 / 语音通话（看谁占着麦克风、摄像头，
+            以及窗口标题），确认之后一边听一边转成文字，结束后给你一份带要点和待办的纪要。
+            采集的是系统声音 + 麦克风，所以对方说话也会被记下来。全程只在本机与你自己配置的
+            语音识别服务之间流转，结束后的文字存在「会议纪要」文件夹里。
+          </div>
+
+          <div class="field row">
+            <label><b>启用自动检测</b></label>
+            <label class="switch"><input type="checkbox" id="mtEnabled" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>检测到就自动开始记录<span class="hint-inline">关闭后只提醒，不录</span></label>
+            <label class="switch"><input type="checkbox" id="mtAutoRecord" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>开始记录前先问我一句</label>
+            <label class="switch"><input type="checkbox" id="mtAskFirst" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>只采到一次信号也提醒我<span class="hint-inline">可能只是发了个语音</span></label>
+            <label class="switch"><input type="checkbox" id="mtHint" /><span></span></label>
+          </div>
+
+          <h3>🎧 采集</h3>
+          <div class="field row">
+            <label>同时采集麦克风<span class="hint-inline">记下自己的发言；戴耳机效果更好</span></label>
+            <label class="switch"><input type="checkbox" id="mtMic" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>摄像头被占用也算在开会</label>
+            <label class="switch"><input type="checkbox" id="mtCam" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>非会议类应用占麦也算<span class="hint-inline">默认关，避免误报</span></label>
+            <label class="switch"><input type="checkbox" id="mtUnknown" /><span></span></label>
+          </div>
+          <div class="field">
+            <label>识别会话轮换间隔（分钟）</label>
+            <input type="number" id="mtSegment" min="1" max="15" value="5" />
+            <div class="hint">长会议不能一直用同一条连接，每这么多分钟自动换一条，中间的声音不会丢</div>
+          </div>
+
+          <h3>⏱ 判定与收尾</h3>
+          <div class="field">
+            <label>采样间隔（秒）</label>
+            <input type="number" id="mtPoll" min="2" max="60" value="5" />
+          </div>
+          <div class="field">
+            <label>连续采到 <span class="val" id="mtEnterVal">2</span> 次才算开始</label>
+            <input type="range" id="mtEnter" min="1" max="6" step="1" value="2" />
+            <div class="hint">调大更保守（不容易误报），调小反应更快</div>
+          </div>
+          <div class="field">
+            <label>连续 <span class="val" id="mtExitVal">90</span> 秒采不到才算结束</label>
+            <input type="range" id="mtExit" min="10" max="600" step="10" value="90" />
+          </div>
+          <div class="field">
+            <label>没人说话 <span class="val" id="mtSilenceVal">5</span> 分钟就收尾</label>
+            <input type="range" id="mtSilence" min="1" max="30" step="1" value="5" />
+            <div class="hint">会议客户端没关、但早就没人说话了，靠这个自动收尾</div>
+          </div>
+          <div class="field">
+            <label>单次最长记录（分钟）</label>
+            <input type="number" id="mtMax" min="5" max="480" value="120" />
+          </div>
+          <div class="field">
+            <label>短于（分钟）且没内容就不留纪要</label>
+            <input type="number" id="mtMin" min="0" max="30" value="1" />
+          </div>
+
+          <h3>🔍 现在是什么状态</h3>
+          <div class="hint" id="mtStatus">状态：—</div>
+          <div class="cap-actions">
+            <button class="btn-ghost" id="mtDetectNow">立即检测一次</button>
+            <button class="btn-ghost" id="mtStart">开始记录</button>
+            <button class="btn-ghost" id="mtStop">结束并生成纪要</button>
+            <button class="btn-ghost" id="mtFolder">打开纪要文件夹</button>
+          </div>
+          <div class="hint" id="mtDetectResult"></div>
+
+          <h3>📝 最近的纪要</h3>
+          <div class="mt-list" id="mtList"><div class="hint">还没有记录过会议</div></div>
         </section>
 
         <!-- ---------- 显示与数据 ---------- -->

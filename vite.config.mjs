@@ -12,7 +12,9 @@ export default defineConfig({
         panel: resolve(__dirname, 'src/renderer/panel.html'),
         ball: resolve(__dirname, 'src/renderer/ball.html'),
         pet: resolve(__dirname, 'src/renderer/pet.html'),
-        capture: resolve(__dirname, 'src/renderer/capture.html')
+        capture: resolve(__dirname, 'src/renderer/capture.html'),
+        // 会议记录的隐藏采集页
+        minutes: resolve(__dirname, 'src/renderer/minutes.html')
       }
     }
   },

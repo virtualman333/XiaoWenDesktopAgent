@@ -71,6 +71,29 @@ app.whenReady().then(async () => {
     'updater:state': { status: 'idle', version: '1.6.1' },
     'tray:diag': { exists: true, iconPath: 'x.ico', tooltip: '小问助手' },
     'clip:read': { ok: true, text: '冒烟测试剪贴板' },
+    // 会议纪要：设置页一进来就会拉状态和列表
+    'meeting:status': {
+      enabled: true, state: 'idle', recording: false, autoRecord: true, askFirst: false,
+      session: null, asrBusy: false,
+      lastDetect: { at: Date.now(), level: 'meeting', app: '腾讯会议', reasons: ['腾讯会议正在使用麦克风（桩数据）'] },
+      stats: { count: 2, todayCount: 1, todayMs: 600000 }
+    },
+    'meeting:list': [
+      { id: '20260914-143500-wemeet', app: '腾讯会议', title: '腾讯会议 · 09-14 14:35', startedAt: Date.now() - 3600000, durationMs: 1500000, chars: 3200, todoCount: 2, topic: '确认下个版本排期与资源分配' },
+      { id: '20260913-100000-zoom', app: 'Zoom', title: 'Zoom · 09-13 10:00', startedAt: Date.now() - 86400000, durationMs: 900000, chars: 1200, todoCount: 0, topic: '' }
+    ],
+    'meeting:detect-now': {
+      ok: true, level: 'meeting', app: '腾讯会议',
+      reasons: ['腾讯会议正在使用麦克风'],
+      micUsers: [{ exe: 'wemeetapp.exe', active: true, stopKnown: true }],
+      camUsers: [], procs: [{ exe: 'wemeetapp.exe', title: '腾讯会议 - 每周同步' }]
+    },
+    'meeting:start': { ok: true, id: 'smoke-1' },
+    'meeting:stop': { ok: true, id: 'smoke-1', row: { topic: '排期' } },
+    'meeting:folder': { ok: true, path: 'C:\tmp' },
+    'meeting:open': { ok: true },
+    'meeting:remove': { ok: true },
+    'meeting:search': [],
     'pet:say': { ok: true }
   };
   Object.keys(stubs).forEach((ch) => ipcMain.handle(ch, () => stubs[ch]));
@@ -230,12 +253,50 @@ app.whenReady().then(async () => {
   check('设置页可加载', true);
   await win.webContents.capturePage().then((s) => fs.writeFileSync(path.join(__dirname, '_shot_settings.png'), s.toPNG()));
 
-  for (const tab of ['persona', 'agent', 'mcp', 'skills', 'voice', 'capture', 'pet', 'schedule', 'watch', 'advanced']) {
+  for (const tab of ['persona', 'agent', 'mcp', 'skills', 'voice', 'capture', 'pet', 'schedule', 'watch', 'meeting', 'advanced']) {
     await js(`document.querySelector('.st-nav-item[data-tab="${tab}"]').click();`);
     await sleep(320);
   }
   const tabOk = await js(`document.querySelectorAll('.st-section.active').length`);
   check('逐个切换设置标签后仍只有一个激活分区', tabOk === 1, String(tabOk));
+
+  // ---------- 8. 会议纪要设置页 ----------
+  await js(`document.querySelector('.st-nav-item[data-tab="meeting"]').click();`);
+  await sleep(500);
+  const mt = await js(`(async () => {
+    const sec = document.querySelector('.st-section[data-tab="meeting"]');
+    // 等一次状态刷新（refreshMeetingStatus 是异步的）
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      visible: !!sec && sec.classList.contains('active'),
+      status: (document.getElementById('mtStatus') || {}).innerHTML || '',
+      items: document.querySelectorAll('#mtList .mt-item').length,
+      firstTitle: (document.querySelector('#mtList .mt-item-title') || {}).textContent || '',
+      enabled: document.getElementById('mtEnabled').checked,
+      autoRecord: document.getElementById('mtAutoRecord').checked,
+      mic: document.getElementById('mtMic').checked,
+      enterVal: (document.getElementById('mtEnterVal') || {}).textContent || '',
+      liveHidden: document.getElementById('mtLive').hidden
+    };
+  })()`);
+  check('会议纪要设置分区能切过去', mt.visible === true);
+  check('状态区读到了实时状态', /腾讯会议/.test(mt.status), mt.status.replace(/<[^>]+>/g, ' | ').slice(0, 90));
+  check('开关按配置回填（默认开自动记录）', mt.enabled === true && mt.autoRecord === true && mt.mic === true);
+  check('滑动条数值标签同步', mt.enterVal === '2', mt.enterVal);
+  check('最近纪要列表渲染出条目', mt.items === 2, String(mt.items));
+  check('列表里显示的是纪要标题', /腾讯会议/.test(mt.firstTitle), mt.firstTitle);
+  check('没在记录时实时条是收起的', mt.liveHidden === true);
+
+  await js(`document.getElementById('mtDetectNow').click();`);
+  await sleep(600);
+  const det = await js(`document.getElementById('mtDetectResult').innerHTML`);
+  check('「立即检测一次」把判定理由摊出来', /腾讯会议正在使用麦克风/.test(det), det.slice(0, 80));
+
+  // 截图往下滚一段，把「状态 + 最近纪要列表」也拍进去（只看顶部看不到列表）
+  await js(`document.querySelector('.st-wrap').scrollTop = 620;`);
+  await sleep(260);
+  await win.webContents.capturePage().then((s) => fs.writeFileSync(path.join(__dirname, '_shot_settings_meeting.png'), s.toPNG()));
+  await js(`document.querySelector('.st-wrap').scrollTop = 0;`);
   await win.webContents.capturePage().then((s) => fs.writeFileSync(path.join(__dirname, '_shot_settings_pet.png'), s.toPNG()));
 
   // ---------- 汇总 ----------

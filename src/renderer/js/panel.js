@@ -148,6 +148,8 @@ async function initChat() {
   bindOrch();
   bindUpdater();
   bindProactive();
+  bindMeetingEvents();
+  refreshMeetingStatus();
   bindPalette();
   bindQuickSchedule();
   bindCtx();
@@ -985,6 +987,10 @@ function paletteCommands() {
     { g: '关注', ico: '🔥', title: '现在就看一眼热搜', run: () => doWatchCheck('hot') },
     { g: '关注', ico: '🌏', title: '现在检查一次地震', run: () => doWatchCheck('quake') },
     { g: '关注', ico: '🔔', title: '设置主动关注', sub: '设置 · 主动关注', run: () => window.xw.openSettings('watch') },
+    { g: '会议', ico: '🎙', title: '开始记录会议纪要', sub: '把系统声音 + 麦克风转成文字', run: () => startMeetingNow() },
+    { g: '会议', ico: '⏹', title: '结束记录并生成纪要', run: () => stopMeetingNow() },
+    { g: '会议', ico: '📝', title: '看最近的会议纪要', sub: '设置 · 会议纪要', run: () => window.xw.openSettings('meeting') },
+    { g: '会议', ico: '🔍', title: '检测一下我现在是不是在开会', run: () => detectMeetingNow() },
     { g: '记忆', ico: '🧠', title: '把剪贴板内容记进记忆', run: () => rememberClipboard() },
     { g: '记忆', ico: '📚', title: '打开人格与记忆', run: () => window.xw.openSettings('persona') },
     { g: '技能', ico: '🧩', title: '看看有哪些技能', run: () => window.xw.openSettings('skills') },
@@ -1001,6 +1007,35 @@ async function doWatchCheck(source) {
   } catch (e) {
     setStatus('检查失败：' + ((e && e.message) || e));
   }
+}
+
+// ---------- 会议纪要：命令面板里的三个快捷动作 ----------
+async function startMeetingNow() {
+  setToast('正在开始记录…');
+  const r = await window.xw.meetingStart({});
+  if (r && r.ok) {
+    // 顺便在设置页把实时状态刷出来（用户可能是从命令面板点进来的）
+    refreshMeetingStatus();
+    setToast('已开始记录，正在把声音转成文字');
+  } else {
+    setToast(`没能开始：${(r && r.error) || '未知原因'}`);
+  }
+}
+
+async function stopMeetingNow() {
+  setToast('正在收尾并生成纪要…');
+  const r = await window.xw.meetingStop();
+  setToast(r && r.ok ? (r.discarded ? '这次内容太少，没有留纪要' : '会议纪要已生成') : `没能结束：${(r && r.error) || '未知原因'}`);
+  refreshMeetingStatus();
+}
+
+async function detectMeetingNow() {
+  setToast('正在采样…');
+  const r = await window.xw.meetingDetectNow();
+  if (!r || !r.ok) return setToast(`采样失败：${(r && r.error) || '未知原因'}`);
+  const lv = { meeting: '判定在开会/通话', mic: '有程序在用麦克风', none: '没检测到通话' }[r.level] || r.level;
+  setToast(`${lv}${r.app ? ` · ${r.app}` : ''}`);
+  setStatus(r.reasons && r.reasons[0] ? r.reasons[0] : lv);
 }
 
 async function rememberClipboard() {
@@ -1344,6 +1379,8 @@ function initSettings() {
   bindCapture();
   bindSchedule();
   bindWatch();
+  bindMeeting();
+  bindMeetingEvents();
   bindAdvanced();
   fillAll();
 }
@@ -1390,6 +1427,7 @@ function fillAll() {
   fillCapture();
   fillSchedule();
   fillWatch();
+  fillMeeting();
   refreshTrayDiag();
   refreshGpuStatus();
 }
@@ -2464,14 +2502,287 @@ async function refreshWatchStatus() {
   }
 }
 
-// ---------- 主进程主动播报（定时任务 / 地震 / 热搜） ----------
+// ---------- 会议纪要（自动检测开会 / 通话，自动记录） ----------
+let mtState = null;
+
+function mtClamp(v, min, max, dflt) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(Math.max(Math.round(n), min), max);
+}
+
+function mtFmtDur(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (s >= 3600) return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+  if (s >= 60) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  return `${s} 秒`;
+}
+
+function bindMeeting() {
+  const switches = [
+    ['mtEnabled', 'meetingEnabled'], ['mtAutoRecord', 'meetingAutoRecord'],
+    ['mtAskFirst', 'meetingAskFirst'], ['mtHint', 'meetingHint'],
+    ['mtMic', 'meetingCaptureMic'], ['mtCam', 'meetingWatchCam'],
+    ['mtUnknown', 'meetingUnknownApps']
+  ];
+  switches.forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: el.checked });
+      fillMeeting();
+    });
+  });
+
+  const nums = [
+    ['mtPoll', 'meetingPollSec', 2, 60, 5],
+    ['mtSegment', 'meetingSegmentMin', 1, 15, 5],
+    ['mtMax', 'meetingMaxMinutes', 5, 480, 120],
+    ['mtMin', 'meetingMinMinutes', 0, 30, 1],
+    ['mtEnter', 'meetingEnterSamples', 1, 6, 2],
+    ['mtExit', 'meetingExitSec', 10, 600, 90],
+    ['mtSilence', 'meetingSilenceMin', 1, 30, 5]
+  ];
+  nums.forEach(([id, key, min, max, dflt]) => {
+    const el = $(id);
+    if (!el) return;
+    if (el.type === 'range') {
+      el.addEventListener('input', () => { const v = $(`${id}Val`); if (v) v.textContent = el.value; });
+    }
+    el.addEventListener('change', async () => {
+      const v = mtClamp(el.value, min, max, dflt);
+      el.value = v;
+      const lab = $(`${id}Val`);
+      if (lab) lab.textContent = v;
+      cfg = await window.xw.setConfig({ [key]: v });
+    });
+  });
+
+  $('mtDetectNow').addEventListener('click', async () => {
+    const box = $('mtDetectResult');
+    box.textContent = '正在采样…（读注册表 + 进程列表）';
+    const r = await window.xw.meetingDetectNow();
+    if (!r || !r.ok) { box.textContent = `采样失败：${(r && r.error) || '未知原因'}`; return; }
+    const lv = { meeting: '判定在开会/通话', mic: '有程序在用麦克风（不是会议类）', none: '没有检测到通话' }[r.level] || r.level;
+    const lines = [`结论：${lv}${r.app ? ` · ${r.app}` : ''}`, ...(r.reasons || [])];
+    if (r.micUsers && r.micUsers.length) {
+      lines.push('麦克风占用：' + r.micUsers.map((u) => `${u.exe || u.name}${u.stopKnown === false ? '(记录不全)' : ''}`).join('、'));
+    }
+    if (r.procs && r.procs.length) {
+      lines.push('识别到的相关进程：' + r.procs.map((p) => `${p.exe}${p.title ? `「${p.title.slice(0, 24)}」` : ''}`).join('、'));
+    }
+    box.innerHTML = lines.join('<br>');
+    refreshMeetingStatus();
+  });
+
+  $('mtStart').addEventListener('click', async () => {
+    setToast('正在开始记录…');
+    const r = await window.xw.meetingStart({});
+    setToast(r && r.ok ? '已经开始记录会议纪要' : `没起来：${(r && r.error) || '未知原因'}`);
+    refreshMeetingStatus();
+  });
+  $('mtStop').addEventListener('click', async () => {
+    setToast('正在收尾并生成纪要…');
+    const r = await window.xw.meetingStop();
+    setToast(r && r.ok ? (r.discarded ? '内容太少，没有留纪要' : '纪要已生成') : `没停掉：${(r && r.error) || '未知原因'}`);
+    refreshMeetingStatus();
+  });
+  $('mtFolder').addEventListener('click', () => window.xw.meetingFolder());
+  $('mtLiveStop').addEventListener('click', async () => {
+    setToast('正在收尾并生成纪要…');
+    await window.xw.meetingStop();
+    refreshMeetingStatus();
+  });
+}
+
+function fillMeeting() {
+  const set = (id, v) => { const el = $(id); if (el) el.checked = v === true; };
+  set('mtEnabled', cfg.meetingEnabled !== false);
+  set('mtAutoRecord', cfg.meetingAutoRecord !== false);
+  set('mtAskFirst', cfg.meetingAskFirst === true);
+  set('mtHint', cfg.meetingHint !== false);
+  set('mtMic', cfg.meetingCaptureMic !== false);
+  set('mtCam', cfg.meetingWatchCam !== false);
+  set('mtUnknown', cfg.meetingUnknownApps === true);
+
+  const put = (id, key, dflt) => {
+    const el = $(id);
+    if (!el) return;
+    const v = cfg[key] == null ? dflt : cfg[key];
+    el.value = v;
+    const lab = $(`${id}Val`);
+    if (lab) lab.textContent = v;
+  };
+  put('mtPoll', 'meetingPollSec', 5);
+  put('mtSegment', 'meetingSegmentMin', 5);
+  put('mtMax', 'meetingMaxMinutes', 120);
+  put('mtMin', 'meetingMinMinutes', 1);
+  put('mtEnter', 'meetingEnterSamples', 2);
+  put('mtExit', 'meetingExitSec', 90);
+  put('mtSilence', 'meetingSilenceMin', 5);
+  refreshMeetingStatus();
+}
+
+async function refreshMeetingStatus() {
+  const el = $('mtStatus');
+  if (!el || !window.xw.meetingStatus) return;
+  try {
+    const s = await window.xw.meetingStatus();
+    mtState = s;
+    const parts = [];
+    parts.push(`功能${s.enabled ? '已开启' : '已关闭'}`);
+    parts.push(s.recording ? `正在记录「${s.session.app}」（${mtFmtDur(s.session.durationMs)}，${s.session.chars} 字）` : '当前没有在记录');
+    if (s.asrBusy && !s.recording) parts.push('语音识别正被语音问答占用');
+    const d = s.lastDetect;
+    if (d) {
+      const lv = { meeting: '在开会', mic: '有应用用麦', none: '无' }[d.level] || d.level;
+      parts.push(`最近一次采样：${lv}${d.app ? ` · ${d.app}` : ''}（${new Date(d.at).toLocaleTimeString('zh-CN', { hour12: false })}）`);
+    } else {
+      parts.push('还没采样过（启动 20 秒后开始）');
+    }
+    if (s.stats && s.stats.count) {
+      parts.push(`已存 ${s.stats.count} 份纪要，今天 ${s.stats.todayCount} 场 / ${mtFmtDur(s.stats.todayMs)}`);
+    }
+    el.innerHTML = parts.join('<br>')
+      + (d && d.reasons && d.reasons.length ? `<br><span style="opacity:.7">理由：${d.reasons[0]}</span>` : '');
+    updateMtLive(s);
+    renderMeetingList();
+  } catch (e) {
+    el.textContent = '状态：读取失败';
+  }
+}
+
+/** 输入框上方的「正在记录」条 */
+function updateMtLive(s) {
+  const bar = $('mtLive');
+  if (!bar) return;
+  const on = !!(s && s.recording);
+  bar.hidden = !on;
+  if (!on) return;
+  const t = $('mtLiveText');
+  if (t) {
+    const last = mtLastLine ? `：${mtLastLine}` : '';
+    t.textContent = `正在记录「${s.session.app}」${mtFmtDur(s.session.durationMs)} · ${s.session.chars} 字${last}`;
+  }
+}
+
+let mtLastLine = '';
+let mtListCache = [];
+
+async function renderMeetingList() {
+  const box = $('mtList');
+  if (!box || !window.xw.meetingList) return;
+  let rows = [];
+  try { rows = await window.xw.meetingList(); } catch (e) { rows = []; }
+  mtListCache = rows || [];
+  if (!rows.length) {
+    box.innerHTML = '<div class="hint">还没有记录过会议</div>';
+    return;
+  }
+  box.textContent = '';
+  for (const r of rows.slice(0, 15)) {
+    const item = document.createElement('div');
+    item.className = 'mt-item';
+
+    const main = document.createElement('div');
+    main.className = 'mt-item-main';
+    const title = document.createElement('div');
+    title.className = 'mt-item-title';
+    title.textContent = r.title || r.app || r.id;
+    const sub = document.createElement('div');
+    sub.className = 'mt-item-sub';
+    const when = r.startedAt ? new Date(r.startedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    sub.textContent = [when, mtFmtDur(r.durationMs), `${r.chars || 0} 字`, r.todoCount ? `${r.todoCount} 项待办` : ''].filter(Boolean).join(' · ');
+    main.appendChild(title);
+    main.appendChild(sub);
+    if (r.topic) {
+      const topic = document.createElement('div');
+      topic.className = 'mt-item-topic';
+      topic.textContent = r.topic;
+      main.appendChild(topic);
+    }
+
+    const acts = document.createElement('div');
+    acts.className = 'mt-item-acts';
+    const bOpen = document.createElement('button');
+    bOpen.textContent = '打开';
+    bOpen.title = '用系统默认程序打开 Markdown 纪要';
+    bOpen.onclick = () => window.xw.meetingOpen(r.id);
+    const bDel = document.createElement('button');
+    bDel.textContent = '删除';
+    bDel.className = 'danger';
+    bDel.onclick = async () => {
+      if (!confirm(`删除这份纪要？\n${r.title || r.id}`)) return;
+      await window.xw.meetingRemove(r.id);
+      setToast('已删除');
+      renderMeetingList();
+      refreshMeetingStatus();
+    };
+    acts.appendChild(bOpen);
+    acts.appendChild(bDel);
+
+    item.appendChild(main);
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+  if (rows.length > 15) {
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = `还有 ${rows.length - 15} 份，点「打开纪要文件夹」看全部`;
+    box.appendChild(more);
+  }
+}
+
+/** 会议事件（检测到 / 开录 / 出纪要 / 丢弃）都会走到这里 */
+function bindMeetingEvents() {
+  try {
+    window.xw.onMeetingEvent((p) => {
+      if (!p) return;
+      const t = p.type;
+      if (t === 'started') {
+        setToast(`开始记录「${(p.session && p.session.app) || '会议'}」纪要`);
+        updateMtLive(p);
+      } else if (t === 'saved') {
+        setToast('会议纪要已生成');
+        refreshMeetingStatus();
+      } else if (t === 'discarded') {
+        setToast('这次内容太少，没有留纪要');
+        updateMtLive(p);
+      } else if (t === 'removed') {
+        renderMeetingList();
+      } else {
+        refreshMeetingStatus();
+      }
+    });
+  } catch (e) { /* ignore */ }
+
+  try {
+    window.xw.onMeetingLive((p) => {
+      if (!p) return;
+      mtLastLine = String(p.text || '').slice(-40);
+      const bar = $('mtLive');
+      if (bar && !bar.hidden) {
+        const t = $('mtLiveText');
+        if (t && mtState && mtState.session) {
+          t.textContent = `正在记录「${mtState.session.app}」· ${p.chars || 0} 字：${mtLastLine}`;
+        }
+      }
+      // 设置页开着的话同步刷一下字数
+      const el = $('mtStatus');
+      if (el && mtState && mtState.recording) refreshMeetingStatus();
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// ---------- 主进程主动播报（定时任务 / 地震 / 热搜 / 会议） ----------
 // 正在进行的主动播报：title -> card（回执先落地，结果回来时再改写同一张卡）
 const proactiveCards = new Map();
 
 // 播报来源的中文标签：卡片标题已经写清了「是什么事」，这里只标「哪儿来的」
 const KIND_LABEL = {
   hot: '热搜', quake: '地震', schedule: '定时任务', watch: '关注',
-  notice: '提醒', capture: '截图', update: '升级', news: '资讯', weather: '天气'
+  notice: '提醒', capture: '截图', update: '升级', news: '资讯', weather: '天气',
+  meeting: '会议'
 };
 
 function proactiveCard(title, kind, state) {
@@ -2492,6 +2803,71 @@ function proactiveCard(title, kind, state) {
 function fillProactiveBubble(card, title, text) {
   const bubble = card.querySelector('.bubble');
   if (bubble) bubble.innerHTML = renderMarkdown(text);
+}
+
+/**
+ * 播报卡片上的「一键动作」。
+ * 主进程只能说「这件事可以做什么」（actions 里全是 id），按钮长什么样、点了干什么
+ * 由界面决定 —— 这样以后加动作不用改主进程，也不用给界面塞 HTML。
+ */
+const PROACTIVE_ACTIONS = {
+  'meeting-start': {
+    label: '🎙 开始记录',
+    title: '现在就开始把声音转成文字',
+    run: async () => {
+      setToast('正在开始记录…');
+      const r = await window.xw.meetingStart({});
+      setToast(r && r.ok ? '已开始记录会议纪要' : `没起来：${(r && r.error) || '未知原因'}`);
+      refreshMeetingStatus();
+      return r && r.ok ? '已在记录' : '重试';
+    }
+  },
+  'meeting-stop': {
+    label: '⏹ 停止记录',
+    title: '结束记录并生成纪要',
+    run: async () => {
+      setToast('正在收尾并生成纪要…');
+      const r = await window.xw.meetingStop();
+      setToast(r && r.ok ? (r.discarded ? '内容太少，没有留纪要' : '会议纪要已生成') : `没停掉：${(r && r.error) || '未知原因'}`);
+      refreshMeetingStatus();
+      return '已结束';
+    }
+  }
+};
+
+function appendProactiveActions(card, actions) {
+  if (!Array.isArray(actions) || !actions.length) return;
+  const foot = card.querySelector('.tcard-foot');
+  if (!foot) return;
+  foot.hidden = false;
+  let bar = foot.querySelector('.msg-actions.proactive-acts');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'msg-actions proactive-acts';
+    foot.appendChild(bar);
+  }
+  for (const id of actions) {
+    const spec = PROACTIVE_ACTIONS[id];
+    if (!spec || bar.querySelector(`[data-act="${id}"]`)) continue;
+    const b = document.createElement('button');
+    b.textContent = spec.label;
+    b.title = spec.title || '';
+    b.dataset.act = id;
+    b.onclick = async () => {
+      b.disabled = true;
+      const old = b.textContent;
+      b.textContent = '处理中…';
+      try {
+        const done = await spec.run();
+        b.textContent = done || '已完成';
+        setTimeout(() => { b.disabled = false; b.textContent = old; }, 6000);
+      } catch (e) {
+        b.textContent = '失败了';
+        b.disabled = false;
+      }
+    };
+    bar.appendChild(b);
+  }
 }
 
 function bindProactive() {
@@ -2527,6 +2903,8 @@ function bindProactive() {
         foot.hidden = false;
         foot.appendChild(buildActions(p.text, card.querySelector('.bubble'), card));
       }
+      // 播报自带的操作（比如「检测到你在开会」这张卡上的开始 / 停止记录）
+      appendProactiveActions(card, p.actions);
       scrollToBottom();
       setStatus(title);
 

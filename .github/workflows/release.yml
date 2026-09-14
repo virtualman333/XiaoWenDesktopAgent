@@ -48,6 +48,7 @@ jobs:
           npm run test:tray
           npm run test:context
           npm run test:hotkey
+          npm run test:meeting
 
       - name: GUI 冒烟（需要真实桌面，不阻断发布）
         # runner 上的图形会话偶尔会抽风（窗口合成、快捷键占用）。

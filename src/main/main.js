@@ -13,6 +13,7 @@ const pet = require('./pet');
 // 截图（全屏 / 框选）与自动更新
 const capture = require('./capture');
 const updater = require('./updater');
+const meeting = require('./meeting');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -378,6 +379,23 @@ const DEFAULT_CONFIG = {
   orchAutoDelegate: true,        // 判断为「常任务」时自动走编排，不再逐步请示
   // ---- 定时任务 ----
   schedEnabled: true,            // 到点自动执行并播报
+  // ---- 会议自动记录（检测会议 / 通话并自动记纪要）----
+  // 检测靠三个客观信号：谁占着麦克风/摄像头（Windows 注册表）、进程列表、窗口标题。
+  // 详细判定逻辑见 src/main/jarvis/meeting-detect.js。
+  meetingEnabled: true,          // 总开关：自动检测会议/视频/语音通话
+  meetingAutoRecord: true,       // 检测到就自动开始记录（关闭后只提醒、不录）
+  meetingAskFirst: false,        // 更保守：检测到先问一句，点了才开始记
+  meetingHint: true,             // 只采到一次信号（可能只是发个语音）时轻提示一下
+  meetingPollSec: 5,             // 采样间隔（秒）
+  meetingEnterSamples: 2,        // 连续采到几次才算「真的开始开会了」
+  meetingExitSec: 90,            // 连续多少秒采不到才算「会议结束」
+  meetingSilenceMin: 5,          // 连续多少分钟没人说话就自动收尾（防「客户端没关」）
+  meetingMinMinutes: 1,          // 短于这个时长且没识别到内容就不留纪要
+  meetingMaxMinutes: 120,        // 单次记录上限（分钟），到点自动收尾
+  meetingSegmentMin: 5,          // 识别会话轮换间隔（分钟），防止长连接掉线
+  meetingCaptureMic: true,       // 同时采集麦克风（自己的发言）；戴耳机时效果更好
+  meetingWatchCam: true,         // 摄像头被占用也算信号（纯视频会议也能识别）
+  meetingUnknownApps: false,     // 非白名单应用占用麦克风时也算信号（默认不信，避免误报）
   // ---- 主动关注（地震 / 热点）----
   watchEnabled: true,            // 主动关注总开关
   watchQuake: true,              // 地震速报
@@ -1268,6 +1286,11 @@ ipcMain.handle('config:set', (_e, patch) => {
     ballWin && !ballWin.isDestroyed() && ballWin.setOpacity(patch.ballOpacity);
   }
 
+  // 会议检测：开关 / 轮询间隔 / 灵敏度 / 静默时长 改了都要重建采样参数
+  if (Object.keys(patch).some((k) => k.startsWith('meeting'))) {
+    try { meeting.reload(); } catch (e) { /* ignore */ }
+  }
+
   // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
   try {
     if ('petEnabled' in patch || 'petTop' in patch || 'petKeepTop' in patch) pet.applyConfig(config);
@@ -1565,6 +1588,15 @@ function asrCleanup(reason) {
 
 ipcMain.handle('asr:start', async (event, opts = {}) => {
   const cfg = loadConfig();
+
+  // 正在记录会议纪要时，这条识别通道归采集窗口独占。
+  // 否则面板一语音提问就会把采集会话顶掉，采集窗口又会立刻重连再把对方顶掉 —— 来回打架。
+  try {
+    if (meeting.status().recording && !meeting.isRecorderSender(event.sender)) {
+      return { ok: false, error: '正在记录会议纪要，语音识别暂时被占用；想语音提问请先结束会议记录' };
+    }
+  } catch (e) { /* ignore */ }
+
   const key = (opts && opts.apiKey) ? String(opts.apiKey).trim() : cfg.asrApiKey;
   const model = (opts && opts.model) || cfg.asrModel || 'paraformer-realtime-v2';
   const sampleRate = Number(opts.sampleRate) || 16000;
@@ -2028,6 +2060,38 @@ function bootstrapApp() {
       logLine('updater', '更新模块加载失败: ' + (e && e.message));
     }
 
+    // ---- 会议自动检测 + 自动记录纪要 ----
+    try {
+      const minutesDir = path.join(app.getPath('userData'), 'minutes');
+      require('./jarvis/minutes').bind({ getDir: () => minutesDir });
+      meeting.bind({
+        getConfig: () => loadConfig(),
+        log: (m) => logLine('meeting', m),
+        // 播报复用统一下发通道：宠物气泡 + 系统通知 + 面板卡片
+        deliver: onProactive,
+        // 摘要复用统一对话出口（默认流式，见 llm.js）
+        summarize: async (messages) => {
+          const c = loadConfig();
+          const res = await llm.collectChat({
+            baseUrl: c.apiBaseUrl,
+            apiKey: c.apiKey,
+            model: c.model,
+            messages,
+            temperature: 0.2,
+            maxTokens: 1600,
+            timeoutMs: 90000
+          });
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '摘要生成失败');
+          return res.text || '';
+        },
+        isAsrBusy: () => !!asrSession
+      });
+      meeting.start();
+      logLine('meeting', '会议自动记录已加载（纪要目录 ' + minutesDir + '）');
+    } catch (e) {
+      logLine('meeting', '会议模块加载失败: ' + ((e && e.stack) || e));
+    }
+
     // 看门狗：确认悬浮球 / 宠物窗口真的建出来了，并且一直老实待在屏幕上。
     // 曾经出现过「主进程活着但窗口不可见」的情况 —— 用户双击新实例时
     // 会拿到单实例锁并静默退出，表现为「怎么点都打不开」。这里做一次自检。
@@ -2148,6 +2212,8 @@ function bootstrapApp() {
     try { updater.stopIdleWatch(); } catch (e) { /* ignore */ }
     // 收掉可能还在跑的语音识别会话，避免 WebSocket 悬挂
     asrCleanup('app-quit');
+    // 会议记录：同步落盘（will-quit 里没法 await，只能做同步这一档）
+    try { meeting.stop(); meeting.flushSync(); } catch (e) { /* ignore */ }
     try { jarvis.cleanup(); } catch (e) { /* ignore */ }
     // 正常退出也要清标记
     try {

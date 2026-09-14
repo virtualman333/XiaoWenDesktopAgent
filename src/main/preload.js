@@ -322,5 +322,41 @@ contextBridge.exposeInMainWorld('xw', {
     const h = (_e, p) => cb(p);
     ipcRenderer.on('proactive:msg', h);
     return () => ipcRenderer.removeListener('proactive:msg', h);
-  }
+  },
+
+  // ================= 会议纪要 =================
+  meetingStatus: () => ipcRenderer.invoke('meeting:status'),
+  meetingStart: (meta) => ipcRenderer.invoke('meeting:start', meta || {}),
+  meetingStop: () => ipcRenderer.invoke('meeting:stop'),
+  meetingList: () => ipcRenderer.invoke('meeting:list'),
+  meetingGet: (id) => ipcRenderer.invoke('meeting:get', id),
+  meetingRemove: (id) => ipcRenderer.invoke('meeting:remove', id),
+  meetingSearch: (kw) => ipcRenderer.invoke('meeting:search', kw),
+  meetingOpen: (id) => ipcRenderer.invoke('meeting:open', id),
+  meetingFolder: () => ipcRenderer.invoke('meeting:folder'),
+  meetingDetectNow: () => ipcRenderer.invoke('meeting:detect-now'),
+  meetingSnapshotText: () => ipcRenderer.invoke('meeting:snapshot-text'),
+
+  // 会议状态变化（检测到 / 开始记录 / 已生成纪要 / 丢弃）
+  onMeetingEvent: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('meeting:event', h);
+    return () => ipcRenderer.removeListener('meeting:event', h);
+  },
+  // 录制中的实时转写
+  onMeetingLive: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('meeting:live', h);
+    return () => ipcRenderer.removeListener('meeting:live', h);
+  },
+
+  // ---- 会议记录窗口（隐藏页）专用 ----
+  onMinutesCmd: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('minutes:cmd', h);
+    return () => ipcRenderer.removeListener('minutes:cmd', h);
+  },
+  minutesAck: (payload) => ipcRenderer.send('minutes:ack', payload || {}),
+  minutesChunk: (payload) => ipcRenderer.send('minutes:chunk', payload || {}),
+  minutesVoice: (payload) => ipcRenderer.send('minutes:voice', payload || {})
 });

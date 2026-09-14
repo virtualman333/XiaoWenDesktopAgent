@@ -426,6 +426,35 @@ const DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'meeting_minutes',
+      description: '查询历史会议纪要。可以按关键词搜（会搜标题和转写全文），不传关键词就返回最近几次。用于回答「上次会说了什么」「帮我找找提到 X 的那次会」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          keyword: { type: 'string', description: '关键词，留空=最近几次' },
+          id: { type: 'string', description: '指定纪要 id，直接取这一篇的完整内容（含转写与摘要）' }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'meeting_record',
+      description: '开始或结束一场会议纪要的记录。action=start 开始记录（会采集系统声音并实时转文字），action=stop 结束并生成摘要，action=status 查看当前是否在记录。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['start', 'stop', 'status'], description: '要做什么' }
+        },
+        required: ['action']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'http_request',
       description: '发起 HTTP 请求，用于查接口、抓网页。',
       parameters: {
@@ -631,6 +660,59 @@ async function executeInner(name, args) {
       return { ok: true, output: list.length ? list.map((m) => `- ${m.content}`).join('\n') : '没有找到相关记忆' };
     }
     case 'http_request': return httpRequest(args);
+    case 'meeting_minutes': {
+      // 懒加载：纯 Node 回归测试里会用桩顶掉 electron，
+      // 顶层 require 会把 Electron 依赖提前拖进来，放到用到的时候再拿最安全。
+      let minutes;
+      try { minutes = require('./minutes'); } catch (e) { return { ok: false, error: '纪要模块不可用：' + ((e && e.message) || e) }; }
+      const id = String(args.id || '').trim();
+      if (id) {
+        const rec = minutes.get(id);
+        if (!rec) return { ok: false, error: '没找到这份纪要：' + id };
+        const s = rec.summary || {};
+        const parts = [
+          `# ${rec.title || id}`,
+          `时间：${new Date(rec.startedAt).toLocaleString('zh-CN')}｜时长：${minutes.fmtDuration(rec.durationMs)}`,
+          s.topic ? `主题：${s.topic}` : '',
+          (s.points || []).length ? '要点：\n' + s.points.map((x) => '- ' + x).join('\n') : '',
+          (s.decisions || []).length ? '结论：\n' + s.decisions.map((x) => '- ' + x).join('\n') : '',
+          (s.todos || []).length ? '待办：\n' + s.todos.map((x) => '- [ ] ' + x).join('\n') : '',
+          rec.transcript ? '转写全文：\n' + String(rec.transcript).slice(0, 6000) : ''
+        ].filter(Boolean);
+        return { ok: true, output: parts.join('\n\n') };
+      }
+      const rows = minutes.search(String(args.keyword || ''), 5);
+      if (!rows.length) return { ok: true, output: '还没有任何会议纪要' };
+      const head = args.keyword ? `找到 ${rows.length} 份相关纪要：` : `最近 ${rows.length} 份纪要：`;
+      const body = rows.map((r) => [
+        `- 【${r.id}】${r.app} ${new Date(r.startedAt).toLocaleString('zh-CN')}（${minutes.fmtDuration(r.durationMs)}）`,
+        r.topic ? `  主题：${r.topic}` : '',
+        r.todoCount ? `  待办 ${r.todoCount} 项` : ''
+      ].filter(Boolean).join('\n')).join('\n');
+      return { ok: true, output: `${head}\n${body}\n\n想看全文就把 id 传进来（id 参数）。` };
+    }
+    case 'meeting_record': {
+      let meeting;
+      try { meeting = require('../meeting'); } catch (e) { return { ok: false, error: '会议模块不可用：' + ((e && e.message) || e) }; }
+      const action = String(args.action || 'status');
+      if (action === 'start') {
+        const r = await meeting.startRecording('agent');
+        return r && r.ok ? { ok: true, output: '已经开始记录会议纪要，会实时把声音转成文字。' } : { ok: false, error: (r && r.error) || '开始失败' };
+      }
+      if (action === 'stop') {
+        const r = await meeting.stopRecording('agent');
+        if (!r || r.ok !== true) return { ok: false, error: (r && r.error) || '结束失败' };
+        if (r.discarded) return { ok: true, output: `这段记录内容太少（${Math.round((r.durationMs || 0) / 1000)} 秒），没有留纪要。` };
+        return { ok: true, output: `已结束并生成纪要：${r.row && r.row.topic ? r.row.topic : r.id}` };
+      }
+      const s = meeting.status();
+      return {
+        ok: true,
+        output: s.recording
+          ? `正在记录「${s.session.app}」，已 ${Math.round((s.session.durationMs || 0) / 60000)} 分钟，转写 ${s.session.chars} 字`
+          : '当前没有在记录会议'
+      };
+    }
     default:
       return { ok: false, error: `未知工具：${name}` };
   }

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小问 · 会议记录</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0; height: 100%;
+      background: #0f1218; color: #e8ecf3;
+      font: 13px/1.7 "Microsoft YaHei", system-ui, sans-serif;
+    }
+    #stage { padding: 18px 20px; }
+    h1 { font-size: 15px; margin: 0 0 6px; font-weight: 600; }
+    #hint { margin: 0 0 14px; color: #8b95a7; }
+    #stat { font-family: Consolas, monospace; font-size: 12px; color: #9fb3d1; white-space: pre-wrap; }
+    #stat b { color: #7ee0a8; }
+  </style>
+</head>
+<body>
+  <!-- 隐藏窗口：只负责采集系统声音（+ 麦克风）并转成文字，界面只用于排障 -->
+  <div id="stage">
+    <h1>会议记录中</h1>
+    <p id="hint">这个窗口平时是隐藏的，负责采集系统声音并实时转成文字。</p>
+    <div id="stat">待命…</div>
+  </div>
+  <script type="module" src="./js/minutes-recorder.js"></script>
+</body>
+</html>
