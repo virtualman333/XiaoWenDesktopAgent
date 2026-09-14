@@ -23,6 +23,23 @@ function log(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  :: ' + detail : ''}`);
 }
 
+/**
+ * 百炼（DashScope）API Key 解析：环境变量优先，其次本地 userData/config.json。
+ * 严禁把真实 Key 硬编码进仓库 —— 本项目是公开仓库，硬编码等于泄露。
+ * 用法：set DASHSCOPE_API_KEY=sk-xxx && node_modules/electron/dist/electron.exe build/_jarvis_e2e.js
+ */
+function resolveDashscopeKey() {
+  if (process.env.DASHSCOPE_API_KEY) return process.env.DASHSCOPE_API_KEY.trim();
+  try {
+    const cfgPath = path.join(USERDATA, 'config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+      return (cfg.ttsApiKey || cfg.asrApiKey || cfg.apiKey || '').trim();
+    }
+  } catch (e) {}
+  return '';
+}
+
 app.whenReady().then(async () => {
   const store = require('../src/main/jarvis/store.js');
   const tools = require('../src/main/jarvis/tools.js');
@@ -92,17 +109,22 @@ app.whenReady().then(async () => {
     const shotOk = shot.ok && fs.existsSync(shot.file || '');
     log('screenshot', shotOk, shot.file ? `${shot.file} (${Math.round(fs.statSync(shot.file).size / 1024)} KB)` : (shot.error || '').slice(0, 120));
 
-    // 14. TTS - CosyVoice
-    const ttsR = await tts.synth({
-      provider: 'dashscope',
-      text: '你好主人，这是小问的语音合成测试。',
-      apiKey: '***REMOVED_API_KEY***',
-      model: 'cosyvoice-v2',
-      voice: 'longxiaochun_v2',
-      format: 'mp3'
-    });
-    log('tts_cosyvoice', ttsR.ok && fs.existsSync(ttsR.file || ''),
-      ttsR.file ? `${ttsR.file} (${Math.round(ttsR.bytes / 1024)} KB)` : (ttsR.error || '').slice(0, 150));
+    // 14. TTS - CosyVoice（需要 Key；未配置则跳过，不计失败）
+    const dashKey = resolveDashscopeKey();
+    if (!dashKey) {
+      log('tts_cosyvoice', true, 'SKIP：未配置 DASHSCOPE_API_KEY（set DASHSCOPE_API_KEY=sk-xxx 后重跑可真实联调）');
+    } else {
+      const ttsR = await tts.synth({
+        provider: 'dashscope',
+        text: '你好主人，这是小问的语音合成测试。',
+        apiKey: dashKey,
+        model: 'cosyvoice-v2',
+        voice: 'longxiaochun_v2',
+        format: 'mp3'
+      });
+      log('tts_cosyvoice', ttsR.ok && fs.existsSync(ttsR.file || ''),
+        ttsR.file ? `${ttsR.file} (${Math.round(ttsR.bytes / 1024)} KB)` : (ttsR.error || '').slice(0, 150));
+    }
 
     // 15. 开机自启
     const as = autostart.status();

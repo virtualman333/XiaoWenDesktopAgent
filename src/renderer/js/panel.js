@@ -1,6 +1,7 @@
 import { streamChat, streamAgent, testConnection, abortChat } from './api.js';
 import { renderMarkdown, toPlainText } from './markdown.js';
 import * as speech from './speech.js';
+import { maybeShowSetup, openSetup } from './setup.js';
 
 // ============ 全局状态 ============
 let cfg = {};
@@ -83,6 +84,9 @@ async function init() {
   }
   showView('chat');
   await initChat();
+
+  // 新机器首次启动：还没配过模型 Key，先走一遍配置引导
+  maybeShowSetup(cfg);
 }
 
 window.addEventListener('hashchange', () => {
@@ -785,6 +789,8 @@ function initSettings() {
   settingsInited = true;
   buildTabs();
   bindGeneral();
+  const rerun = $('stRerunSetup');
+  if (rerun) rerun.addEventListener('click', () => openSetup(cfg));
   bindModel();
   bindPersona();
   bindAgent();

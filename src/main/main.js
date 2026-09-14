@@ -334,7 +334,8 @@ const DEFAULT_CONFIG = {
   petTop: true,          // 窗口置顶
   petInteraction: true,  // 心情衰减 / 随机台词
   history: [],
-  maxHistory: 200
+  maxHistory: 200,
+  setupDone: false // 是否已完成首次配置引导（新机 clone 后为 false，会弹出引导）
 };
 
 function loadConfig() {
@@ -1534,6 +1535,15 @@ function bootstrapApp() {
     createBallWindow();
     createTray();
     registerHotkeys();
+
+    // ---- 新机首次启动：还没配过大模型 Key，直接把面板弹出来做引导 ----
+    // 以前 clone 下来不配 Key 打开就是一片空白，用户根本不知道要干什么。
+    if (!loadConfig().apiKey && !loadConfig().setupDone) {
+      logLine('setup', '检测到首次运行（未配置模型 Key），自动打开面板引导');
+      setTimeout(() => {
+        try { createPanelWindow(); } catch (e) { logLine('setup', '打开面板失败: ' + (e && e.message)); }
+      }, 800);
+    }
 
     // ---- 桌面宠物 ----
     try {

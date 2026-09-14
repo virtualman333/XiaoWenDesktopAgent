@@ -33,9 +33,10 @@
 
 ### 方式一：直接运行安装包（推荐）
 
-1. 双击 `release-v1.0.3/小问助手 Setup 1.0.3.exe` 安装
+1. 双击 `release-v1.2.0/` 下的 `小问助手 Setup.exe` 安装
 2. 安装完成后从桌面或开始菜单启动
-3. 右下角会出现蓝色悬浮球，右键托盘图标 → **设置** → 填入你的 API Key
+3. 右下角会出现蓝色悬浮球，**首次启动会自动弹出配置引导**：选服务商 → 填 API Key → 测连通 → 完成
+   （如果跳过了引导，也可以右键托盘图标 → **设置** → 填入你的 API Key）
 4. 开始使用
 
 ### 方式二：从源码运行（开发）
@@ -50,6 +51,16 @@ npm run build:renderer
 # 3. 启动
 npm start
 ```
+
+首次启动会自动打开面板并弹出「首次配置引导」，按提示 30 秒即可配好。
+想重新走一遍：设置 → 常规 → **重新运行首次配置引导**。
+
+### 密钥安全（重要）
+
+- 本项目是**公开仓库**，任何真实 Key 一旦 commit 进 git 历史都视为已泄露，请立刻去服务商控制台轮换
+- 本地密钥建议走环境变量：把 `.env.example` 复制为 `.env` 填入（`build/_jarvis_e2e.js` 会读 `DASHSCOPE_API_KEY`）
+- `config.json` 与 `.env` 都已在 `.gitignore` 中，不会被提交
+- 应用运行时，密钥只保存在本机 `%APPDATA%\xiaowen-assistant\config.json`，渲染进程拿到的始终是打码值
 
 开发模式（界面热更新）：
 
@@ -239,11 +250,14 @@ description: 整理每日工作日报时使用
 │       └── js/
 │           ├── ball.js     # 悬浮球交互
 │           ├── panel.js    # 对话 + Agent 可视化 + 设置
+│           ├── setup.js    # 首次启动配置引导
 │           ├── api.js      # 流式对话 / Agent 调用
 │           ├── speech.js   # 语音识别 + 系统合成
 │           └── markdown.js # Markdown 渲染
 ├── build/                  # 图标、构建与验证脚本
 ├── dist/                   # 构建产物（渲染进程）
+├── config.example.json     # 配置模板（复制后填自己的值）
+├── .env.example            # 环境变量模板（本地密钥走这里）
 ├── vite.config.mjs
 └── package.json
 ```

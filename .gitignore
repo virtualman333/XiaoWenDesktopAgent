@@ -29,3 +29,6 @@ Desktop.ini
 config.json
 .env
 .env.*
+# 模板文件是给新机参考的，必须入库
+!.env.example
+!.env.sample
