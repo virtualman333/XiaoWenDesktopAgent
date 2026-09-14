@@ -68,12 +68,19 @@ jobs:
             cat "$f.sha256.txt"
           done
 
+      - name: 生成 Release 说明（抽 CHANGELOG 对应版本）
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          node build/changelog-section.mjs "${TAG#v}" > release-body.md
+          head -12 release-body.md
+
       - name: 发布到 GitHub Release（附编译产物）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          body_path: release-body.md
           fail_on_unmatched_files: true
           files: |
             release*/*.exe

@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { releaseBody } from './changelog-section.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -70,26 +71,6 @@ if (!tag) {
 }
 const explicit = process.argv.slice(3);
 
-/** 从 CHANGELOG 里抠出这一版的说明，找不到就用一句兜底 */
-function releaseBody() {
-  const ver = tag.replace(/^v/, '');
-  try {
-    const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
-    const lines = md.split(/\r?\n/);
-    const start = lines.findIndex((l) => new RegExp(`^##\\s*\\[?${ver.replace(/\./g, '\\.')}\\]?`).test(l));
-    if (start >= 0) {
-      const out = [];
-      for (let i = start + 1; i < lines.length; i++) {
-        if (/^##\s/.test(lines[i])) break;
-        out.push(lines[i]);
-      }
-      const body = out.join('\n').trim();
-      if (body) return `## 小问助手 ${tag}\n\n${body}\n\n---\n\n安装包在下方 Assets（Windows x64 安装版，可直接覆盖安装）。`;
-    }
-  } catch (e) { /* ignore */ }
-  return `小问助手 ${tag} 安装包（Windows x64）。`;
-}
-
 /** 没显式传文件时，自动去 release-* 目录里找编译产物 */
 function collectFiles() {
   if (explicit.length) return explicit.map((f) => path.resolve(ROOT, f));
@@ -140,7 +121,7 @@ if (rel.status === 404) {
     body: JSON.stringify({
       tag_name: tag,
       name: tag,
-      body: releaseBody(),
+      body: releaseBody(tag),
       draft: false,
       prerelease: /-(beta|rc|alpha)/i.test(tag)
     })
