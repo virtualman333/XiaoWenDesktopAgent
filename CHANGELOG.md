@@ -4,6 +4,54 @@
 
 ---
 
+## [1.6.1] - 2026-09-14
+
+### 修复：右下角托盘图标不显示（安装版）
+
+两个坑叠在一起，缺一个都不会出问题：
+
+1. **图标根本没进安装包。** 托盘图标原本只放在仓库的 `build/icon.ico`，
+   而 electron-builder 的 `files` 只打包 `src/**`、`dist/**`、`package.json` ——
+   `build/` 是 `buildResources`，不进 `app.asar`。于是安装版里
+   `path.join(__dirname,'../../build/icon.ico')` 永远不存在，**每次都走兜底**。
+   （实测确认：安装版 `app.asar` 里只有 `node_modules / dist / package.json / src`，一个图标文件都没有。）
+2. **兜底的内联 base64 是一张损坏的 PNG** —— zlib 流截断、没有 `IEND`，
+   `nativeImage.createFromBuffer` 解出来是 `0x0` 的空图。
+   而 **`new Tray(空图)` 不会报错**，只是托盘上什么都看不见 —— 纯静默失败。
+
+修法与加固：
+
+- 图标改放 `src/assets/`（`tray.ico` 多尺寸 + `tray.png`），随包发布；
+  开发时仍可回退到仓库根的 `build/icon.ico`。
+- 图标解析抽成独立的 `src/main/tray-icon.js`，**每一档候选都要过 `isEmpty()` 校验**，
+  空图直接跳过换下一档；内联兜底换成一张**完整可解码**的 PNG（同一张图，32×32）。
+- `.ico` 直接交给 Windows，由它自己挑 16/24/32… 那一档，比强行 resize 到 16×16 更清楚。
+- 托盘创建失败不再拖垮后续初始化（宠物 / Jarvis 照常起来），并写入启动日志。
+- 看门狗新增托盘自检：托盘不存在就重建；图标为空则明确报警（附带候选路径），
+  设置页「常规」也新增「系统托盘」区块：实时状态 + 「重新载入托盘图标」按钮，
+  托盘右键菜单加「重新载入托盘图标」。
+
+### 测试
+
+- 新增 `npm run test:tray`（19 项，纯 Node）：图标资源是否存在、
+  `build.files` 是否真的覆盖它、`tray.ico` 各档是否可解码、
+  **内联兜底 base64 是否完整且有不透明像素**（正是这次事故的点）。
+  （已验证：把 base64 换回旧的那张截断图，测试会失败。）
+- 新增 `npm run test:packed`（10 项，纯 Node）：编译出安装目录后，
+  直接读 `app.asar` 头部，确认 `src/assets/tray.ico`、`src/main/tray-icon.js`、
+  `dist/panel.html` 等运行期资源真的在包里 —— 已接进 Release CI，
+  在编译安装包之后、上传产物之前跑，当作最后一道闸。
+- 冒烟测试（真 Electron）新增 11 项：图标来源必须是随包的 `src/assets`、
+  托盘能建出来、强制走兜底时也不是空图、设置页按钮能走通 preload → IPC → 回填状态。
+- 顺带把「体型跑偏能被修正」的用例改强：原来等待 300ms 再读，
+  会被散步热路径的纠偏掩盖成恒真；现在改成「立刻读确认改坏」+
+  「不喊救援也能被热路径自愈」两个独立断言。
+- 打包验证：`release-v1.6.1/win-unpacked` 启动日志确认
+  `[tray] 托盘图标就绪 source=…\app.asar\src\assets\tray.ico size=256x256`，
+  托盘自检 `iconEmpty:false`、`bounds:[32,48]`。
+
+---
+
 ## [1.6.0] - 2026-09-14
 
 ### 修复：桌面宠物「不见了」

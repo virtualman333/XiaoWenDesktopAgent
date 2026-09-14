@@ -183,6 +183,17 @@
             <input type="range" id="stOpacity" min="30" max="100" step="1" value="92" />
           </div>
 
+          <h3>系统托盘</h3>
+          <div class="field">
+            <button class="btn-ghost full" id="stTrayReload">重新载入托盘图标</button>
+            <div class="hint">
+              右下角看不到小问的图标时先点这里。如果工具栏里还是没有，多半是 Windows 把它收进了
+              「隐藏的图标」：点任务栏的 ∧ 箭头，把小问拖到托盘上即可（Win11 可在
+              设置 → 个性化 → 任务栏 → 其他系统托盘图标 里打开）。
+            </div>
+          </div>
+          <div class="hint" id="stTrayDiag">托盘状态：—</div>
+
           <h3>新手引导</h3>
           <div class="field">
             <button class="btn-ghost full" id="stRerunSetup">重新运行首次配置引导</button>

@@ -157,6 +157,9 @@ contextBridge.exposeInMainWorld('xw', {
   petRescue: () => ipcRenderer.invoke('pet:rescue'),
   petReload: () => ipcRenderer.invoke('pet:reload'),
   petDiag: () => ipcRenderer.invoke('pet:diag'),
+  // 托盘：右下角图标看不见时用的自检与重建
+  trayDiag: () => ipcRenderer.invoke('tray:diag'),
+  trayReload: () => ipcRenderer.invoke('tray:reload'),
   // 让宠物替小问播报（面板 / 任意窗口调用，主进程转发给宠物窗口）
   petSay: (text) => ipcRenderer.invoke('pet:say-out', text),
   onPetSay: (cb) => {

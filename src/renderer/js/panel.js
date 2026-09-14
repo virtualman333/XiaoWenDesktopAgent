@@ -850,6 +850,7 @@ function initSettings() {
   bindSkills();
   bindVoice();
   bindPet();
+  bindTray();
   bindCapture();
   bindSchedule();
   bindWatch();
@@ -880,6 +881,7 @@ function fillAll() {
   fillCapture();
   fillSchedule();
   fillWatch();
+  refreshTrayDiag();
   refreshGpuStatus();
 }
 
@@ -1599,6 +1601,43 @@ async function refreshPetDiag() {
   } catch (e) {
     el.textContent = '宠物窗口状态：读取失败 ' + ((e && e.message) || e);
   }
+}
+
+// ---------- 系统托盘 ----------
+function bindTray() {
+  const btn = $('stTrayReload');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = '正在重新载入…';
+    try {
+      const d = await window.xw.trayReload();
+      renderTrayDiag(d);
+      if (d && d.exists && !d.iconEmpty) setStatus('托盘图标已重新载入');
+      else setStatus('托盘已重建，但图标仍是空的，请看下方提示');
+    } catch (e) {
+      setStatus('重新载入托盘失败：' + ((e && e.message) || e));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '重新载入托盘图标';
+    }
+  });
+}
+
+function renderTrayDiag(d) {
+  const el = $('stTrayDiag');
+  if (!el) return;
+  if (!d) { el.textContent = '托盘状态：读取失败'; return; }
+  if (!d.exists) { el.textContent = '托盘状态：未创建'; return; }
+  const size = d.iconSize ? `${d.iconSize.width}×${d.iconSize.height}` : '—';
+  el.textContent = d.iconEmpty
+    ? '托盘状态：⚠️ 图标为空，右下角会看不见（请重新载入；若仍为空说明图标资源丢失）'
+    : `托盘状态：正常 · 图标 ${size} · 来源 ${d.source}`;
+}
+
+async function refreshTrayDiag() {
+  if (!window.xw.trayDiag) return;
+  try { renderTrayDiag(await window.xw.trayDiag()); } catch (e) { /* ignore */ }
 }
 
 // ---------- 定时任务 ----------

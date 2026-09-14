@@ -595,19 +595,63 @@ function loadRenderer(win, file, hash = '') {
 }
 
 // ---------- 托盘图标 ----------
+// 图标解析单独放在 tray-icon.js（那里有完整的踩坑记录，也方便单测 + 冒烟）：
+// 图标必须放在 src/ 下随包发布，且每一档都要校验 isEmpty()，否则
+// new Tray(空图) 不会报错，但托盘上什么都看不见 —— 静默失败。
+const trayIcon = require('./tray-icon');
+
+// 记录实际用的图标来源，方便自检与设置页展示
+let trayIconInfo = { source: '(未加载)', empty: true, size: null, warned: false };
+
 function getTrayIcon() {
-  const icoPath = path.join(__dirname, '../../build/icon.ico');
-  if (fs.existsSync(icoPath)) {
-    return nativeImage.createFromPath(icoPath);
+  return trayIcon.resolveTrayIcon({ log: (m) => logLine('tray', m) }).image;
+}
+
+/** 托盘状态快照（自检 / 设置页 / 日志用） */
+function trayDiag() {
+  const alive = !!(tray && !tray.isDestroyed());
+  let bounds = null;
+  if (alive) {
+    try { bounds = tray.getBounds(); } catch (e) { bounds = null; }
   }
-  // 兜底：内联一个 16x16 蓝色圆形 PNG
-  const b64 = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAv0lEQVQ4y2NgGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFIyCUTAKRsEoGAWjYBSMglEwCkbBKBgFo2AUjIJRMApGwSgYBaNgFAwHAAA1oAAB0h8m6wAAAABJRU5ErkJggg==';
-  return nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
+  return {
+    exists: alive,
+    source: trayIconInfo.source,
+    iconEmpty: trayIconInfo.empty,
+    iconSize: trayIconInfo.size,
+    // Windows 上 getBounds 对空图标也返回正常矩形，仅作参考
+    bounds: bounds ? [bounds.width, bounds.height] : null
+  };
+}
+
+/** 重建托盘（图标换了 / 托盘崩了 / 用户手动「重新载入托盘」） */
+function recreateTray(reason) {
+  try {
+    if (tray && !tray.isDestroyed()) tray.destroy();
+  } catch (e) { /* ignore */ }
+  tray = null;
+  logLine('tray', '重建托盘：' + (reason || '手动'));
+  return createTray();
 }
 
 function createTray() {
-  const icon = getTrayIcon();
-  tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  const res = trayIcon.resolveTrayIcon({ log: (m) => logLine('tray', m) });
+  const empty = !res.image || res.image.isEmpty();
+  trayIconInfo = {
+    source: res.source,
+    empty,
+    size: empty ? null : res.image.getSize(),
+    warned: false
+  };
+  if (empty) {
+    logLine('tray', '⚠️ 托盘图标是空图！右下角会「看不见图标」。'
+      + '请确认 src/assets/tray.ico 存在且随包发布（files 需包含 src/**）。'
+      + '候选路径：' + trayIcon.TRAY_ICON_CANDIDATES.join(' | '));
+  } else {
+    logLine('tray', `托盘图标就绪 source=${res.source} size=${trayIconInfo.size.width}x${trayIconInfo.size.height}`);
+  }
+
+  tray = new Tray(trayIcon.iconForTray(res));
   tray.setToolTip('小问助手 · 按 Alt+Space 快捷问答');
 
   const menu = Menu.buildFromTemplate([
@@ -657,6 +701,10 @@ function createTray() {
         if (panelWin && !panelWin.isDestroyed()) panelWin.reload();
         if (ballWin && !ballWin.isDestroyed()) ballWin.reload();
       }
+    },
+    {
+      label: '重新载入托盘图标',
+      click: () => recreateTray('菜单')
     },
     {
       label: '退出小问助手',
@@ -1132,9 +1180,15 @@ ipcMain.handle('history:clear', () => {
   return true;
 });
 
+// 托盘
+ipcMain.handle('tray:diag', () => trayDiag());
+ipcMain.handle('tray:reload', () => {
+  recreateTray('设置页');
+  return trayDiag();
+});
+
 // 窗口控制
-ipcMain.handle('win:panel-open', () => createPanelWindow());
-ipcMain.handle('win:panel-open-voice', () => triggerVoiceAsk());
+ipcMain.handle('win:panel-open', () => createPanelWindow());ipcMain.handle('win:panel-open-voice', () => triggerVoiceAsk());
 ipcMain.handle('win:panel-hide', () => {
   panelWin && !panelWin.isDestroyed() && panelWin.hide();
 });
@@ -1718,7 +1772,12 @@ function bootstrapApp() {
     logLine('ready', '初始化成功');
 
     createBallWindow();
-    createTray();
+    // 托盘单独包一层：托盘建不出来也不该拖垮后面的宠物 / Jarvis 初始化
+    try {
+      createTray();
+    } catch (e) {
+      logLine('tray', '托盘创建失败: ' + ((e && e.stack) || e));
+    }
     // 截图配置要先绑定：registerHotkeys 里注册截图快捷键时会读它
     try {
       capture.bindConfig(() => loadConfig());
@@ -1821,6 +1880,26 @@ function bootstrapApp() {
         lastPetSnap = snap;
       } catch (e) {
         logLine('watchdog', '宠物自检失败: ' + ((e && e.message) || e));
+      }
+
+      // ---- 托盘 ----
+      // 托盘图标为空 = 右下角什么都看不见（new Tray 不会报错，纯静默失败）。
+      // 这种情况一般是图标资源丢了（例如打包时没带上），重建没用，所以只报警 + 打日志，
+      // 让设置页和启动日志都能看出来；顺带把配置的候选路径记下来方便排查。
+      try {
+        const td = trayDiag();
+        if (!td.exists) {
+          logLine('watchdog', '托盘不存在，重建');
+          recreateTray('看门狗：托盘丢失');
+        } else if (td.iconEmpty && !trayIconInfo.warned) {
+          trayIconInfo.warned = true;
+          logLine('watchdog', '⚠️ 托盘图标为空，右下角会看不到图标。'
+            + `线索：source=${td.source}；候选=${trayIcon.TRAY_ICON_CANDIDATES.join(' | ')}`);
+        } else if (petTicks <= 5) {
+          logLine('watchdog', '托盘状态 ' + JSON.stringify(td));
+        }
+      } catch (e) {
+        logLine('watchdog', '托盘自检失败: ' + ((e && e.message) || e));
       }
     };
     setTimeout(petWatchdog, 6000);

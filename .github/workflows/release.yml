@@ -45,6 +45,7 @@ jobs:
           npm run test:orch
           npm run test:llm
           npm run test:proactive
+          npm run test:tray
 
       - name: 构建渲染层
         run: npm run build:renderer
@@ -52,6 +53,12 @@ jobs:
       - name: 编译安装包（NSIS）
         # --publish never：产物留在本地，交给下一步统一上传，避免半路发布失败留下空 Release
         run: npx electron-builder --win nsis --publish never
+
+      - name: 检查安装包里真的带上了托盘图标
+        # 历史事故：图标只放在仓库 build/ 下，而 electron-builder 的 files 不含 build/，
+        # 于是安装版里图标根本不存在 → 右下角托盘看不见。这里是发布前的最后一道闸。
+        shell: bash
+        run: node build/_packed_check.mjs
 
       - name: 列出产物
         shell: bash

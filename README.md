@@ -367,9 +367,11 @@ description: 整理每日工作日报时使用
 ```
 小问助手/
 ├── src/
+│   ├── assets/             # 随包发布的静态资源（托盘图标 tray.ico / tray.png）
 │   ├── main/
 │   │   ├── main.js         # 主进程：窗口、托盘、快捷键、大模型代理、ASR 代理
 │   │   ├── preload.js      # 安全桥接（contextBridge）
+│   │   ├── tray-icon.js    # 托盘图标解析（多档候选 + isEmpty 校验，可单测）
 │   │   └── jarvis/         # v1.1 智能体能力
 │   │       ├── index.js    # IPC 统一注册
 │   │       ├── store.js    # 人格 / 记忆 / 会话 / MCP / 工具设置存储
@@ -436,7 +438,7 @@ npm run dist:dir
 # 1. 改版本号（version + 打包输出目录一起改，避免对不上）
 npm run version:bump 1.6.0
 #    再补 CHANGELOG.md，跑测试
-npm run test:orch && npm run test:pet && npm run test:wake && npm run test:llm && npm run test:proactive
+npm run test:orch && npm run test:pet && npm run test:wake && npm run test:llm && npm run test:proactive && npm run test:tray
 
 # 2. 提交，然后推一个 vX.Y.Z 格式的 tag
 git commit -am "release: v1.6.0"
@@ -447,7 +449,7 @@ git push origin v1.6.0
 
 `.github/workflows/release.yml` 会在 windows runner 上自动：
 
-1. `npm ci` → 跑五套回归测试 → `npm run build:renderer`
+1. `npm ci` → 跑六套回归测试 → `npm run build:renderer`
 2. `electron-builder --win nsis` 编译安装包
 3. 把 **`.exe` + `.exe.sha256.txt` + `latest.yml` + `.blockmap`** 挂到该 tag 的 Release 上
 

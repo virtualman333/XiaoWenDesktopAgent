@@ -17,6 +17,9 @@ _x*.py
 _*.py
 *.log
 build/_shot_*.png
+# 冒烟测试用的隔离 userData（每次跑都会重新生成）
+build/_*_userdata/
+build/_*_ud/
 
 # ---- 编辑器 / 系统 ----
 .vscode/
