@@ -58,6 +58,10 @@ jobs:
           echo "----- 产物清单 -----"
           ls -lh release*/ || true
 
+      - name: 清理不上传的文件
+        shell: bash
+        run: rm -f release*/builder-debug.yml
+
       - name: 计算校验和
         shell: bash
         run: |
@@ -88,4 +92,3 @@ jobs:
             release*/*.exe.sha256.txt
             release*/*.blockmap
             release*/*.yml
-            !release*/builder-debug.yml
