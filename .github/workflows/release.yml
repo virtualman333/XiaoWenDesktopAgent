@@ -43,6 +43,7 @@ jobs:
           npm run test:wake
           npm run test:pet
           npm run test:orch
+          npm run test:llm
 
       - name: 构建渲染层
         run: npm run build:renderer

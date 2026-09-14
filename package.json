@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -17,7 +17,8 @@
     "dist:dir": "npm run build:renderer && electron-builder --win dir",
     "test:orch": "node build/_orch_test.mjs",
     "release:upload": "node build/gh-release.mjs",
-    "version:bump": "node build/bump-version.mjs"
+    "version:bump": "node build/bump-version.mjs",
+    "test:llm": "node build/_llm_test.mjs"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -29,7 +30,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.5.0",
+      "output": "release-v1.5.1",
       "buildResources": "build"
     },
     "files": [

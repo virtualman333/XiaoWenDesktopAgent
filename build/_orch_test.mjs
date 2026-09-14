@@ -46,10 +46,17 @@ globalThis.fetch = async (url, opts) => {
   const user = (body.messages || []).find((m) => m.role === 'user');
   fetchLog.push({ url, sys: (sys && sys.content) || '', user: (user && user.content) || '' });
   const out = fetchHandler ? fetchHandler({ sys: (sys && sys.content) || '', user: (user && user.content) || '' }) : '{}';
+  // 现在所有对话请求都走流式（见 src/main/llm.js），桩件也按流式返回
+  const sse = 'data: ' + JSON.stringify({ choices: [{ delta: { content: out } }] }) + '\n\n'
+    + 'data: [DONE]' + '\n\n';
   return {
     ok: true,
     status: 200,
-    text: async () => JSON.stringify({ choices: [{ message: { content: out } }] })
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? 'text/event-stream' : null) },
+    text: async () => sse,
+    body: new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode(sse)); c.close(); }
+    })
   };
 };
 

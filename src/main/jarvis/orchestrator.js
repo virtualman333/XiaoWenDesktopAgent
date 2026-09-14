@@ -11,47 +11,35 @@
  *   4) 全部收工后小问汇总成一段话向主人汇报
  */
 const agent = require('./agent');
+// 统一对话出口：一律流式（有些网关不支持非流式，会直接 400）
+const llm = require('../llm');
 
 const now = () => Date.now();
 let seq = 0;
 const nextId = (p) => `${p || 'id'}_${(++seq).toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
 // ---------------- 基础请求 ----------------
-function normalizeBaseUrl(base) {
-  return String(base || '').trim().replace(/\/+$/, '').replace(/\/v1$/, '');
-}
 
-/** 一次「想清楚就行」的短调用：不流式、不外显，给主管和子代理内部用 */
+/** 一次「想清楚就行」的短调用：不外显，给主管和子代理内部用。
+ *  同样走流式（见 ../llm.js 的说明），只是过程不显示给主人。 */
 async function quickChat({ cfg, system, user, temperature = 0.2, timeoutMs = 60000, signal }) {
-  const baseUrl = normalizeBaseUrl(cfg.apiBaseUrl);
-  if (!baseUrl || !cfg.apiKey || !cfg.model) throw new Error('尚未配置模型接口');
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => { try { ctrl.abort(); } catch (e) { /* ignore */ } }, timeoutMs);
-  if (signal && typeof signal.addEventListener === 'function') {
-    signal.addEventListener('abort', () => { try { ctrl.abort(); } catch (e) { /* ignore */ } });
+  const r = await llm.collectChat({
+    baseUrl: cfg.apiBaseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    temperature,
+    timeoutMs,
+    signal
+  });
+  if (!r.ok) {
+    if (r.aborted) throw new Error('已中断');
+    throw new Error(r.error || '请求失败');
   }
-
-  try {
-    const res = await fetch(baseUrl + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-        temperature,
-        stream: false
-      }),
-      signal: ctrl.signal
-    });
-    const raw = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}：${raw.slice(0, 200)}`);
-    const j = JSON.parse(raw);
-    const content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-    return String(content || '').trim();
-  } finally {
-    clearTimeout(timer);
-  }
+  return String(r.text || '').trim();
 }
 
 /** 从模型输出里抠出 JSON（允许被 ```json 包着、前面带废话） */

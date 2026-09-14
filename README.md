@@ -424,6 +424,10 @@ npm run release:upload v1.5.0
 
 ## 常见问题
 
+**Q：配置时「测试连接」报 `HTTP 400 · Non-stream chat request is currently not supported`？**
+v1.5.1 起所有对话请求默认走流式（`stream: true`），不会再出现这个错误。
+遇到的话升级到 v1.5.1 及以后即可；旧版本可以先点「跳过」，进设置后再改。
+
 **Q：双击了没反应 / 托盘图标不见了？**
 Windows 默认会折叠托盘图标，点任务栏的「^」展开，把小问助手拖出来固定。
 

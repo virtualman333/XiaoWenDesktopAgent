@@ -12,6 +12,8 @@ const pet = require('./pet');
 // 截图（全屏 / 框选）与自动更新
 const capture = require('./capture');
 const updater = require('./updater');
+// 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
+const llm = require('./llm');
 
 const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5199';
@@ -937,34 +939,17 @@ ipcMain.handle('chat:test', async (_e, { baseUrl: rawBase, model: rawModel, apiK
   if (!key) return { ok: false, error: '请先填写 API Key' };
   if (key.includes('***')) return { ok: false, error: 'API Key 里包含 *** —— 请重新粘贴完整的 Key（可能是复制了打码后的文本）' };
 
-  try {
-    const res = await fetch(baseUrl + '/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: '你好' }],
-        max_tokens: 16,
-        stream: false
-      })
-    });
-
-    const raw = await res.text();
-    if (!res.ok) return { ok: false, error: extractErrorText(res.status, res.statusText, raw) };
-
-    let reply = '';
-    try {
-      const json = JSON.parse(raw);
-      reply = json?.choices?.[0]?.message?.content || '';
-    } catch {}
-    return { ok: true, text: reply };
-  } catch (e) {
-    const m = String(e && e.message || e);
-    return { ok: false, error: m };
-  }
+  // 一律走流式：不少 OpenAI 兼容网关不支持非流式请求，
+  // 直接回 HTTP 400 · Non-stream chat request is currently not supported
+  const r = await llm.collectChat({
+    baseUrl,
+    apiKey: key,
+    model,
+    messages: [{ role: 'user', content: '你好' }],
+    timeoutMs: 30000
+  });
+  if (!r.ok) return { ok: false, error: r.error || '连接失败，请检查接口地址与 Key' };
+  return { ok: true, text: r.text || '' };
 });
 
 // ---------- IPC ----------
