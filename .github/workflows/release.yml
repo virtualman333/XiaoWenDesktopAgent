@@ -48,6 +48,9 @@ jobs:
           npm run test:tray
           npm run test:context
           npm run test:hotkey
+          npm run test:pet-top
+          npm run test:boot
+          npm run test:ui
 
       - name: 构建渲染层
         run: npm run build:renderer

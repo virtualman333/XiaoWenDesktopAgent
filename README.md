@@ -499,7 +499,7 @@ npm run dist:dir
 npm run version:bump 1.7.0
 #    再补 CHANGELOG.md，跑测试
 npm run test:all                                   # 全部纯 Node 套件
-npm run test:ui && npm run test:pet-top            # 两个需要真实 Electron 的
+npm run test:boot && npm run test:ui && npm run test:pet-top   # 三个需要真实 Electron 的
 # 也可以单独跑：test:context / test:hotkey / test:proactive / test:orch /
 #              test:pet / test:tray / test:wake / test:llm
 

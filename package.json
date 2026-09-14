@@ -26,7 +26,8 @@
     "test:hotkey": "node build/_hotkey_test.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
     "test:ui": "node build/_run-electron.mjs build/_ui_smoke.js",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:proactive && npm run test:orch && npm run test:pet && npm run test:tray && npm run test:wake"
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:proactive && npm run test:orch && npm run test:pet && npm run test:tray && npm run test:wake",
+    "test:boot": "node build/_run-electron.mjs build/_boot_check.js"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
