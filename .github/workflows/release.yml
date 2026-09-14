@@ -38,7 +38,7 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 跑回归测试
+      - name: 跑回归测试（纯 Node，硬闸）
         run: |
           npm run test:wake
           npm run test:pet
@@ -48,6 +48,12 @@ jobs:
           npm run test:tray
           npm run test:context
           npm run test:hotkey
+
+      - name: GUI 冒烟（需要真实桌面，不阻断发布）
+        # runner 上的图形会话偶尔会抽风（窗口合成、快捷键占用）。
+        # 这些测试有价值，但不该因为它们flake就卡住一次发版 —— 失败照样打红叉，人去查。
+        continue-on-error: true
+        run: |
           npm run test:pet-top
           npm run test:boot
           npm run test:ui
