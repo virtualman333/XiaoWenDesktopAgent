@@ -38,6 +38,17 @@
 
 - 宠物工具名汉化表补全为项目真实工具名（跑命令 / 读文件 / 看屏幕 / 请示小问 / 派活给子代理…）
 
+### 打包发布
+
+- **发版改为发编译产物**：新增 GitHub Actions（`.github/workflows/release.yml`），
+  推 `vX.Y.Z` tag 就自动跑测试 → 编译 NSIS 安装包 → 把 exe / latest.yml / blockmap / 校验和
+  一起挂到 Release 上，不再出现「只有源码、老用户更新不到」的发版
+- **修掉产物名与更新清单不一致**：`artifactName` 固定为 `XiaoWen-Setup-${version}.${ext}`。
+  以前中文产物名会被 electron-builder 在 `latest.yml` 里改写成拼音名，
+  导致清单指向的资产不存在、自动更新 404
+- 新增 `npm run release:upload`：本地编译后一键补挂 Release（找不到 Release 会按 CHANGELOG 自动创建）
+- 新增 `npm run version:bump`：一次改好 `version` 与打包输出目录，避免两者对不上
+
 ---
 
 ## [1.4.0] — 2026-09-14 · 宠物 × Agent 联动

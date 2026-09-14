@@ -15,7 +15,9 @@
     "test:pet": "node build/_pet_link_test.mjs",
     "dist": "npm run build:renderer && electron-builder --win nsis",
     "dist:dir": "npm run build:renderer && electron-builder --win dir",
-    "test:orch": "node build/_orch_test.mjs"
+    "test:orch": "node build/_orch_test.mjs",
+    "release:upload": "node build/gh-release.mjs",
+    "version:bump": "node build/bump-version.mjs"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -59,7 +61,8 @@
       "provider": "github",
       "owner": "virtualman333",
       "repo": "XiaoWenDesktopAgent"
-    }
+    },
+    "artifactName": "XiaoWen-Setup-${version}.${ext}"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

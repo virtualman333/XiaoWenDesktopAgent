@@ -363,24 +363,62 @@ npm run dist
 npm run dist:dir
 ```
 
-产物在 `release-v1.5.0/` 目录（含 `latest.yml`，自动更新就靠它）。
+产物在 `release-v1.5.0/` 目录：
 
-### 发一个新版本（让老用户能自动更新）
+- `XiaoWen-Setup-1.5.0.exe` —— 编译好的 Windows x64 安装包（**发版要发的就是这个**）
+- `latest.yml` —— 自动更新的清单，必须和 exe 一起上传
+- `XiaoWen-Setup-1.5.0.exe.blockmap` —— 增量更新用
+- `XiaoWen-Setup-1.5.0.exe.sha256.txt` —— 校验和
+
+> 产物名固定成 ASCII（`artifactName` 配的 `XiaoWen-Setup-${version}.${ext}`）。
+> 之前用中文名时，electron-builder 会把它在 `latest.yml` 里悄悄写成拼音名，
+> 导致 `latest.yml` 指向的资产不存在、老用户更新 404 —— 这个坑已经堵上，别再改回中文名。
+
+### 发一个新版本（推荐：推 tag 自动出包）
+
+**发版 = 发编译产物，不是发源码。** 只推源码 / 只建 tag，老用户的自动更新是拉不到的，
+必须把 `.exe` 和 `latest.yml` 传到 Release 上。仓库已配置好 GitHub Actions，推 tag 就自动完成：
 
 ```bash
-# 1. 改 package.json 里的 version，跑测试
+# 1. 改版本号（version + 打包输出目录一起改，避免对不上）
+npm run version:bump 1.5.1
+#    再补 CHANGELOG.md，跑测试
 npm run test:orch && npm run test:pet && npm run test:wake
 
-# 2. 打包
-npm run dist
-
-# 3. 到 GitHub 新建 Release：tag 用 v1.5.0 这种格式，
-#    把 release-v1.5.0 里的 .exe 和 latest.yml 一起上传，发布
+# 2. 提交，然后推一个 vX.Y.Z 格式的 tag
+git commit -am "release: v1.5.1"
+git push origin main
+git tag -a v1.5.1 -m "v1.5.1"
+git push origin v1.5.1
 ```
+
+`.github/workflows/release.yml` 会在 windows runner 上自动：
+
+1. `npm ci` → 跑三套回归测试 → `npm run build:renderer`
+2. `electron-builder --win nsis` 编译安装包
+3. 把 **`.exe` + `.exe.sha256.txt` + `latest.yml` + `.blockmap`** 挂到该 tag 的 Release 上
+
+也可以在 Actions 页面手动触发（填一个已存在的 tag 重跑发布）。
+
+### 手动发版 / 补挂产物（没网、不想等 CI，或忘了带包）
+
+```bash
+npm run dist                 # 编译安装包（不会自动发布）
+npm run release:upload v1.5.0
+```
+
+`release:upload` 会自动：
+
+1. 在 `release-*` 目录里找出 exe / latest.yml / blockmap / sha256
+2. 该 tag 没有 Release 就按 CHANGELOG 生成一个（非草稿）
+3. 逐个上传（同名资产先删后传，可反复执行）
+
+凭据顺序：环境变量 `GH_TOKEN` → git 里已保存的 github.com 登录态。脚本里不存任何密钥。
 
 - 版本号必须比用户装的高，且 tag 名形如 `v1.5.0`
 - 老用户启动后 8 秒会自己检查到，后台下完问一句要不要重启
 - 没上传 `latest.yml` 的话只会显示「发布源里还没有可用的更新包」，不影响正常使用
+- ⚠️ 只推 tag（发纯源码）时，Release 里没有编译产物，等于这次发版对老用户「没发生」
 
 ---
 
