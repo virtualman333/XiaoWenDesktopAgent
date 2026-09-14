@@ -2007,6 +2007,7 @@ function bootstrapApp() {
     // ---- 自动更新 ----
     try {
       updater.bindConfig(() => loadConfig());
+      updater.bindLog((m) => logLine('updater', m));
       // 更新下好之后不再弹对话框打断主人，只给一个轻提示
       updater.bindNotify((msg) => {
         try { pet.petSay(String(msg).slice(0, 40)); } catch (e) { /* ignore */ }

@@ -24,6 +24,11 @@ let idleTimer = null;       // 空闲安装巡检
 let installKicked = false;  // 防止重复触发安装
 let notify = () => {};      // 由 main.js 注入：轻提示（托盘气泡 / 宠物），不打断主人
 function bindNotify(fn) { if (typeof fn === 'function') notify = fn; }
+let logLine = () => {};     // 由 main.js 注入：写自己的日志标签，别蹭 jarvis 的
+function bindLog(fn) { if (typeof fn === 'function') logLine = fn; }
+function log(m) {
+  try { logLine('[更新] ' + m); } catch (e) { /* ignore */ }
+}
 
 const state = {
   state: 'idle',        // idle | checking | available | downloading | downloaded | error | disabled | unpackaged
@@ -221,6 +226,8 @@ function installNow(silent) {
   try {
     log(`开始安装更新（静默=${isSilent}）`);
     autoUpdater.quitAndInstall(isSilent, true);
+    // 万一进程没退（更新包其实没就绪之类），20 秒后放开闸门，别把自动安装卡死
+    setTimeout(() => { installKicked = false; }, 20000).unref();
     return true;
   } catch (e) {
     installKicked = false;
@@ -254,10 +261,6 @@ function stopIdleWatch() {
   if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
 }
 
-function log(m) {
-  try { if (global.__XW_LOG__) global.__XW_LOG__('[更新] ' + m); } catch (e) { /* ignore */ }
-}
-
 function register() {
   bindEvents();
 
@@ -278,6 +281,7 @@ module.exports = {
   register,
   bindConfig,
   bindNotify,
+  bindLog,
   checkOnBoot,
   getState,
   installNow,
