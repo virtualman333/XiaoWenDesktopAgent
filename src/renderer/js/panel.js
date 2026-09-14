@@ -1,6 +1,7 @@
 import { streamChat, streamAgent, testConnection, abortChat } from './api.js';
 import { renderMarkdown, toPlainText } from './markdown.js';
 import * as speech from './speech.js';
+import { DEFAULT_WAKE_WORDS } from './wake.js';
 import { maybeShowSetup, openSetup } from './setup.js';
 
 // ============ 全局状态 ============
@@ -1217,6 +1218,60 @@ function bindVoice() {
       $('stTtsTestResult').className = 'test-result show err';
     }
   });
+
+  bindWake();
+}
+
+// ---------- 语音唤醒 ----------
+// 唤醒监听跑在悬浮球窗口，界面改动必须立刻落盘并广播过去才生效，
+// 所以这里每次改动都直接 setConfig，而不是等顶部「保存」。
+function parseWakeWords() {
+  const raw = ($('stWakeWords').value || '').trim();
+  const list = raw.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : DEFAULT_WAKE_WORDS;
+}
+
+async function pushWakePatch() {
+  try {
+    cfg = await window.xw.setConfig({
+      wakeEnabled: $('stWakeEnabled').checked,
+      wakeWords: parseWakeWords(),
+      wakeSensitivity: Number($('stWakeSens').value) || 60,
+      wakeSound: $('stWakeSound').checked
+    });
+  } catch (e) {
+    /* ignore */
+  }
+  syncWakeBlock();
+}
+
+function syncWakeBlock() {
+  const on = !!$('stWakeEnabled').checked;
+  $('stWakeBlock').classList.toggle('off', !on);
+  const res = $('stWakeResult');
+  if (!res) return;
+  if (on) {
+    // 唤醒复用语音识别的通道，没配百炼 Key 就必然唤不醒，这里提前说清楚
+    const hasKey = !!cfg.asrApiKeyMasked;
+    res.textContent = hasKey
+      ? '已开启 · 悬浮球会有一圈青色微光，表示正在聆听'
+      : '⚠ 还没配置百炼 API Key，唤醒无法工作，请先在上面的识别设置里填好';
+    res.className = 'test-result show ' + (hasKey ? 'ok' : 'err');
+  } else {
+    res.textContent = '';
+    res.className = 'test-result';
+  }
+}
+
+function bindWake() {
+  $('stWakeEnabled').addEventListener('change', pushWakePatch);
+  $('stWakeSound').addEventListener('change', pushWakePatch);
+  // 关键词与灵敏度松开手再提交，避免拖动时刷屏写盘
+  $('stWakeWords').addEventListener('change', pushWakePatch);
+  $('stWakeSens').addEventListener('input', () => {
+    $('stWakeSensVal').textContent = $('stWakeSens').value;
+  });
+  $('stWakeSens').addEventListener('change', pushWakePatch);
 }
 
 function toggleTtsBlocks() {
@@ -1267,6 +1322,18 @@ async function fillVoice() {
   const sil = cfg.asrSilenceMs ?? 2000;
   $('stAsrSilence').value = sil;
   $('stAsrSilenceVal').textContent = (sil / 1000).toFixed(1) + 's';
+
+  // 语音唤醒
+  const words = Array.isArray(cfg.wakeWords) && cfg.wakeWords.length
+    ? cfg.wakeWords
+    : DEFAULT_WAKE_WORDS;
+  $('stWakeEnabled').checked = !!cfg.wakeEnabled;
+  $('stWakeWords').value = words.join(', ');
+  const sens = cfg.wakeSensitivity ?? 60;
+  $('stWakeSens').value = sens;
+  $('stWakeSensVal').textContent = String(sens);
+  $('stWakeSound').checked = cfg.wakeSound !== false;
+  syncWakeBlock();
 
   // TTS
   try { voiceCatalog = await window.xw.ttsVoices(); } catch (e) { voiceCatalog = { dashscope: {}, openai: [] }; }
@@ -1461,6 +1528,11 @@ function collectPatch() {
     asrProvider: $('stAsrProvider').value,
     asrModel: $('stAsrModel').value.trim() || 'paraformer-realtime-v2',
     asrSilenceMs: Number($('stAsrSilence').value) || 2000,
+    // ---- 语音唤醒 ----
+    wakeEnabled: $('stWakeEnabled').checked,
+    wakeWords: parseWakeWords(),
+    wakeSensitivity: Number($('stWakeSens').value) || 60,
+    wakeSound: $('stWakeSound').checked,
     // ---- 桌面宠物 ----
     petEnabled: $('stPetEnabled').checked,
     petSize: Number($('stPetSize').value) || 120,

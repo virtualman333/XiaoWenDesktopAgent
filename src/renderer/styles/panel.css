@@ -399,6 +399,25 @@ body { border-radius: 0; }
 }
 .asr-block .field:last-child { margin-bottom: 0; }
 .asr-block .test-result { margin-top: 8px; }
+
+/* ---- 设置页：语音唤醒块 ---- */
+.wake-block {
+  padding: 12px; margin: 4px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft, #f8f9fb);
+}
+.wake-block.off { opacity: 0.45; pointer-events: none; }
+.wake-block .field:last-child { margin-bottom: 0; }
+.wake-block .test-result { margin-top: 8px; }
+
+/* 开关与说明文字同一行 */
+.field > label.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
 @keyframes wave {
   0%, 100% { transform: scaleY(.42); opacity: .55; }
   50% { transform: scaleY(1); opacity: 1; }

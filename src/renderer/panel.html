@@ -409,6 +409,39 @@
             <div class="test-result" id="stAsrTestResult"></div>
           </div>
 
+          <h3>语音唤醒（免按键唤起）</h3>
+          <div class="field">
+            <label class="row-between">
+              <span>开启语音唤醒</span>
+              <label class="switch"><input type="checkbox" id="stWakeEnabled" /><span></span></label>
+            </label>
+            <div class="hint">
+              开启后小问会一直听着，听到唤醒词自动打开对话并开始录音。
+              本地只做音量判断不发网络请求，只有检测到人声才会产生一次 2~3 秒的识别。
+            </div>
+          </div>
+          <div class="wake-block" id="stWakeBlock">
+            <div class="field">
+              <label>唤醒词（多个用逗号分隔）</label>
+              <input type="text" id="stWakeWords" placeholder="小问, 小文, 小闻" />
+              <div class="hint">
+                中文识别常把「问」写成「文 / 闻 / 吻」，建议把常见同音写法一起填上。
+              </div>
+            </div>
+            <div class="field">
+              <label>灵敏度 <span class="val" id="stWakeSensVal">60</span></label>
+              <input type="range" id="stWakeSens" min="0" max="100" step="1" value="60" />
+              <div class="hint">越高越灵敏，但环境噪声、电视声也更容易触发。</div>
+            </div>
+            <div class="field">
+              <label class="row-between">
+                <span>命中时播放提示音</span>
+                <label class="switch"><input type="checkbox" id="stWakeSound" /><span></span></label>
+              </label>
+            </div>
+            <div class="test-result" id="stWakeResult"></div>
+          </div>
+
           <h3>语音合成（小问说话）</h3>
           <div class="field">
             <label>合成方案</label>

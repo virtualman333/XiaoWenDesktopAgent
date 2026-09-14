@@ -322,6 +322,12 @@ const DEFAULT_CONFIG = {
   asrModel: 'paraformer-realtime-v2',
   asrLanguage: 'zh',
   asrSilenceMs: 2000, // 说话停止多久后自动结束识别
+  // ---- 语音唤醒（说出唤醒词即可免按键唤起）----
+  // 两级检测：本地 VAD 常驻监听（零成本）→ 听到人声才开一次 2~3 秒的短识别做关键词确认
+  wakeEnabled: false,             // 默认关闭：常驻开麦，交给用户自己决定
+  wakeWords: ['小问', '小文', '小闻', '小吻'], // 同音字默认一起收录，ASR 常把「问」写成「文/闻」
+  wakeSensitivity: 60,            // 0~100，越高越灵敏（也越容易被环境噪声触发）
+  wakeSound: true,                // 命中时播放一声提示音
   contextTurns: 10, // 携带的历史轮数
   ballOpacity: 0.92,
   hotkey: 'Alt+Space',
@@ -418,6 +424,16 @@ function createBallWindow() {
 }
 
 // ---------- 对话面板窗口 ----------
+// 面板打开时唤醒监听要让出麦克风：否则 AI 朗读 / 用户对话会被自己的麦克风
+// 听见，造成反复误唤醒。面板关闭或隐藏后再恢复。
+function syncWake(paused) {
+  try {
+    if (ballWin && !ballWin.isDestroyed()) {
+      ballWin.webContents.send('wake:sync', { paused: !!paused });
+    }
+  } catch (e) { /* ignore */ }
+}
+
 function createPanelWindow() {
   if (panelWin && !panelWin.isDestroyed()) {
     panelWin.show();
@@ -462,8 +478,12 @@ function createPanelWindow() {
     panelWin.webContents.send('config:update', sanitizeConfig(loadConfig()));
   });
 
+  panelWin.on('show', () => syncWake(true));
+  panelWin.on('hide', () => syncWake(false));
+
   panelWin.on('closed', () => {
     panelWin = null;
+    syncWake(false);
   });
 
   return panelWin;

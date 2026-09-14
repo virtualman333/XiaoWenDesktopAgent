@@ -93,6 +93,12 @@ contextBridge.exposeInMainWorld('xw', {
     ipcRenderer.on('asr:error', handler);
     return () => ipcRenderer.removeListener('asr:error', handler);
   },
+  // 主进程通知：面板打开/关闭，唤醒监听要相应让出或收回麦克风
+  onWakeSync: (cb) => {
+    const handler = (_e, info) => cb(info || {});
+    ipcRenderer.on('wake:sync', handler);
+    return () => ipcRenderer.removeListener('wake:sync', handler);
+  },
 
   // ---- 其他 ----
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
