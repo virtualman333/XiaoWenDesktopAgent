@@ -46,6 +46,8 @@ jobs:
           npm run test:llm
           npm run test:proactive
           npm run test:tray
+          npm run test:context
+          npm run test:hotkey
 
       - name: 构建渲染层
         run: npm run build:renderer

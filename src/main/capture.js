@@ -14,7 +14,11 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 
-let getConfig = () => ({});
+let getConfigRaw = () => ({});
+let cfgOverride = {};   // 设置页「先试后存」用：临时覆盖，试完清空
+function getConfig() {
+  return { ...(getConfigRaw() || {}), ...cfgOverride };
+}
 let notify = () => {};   // 由 main.js 注入：把截图结果推给面板
 let selectorWin = null;
 
@@ -215,25 +219,119 @@ function loadRenderer(win, file) {
 }
 
 // ---------------- 快捷键 ----------------
-function normalizeAccelerator(hk) {
-  const s = String(hk || '').trim();
-  return s || 'Alt+Shift+A';
+/**
+ * 曾经只反注册写死的两个默认值（Alt+Shift+A / Alt+Shift+S），
+ * 主人改成别的键之后，旧键**依然注册着**，于是会出现「一个截图功能两个快捷键」
+ * 甚至「新键没生效、旧键还在」的怪现象。现在把注册过的键都记下来，先全撤再重注册。
+ */
+let registeredAccels = [];
+let hotkeyState = { enabled: true, items: [], at: 0 };
+
+function unregisterCaptureShortcuts() {
+  for (const a of registeredAccels) {
+    try { globalShortcut.unregister(a); } catch (e) { /* ignore */ }
+  }
+  registeredAccels = [];
 }
 
-function registerShortcuts() {
-  const cfg = getConfig() || {};
-  try { globalShortcut.unregister('Alt+Shift+A'); } catch (e) { /* ignore */ }
-  try { globalShortcut.unregister('Alt+Shift+S'); } catch (e) { /* ignore */ }
-  if (cfg.captureEnabled === false) return;
-
-  const region = normalizeAccelerator(cfg.captureRegionHotkey);
-  const full = normalizeAccelerator(cfg.captureFullHotkey);
-  try { globalShortcut.register(region, () => { captureRegion().catch(() => {}); }); } catch (e) { /* ignore */ }
+/** 注册一个全局快捷键，如实回报结果（不吞异常，也不假装成功） */
+function registerOne(accel, handler, label) {
+  const item = { label, accel, ok: false, error: '' };
+  if (!accel) {
+    item.error = '未设置快捷键';
+    return item;
+  }
   try {
-    globalShortcut.register(full, () => {
+    if (globalShortcut.isRegistered(accel)) {
+      // 已经被本程序注册过 —— 撤掉再来，避免自己和自己冲突
+      try { globalShortcut.unregister(accel); } catch (e) { /* ignore */ }
+    }
+    const ok = globalShortcut.register(accel, handler);
+    if (ok) {
+      item.ok = true;
+      registeredAccels.push(accel);
+    } else {
+      item.error = `「${accel}」可能已被其它程序占用，注册失败`;
+    }
+  } catch (e) {
+    item.error = `「${accel}」不是合法的快捷键（${(e && e.message) || e}）`;
+  }
+  return item;
+}
+
+function normalizeAccelerator(hk, fallback) {
+  const s = String(hk == null ? '' : hk).trim();
+  return s || fallback;
+}
+
+/**
+ * 重新注册截图快捷键。
+ * @returns {{enabled:boolean, items:Array<{label,accel,ok,error}>}}
+ */
+function registerShortcuts() {
+  unregisterCaptureShortcuts();
+  const cfg = getConfig() || {};
+  const enabled = cfg.captureEnabled !== false;
+  const items = [];
+
+  if (enabled) {
+    const region = normalizeAccelerator(cfg.captureRegionHotkey, 'Alt+Shift+A');
+    const full = normalizeAccelerator(cfg.captureFullHotkey, 'Alt+Shift+S');
+
+    items.push(registerOne(region, () => { captureRegion().catch(() => {}); }, '框选截图'));
+    items.push(registerOne(full, () => {
       captureFull().catch((e) => console.error('[capture]', e && e.message));
-    });
-  } catch (e) { /* ignore */ }
+    }, '整屏截图'));
+  }
+
+  hotkeyState = { enabled, items, at: Date.now() };
+  return hotkeyState;
+}
+
+/** 最后一次注册结果（设置页展示 / 冲突提示用）—— 深拷贝，外部改不动内部状态 */
+function hotkeyStatus() {
+  return {
+    enabled: !!hotkeyState.enabled,
+    at: hotkeyState.at,
+    items: (hotkeyState.items || []).map((i) => ({ ...i }))
+  };
+}
+
+/**
+ * 试一下某个快捷键能不能用（设置页「录制」完立刻反馈）。
+ * 测完就把试注册的键撤掉，不留副作用。
+ */
+function probeHotkey(accel) {
+  const a = String(accel || '').trim();
+  if (!a) return { ok: false, error: '快捷键为空' };
+  const mine = registeredAccels.includes(a);
+  if (mine) return { ok: true, self: true };
+  try {
+    if (globalShortcut.isRegistered(a)) {
+      return { ok: false, error: `「${a}」已被其它程序占用` };
+    }
+    const ok = globalShortcut.register(a, () => {});
+    if (!ok) return { ok: false, error: `「${a}」无法注册（可能被占用）` };
+    globalShortcut.unregister(a);
+    return { ok: true };
+  } catch (e) {
+    // 注册过程抛错也可能留下半注册状态，稳妥起见撤一次
+    try { globalShortcut.unregister(a); } catch (e2) { /* ignore */ }
+    return { ok: false, error: `「${a}」不是合法的快捷键` };
+  }
+}
+
+/**
+ * 「先试后存」：临时套一层配置再注册一遍，测完立刻丢掉，
+ * 这样主人在设置页录完键能马上知道能不能用，而不用担心把坏键写进配置。
+ */
+function applyOverride(patch = {}) {
+  if (patch.region !== undefined) cfgOverride.captureRegionHotkey = String(patch.region || '');
+  if (patch.full !== undefined) cfgOverride.captureFullHotkey = String(patch.full || '');
+  if (patch.enabled !== undefined) cfgOverride.captureEnabled = patch.enabled !== false;
+  const st = registerShortcuts();
+  cfgOverride = {};
+  return st;
 }
 
 // ---------------- IPC ----------------
@@ -241,6 +339,12 @@ function register() {
   ipcMain.handle('capture:full', (_e, opts) => captureFull(opts || {}).catch((e) => ({ ok: false, error: (e && e.message) || String(e) })));
   ipcMain.handle('capture:region', (_e, opts) => captureRegion(opts || {}));
   ipcMain.handle('capture:dir', () => saveDir());
+  ipcMain.handle('capture:hotkeys', () => hotkeyStatus());
+  ipcMain.handle('capture:probe-hotkey', (_e, accel) => probeHotkey(accel));
+  ipcMain.handle('capture:set-hotkeys', (_e, patch = {}) => {
+    // 只负责「应用并回报结果」，落盘交给主进程的 config:set
+    return applyOverride(patch);
+  });
   ipcMain.handle('capture:open-dir', () => {
     try { shell.openPath(saveDir()); } catch (e) { /* ignore */ }
     return true;
@@ -266,7 +370,7 @@ function displayIdByIndex(i) {
   return d ? d.id : undefined;
 }
 
-function bindConfig(fn) { getConfig = fn; }
+function bindConfig(fn) { getConfigRaw = fn; }
 function bindNotify(fn) { notify = fn; }
 
 module.exports = {
@@ -274,6 +378,10 @@ module.exports = {
   bindConfig,
   bindNotify,
   registerShortcuts,
+  applyOverride,
+  unregisterCaptureShortcuts,
+  hotkeyStatus,
+  probeHotkey,
   captureFull,
   captureRegion,
   displayIdByIndex,

@@ -42,13 +42,135 @@ function parseIntervalMinutes(v) {
   const s = String(v == null ? '' : v).trim();
   let m = /^(\d+)\s*(m|min|minute|minutes)$/i.exec(s);
   if (m) return Number(m[1]);
-  m = /^每\s*(\d+)\s*分钟?$/.exec(s);
+  m = /^每\s*(?:隔\s*)?(\d+)\s*分钟?$/.exec(s);
   if (m) return Number(m[1]);
-  m = /^每\s*(\d+)\s*小时$/.exec(s);
+  m = /^每\s*(?:隔\s*)?(\d+)\s*(?:个)?\s*小时$/.exec(s);
   if (m) return Number(m[1]) * 60;
   m = /^(\d+)\s*(h|hour|hours)$/i.exec(s);
   if (m) return Number(m[1]) * 60;
   return 0;
+}
+
+// 中文数字（只处理常见的 1~31 和时段，够用就行）
+const CN_NUM = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+
+/** 把「一」「十」「十五」「二十」「二十三」译成数字；失败返回 null */
+function cnNumber(s) {
+  const str = String(s || '');
+  if (/^\d+$/.test(str)) return Number(str);
+  if (!/^[零一二两三四五六七八九十]+$/.test(str)) return null;
+  if (str.length === 1) return CN_NUM[str] != null ? CN_NUM[str] : null;
+  const idx = str.indexOf('十');
+  if (idx === 0) {
+    const r = str.slice(1);
+    return 10 + (r ? (CN_NUM[r] != null ? CN_NUM[r] : null) : 0);
+  }
+  const high = CN_NUM[str[0]];
+  if (high == null) return null;
+  const low = str.slice(idx + 1);
+  if (!low) return high * 10;
+  const l = CN_NUM[low];
+  return l == null ? null : high * 10 + l;
+}
+
+const DAY_MAP = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+
+/**
+ * 从一句人话里「抠」出时间点。
+ *   '每天 08:30' / '8点30' / '早上8点半' / '晚上 8 点' / '下午三点'
+ * 带 下午/晚上 → 自动 +12 小时；带 早上/上午/凌晨 → 保持原值。
+ */
+function parseClockLoose(raw) {
+  const s = String(raw == null ? '' : raw);
+  const pm = /(下午|晚上|傍晚|夜里|夜间)/.test(s);
+  const am = /(上午|早上|早晨|凌晨|清早)/.test(s);
+
+  let h = null;
+  let mi = 0;
+
+  let m = /(\d{1,2})\s*[:：]\s*(\d{1,2})/.exec(s);
+  if (m) {
+    h = Number(m[1]);
+    mi = Number(m[2]);
+  } else {
+    // 8点 / 8点半 / 8点15分 / 八点半 / 下午三点
+    m = /(\d{1,2}|[一二两三四五六七八九十]+)\s*[点時时]\s*(半|\d{1,2}|[一二两三四五六七八九十]+)?/.exec(s);
+    if (m) {
+      const hv = cnNumber(m[1]);
+      if (hv == null) return null;
+      h = hv;
+      if (m[2] === '半') mi = 30;
+      else if (m[2] != null) {
+        const mv = cnNumber(m[2]);
+        if (mv == null) return null;
+        mi = mv;
+      }
+    }
+  }
+  if (h == null) return null;
+  if (pm && h < 12) h += 12;
+  if (!pm && !am && h >= 1 && h <= 6) h += 0; // 凌晨/早上没写清就按原值
+  if (h < 0 || h > 23 || mi < 0 || mi > 59) return null;
+  return { h, mi };
+}
+
+/** 从「每周一三五」「周一、周三」「每周日」里抠出星期几（0=周日） */
+function parseWeekdays(s) {
+  const days = new Set();
+  const re = /周\s*([一二三四五六日天]+)/g;
+  let m;
+  while ((m = re.exec(s))) {
+    for (const ch of m[1]) if (ch in DAY_MAP) days.add(DAY_MAP[ch]);
+  }
+  return Array.from(days).sort((a, b) => a - b);
+}
+
+/**
+ * 中文人话排期。识别不了返回 null。
+ *   每天 08:30 / 每日 9 点      → daily
+ *   每周一 09:00 / 每周一三五 9 点 → weekly
+ *   每月 1 号 09:00             → monthly
+ *   每 2 小时 / 每隔 30 分钟     → interval
+ */
+function parseWhenCn(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+  if (!/[每周月天日点時时号:]/.test(s)) return null;
+
+  const clock = parseClockLoose(s);
+
+  // 1) 每隔 N 分钟 / 每 N 小时 / 每小时
+  const isCalendarUnit = /每\s*[周月日天]|每日|每周|每月/.test(s);
+  if (!isCalendarUnit) {
+    const iv = parseIntervalMinutes(s) || (/每\s*(?:个)?\s*小时|每小时/.test(s) ? 60 : 0);
+    if (iv > 0) return { type: 'interval', minutes: iv };
+  }
+
+  // 2) 每周一三五 09:00
+  if (/每\s*个?\s*周|每周|周\s*[一二三四五六日天]/.test(s)) {
+    const days = parseWeekdays(s);
+    const t = clock || { h: 9, mi: 0 };
+    return {
+      type: 'weekly',
+      time: `${pad2(t.h)}:${pad2(t.mi)}`,
+      days: days.length ? days : [new Date().getDay()]
+    };
+  }
+
+  // 3) 每月 1 号 09:00
+  if (/每\s*个?\s*月|每月/.test(s)) {
+    let m = /(\d{1,2})\s*[号日]/.exec(s) || /月\s*(\d{1,2})/.exec(s);
+    const day = m ? Math.min(Math.max(Number(m[1]), 1), 31) : 1;
+    const t = clock || { h: 9, mi: 0 };
+    return { type: 'monthly', time: `${pad2(t.h)}:${pad2(t.mi)}`, day };
+  }
+
+  // 4) 每天 / 每日（没写时间就默认早 9 点）
+  if (/每\s*[天日]|每日|天天/.test(s) || clock) {
+    const t = clock || { h: 9, mi: 0 };
+    return { type: 'daily', time: `${pad2(t.h)}:${pad2(t.mi)}` };
+  }
+  return null;
 }
 
 /**
@@ -63,8 +185,11 @@ function normalizeWhen(raw) {
     if (t) return { type: 'daily', time: `${pad2(t.h)}:${pad2(t.mi)}` };
     const iv = parseIntervalMinutes(s);
     if (iv > 0) return { type: 'interval', minutes: iv };
+    // 具体日期（2026-09-20 09:00）要排在中文人话之前，否则会被当成「每天 09:00」
     const ts = Date.parse(s.replace(/\//g, '-'));
     if (Number.isFinite(ts)) return { type: 'once', at: ts };
+    const cn = parseWhenCn(s);
+    if (cn) return cn;
     return null;
   }
   if (typeof raw !== 'object') return null;
@@ -236,6 +361,9 @@ module.exports = {
   pad2,
   parseTime,
   parseIntervalMinutes,
+  parseClockLoose,
+  parseWeekdays,
+  parseWhenCn,
   normalizeWhen,
   computeNext,
   describeWhen,

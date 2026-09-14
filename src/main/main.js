@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage, shell, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage, shell, dialog, Notification, powerMonitor, clipboard } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -346,6 +346,16 @@ const DEFAULT_CONFIG = {
   petTop: true,          // 窗口置顶
   petInteraction: true,  // 心情衰减 / 随机台词
   petAgentLink: true,    // 宠物 × Agent 联动：小问干活时宠物同步演出
+  // 宠物被会议共享 / 全屏播放器这类「后出现的置顶窗口」压住时，光靠 alwaysOnTop
+  // 是抢不回来的（同组内按最后激活排序）。这几项负责周期性重夺最上层：
+  petKeepTop: true,           // 周期性把宠物重新顶到置顶组最前
+  petSummonHotkey: 'CommandOrControl+Alt+P', // 一键把宠物叫到鼠标所在屏幕
+  // ---- 动态上下文 ----
+  ctxWindow: 128000,        // 模型上下文窗口（token），用于算预算
+  ctxReplyReserve: 8000,    // 给模型回复预留的 token
+  ctxKeepTurns: 8,          // 最近多少轮原文保留，更早的走摘要
+  ctxAutoCompress: true,    // 超预算时自动压缩（摘要 + 裁工具输出）
+  ctxToolOutputMax: 1200,   // 单条工具输出最多保留多少字符
   // ---- 截图 ----
   captureEnabled: true,          // 开启截图快捷键
   captureRegionHotkey: 'Alt+Shift+A', // 框选截图
@@ -358,6 +368,8 @@ const DEFAULT_CONFIG = {
   autoUpdatePrerelease: false,   // 是否接收预发布版本
   autoUpdateInstallOnQuit: true, // 退出时自动应用已下载的更新
   autoUpdateNotify: true,        // 下载完成后弹窗提醒
+  autoUpdateSilentInstall: true, // 静默安装：不弹 NSIS 安装界面，装完自动拉起
+  autoUpdateInstallWhenIdle: true, // 空闲时自动重启安装（不打断主人干活）
   // ---- 子代理编排（常任务自动分配）----
   orchEnabled: true,             // 开启后复杂任务自动拆分给子代理
   orchMaxTasks: 6,               // 一次最多拆几个子任务
@@ -532,10 +544,13 @@ function createPanelWindow() {
 }
 
 // ---------- 设置窗口 ----------
-function createSettingsWindow() {
+function createSettingsWindow(tab) {
   if (settingsWin && !settingsWin.isDestroyed()) {
     settingsWin.show();
     settingsWin.focus();
+    if (tab) {
+      try { settingsWin.webContents.send('settings:tab', String(tab)); } catch (e) { /* ignore */ }
+    }
     return settingsWin;
   }
 
@@ -560,7 +575,7 @@ function createSettingsWindow() {
   });
 
   settingsWin.setMenuBarVisibility(false);
-  loadRenderer(settingsWin, 'panel.html', '#settings');
+  loadRenderer(settingsWin, 'panel.html', '#settings' + (tab ? '/' + String(tab) : ''));
 
   settingsWin.once('ready-to-show', () => {
     settingsWin.show();
@@ -675,8 +690,16 @@ function createTray() {
       click: () => { setPetEnabled(true); pet.rescue(); }
     },
     {
+      label: '召唤宠物到鼠标处' + (petSummonHotkey ? ` (${petSummonHotkey.replace('CommandOrControl', 'Ctrl')})` : ''),
+      click: () => { setPetEnabled(true); pet.summon(); }
+    },
+    {
       label: '重新载入宠物',
       click: () => pet.reloadPet()
+    },
+    {
+      label: '强制重建宠物窗口',
+      click: () => pet.hardRecover('托盘菜单')
     },
     { type: 'separator' },
     {
@@ -742,8 +765,47 @@ function registerHotkeys() {
     globalShortcut.register('CommandOrControl+Shift+Space', () => createPanelWindow());
   } catch (_) {}
 
+  // 「召唤宠物」：一键把宠物叫到鼠标所在的屏幕并顶到最前。
+  // 宠物被别的置顶窗口压住、或跑到第二块屏幕上时，这是最快的找回方式。
+  const sumHk = String(loadConfig().petSummonHotkey || 'CommandOrControl+Alt+P').trim();
+  petSummonHotkey = sumHk;
+  if (sumHk && loadConfig().petEnabled !== false) {
+    const ok = registerPetSummon(sumHk);
+    if (!ok) logLine('pet', `「召唤宠物」快捷键 ${sumHk} 注册失败（可能被其它程序占用）`);
+  }
+
   // 截图快捷键（放在 unregisterAll 之后，否则会被清掉）
   try { capture.registerShortcuts(); } catch (e) { console.error('[capture] hotkey:', e && e.message); }
+}
+
+let petSummonHotkey = 'CommandOrControl+Alt+P';
+
+function registerPetSummon(accel) {
+  try {
+    return globalShortcut.register(accel, () => {
+      try { pet.summon(); } catch (e) { /* ignore */ }
+    });
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 改「召唤宠物」快捷键（设置页用）；返回 {ok, error} */
+function setPetSummonHotkey(accel) {
+  const next = String(accel || '').trim() || 'CommandOrControl+Alt+P';
+  if (petSummonHotkey) {
+    try { globalShortcut.unregister(petSummonHotkey); } catch (e) { /* ignore */ }
+  }
+  petSummonHotkey = '';
+  if (next && !registerPetSummon(next)) {
+    // 注册失败就退回到默认键，别让主人彻底失联
+    const fallback = 'CommandOrControl+Alt+P';
+    const ok = fallback === next ? false : registerPetSummon(fallback);
+    petSummonHotkey = ok ? fallback : '';
+    return { ok: false, error: `快捷键 ${next} 可能被其它程序占用了`, fallback: petSummonHotkey };
+  }
+  petSummonHotkey = next;
+  return { ok: true, hotkey: next };
 }
 
 /**
@@ -760,7 +822,31 @@ function onProactive(payload) {
   if (!text) return;
   const title = String(p.title || '小问提醒');
   const kind = String(p.kind || 'notice');
+  const phase = String(p.phase || 'done');
   const content = `**${title}**\n\n${text}`;
+
+  // 0) 「先反馈、再给结果」里的回执阶段。
+  //    回执要轻：不弹面板、不进历史、不弹系统通知 —— 只让宠物动起来 + 托盘一条静默提示，
+  //    免得主人被「收到」和「结果」两条横幅连着打扰。
+  if (phase === 'ack' || phase === 'progress') {
+    try {
+      if (p.pet !== false) pet.petAct('work', { text: title });
+    } catch (e) { /* ignore */ }
+    try {
+      if (tray && !tray.isDestroyed()) {
+        tray.displayBalloon({ icon: getTrayIcon(), title, content: text.slice(0, 180), noSound: true });
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (panelWin && !panelWin.isDestroyed() && !panelWin.webContents.isLoading()) {
+        panelWin.webContents.send('proactive:msg', {
+          kind, title, text, phase, speak: false, url: '', ts: Date.now()
+        });
+      }
+    } catch (e) { /* ignore */ }
+    logLine('proactive', `[${kind}/${phase}] ${title} :: ${text.slice(0, 80)}`);
+    return;
+  }
 
   // 1) 会话留痕：面板下次打开还能翻到（也进历史）
   try {
@@ -1012,6 +1098,43 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
     .filter((m) => m.role === 'system' || m.role === 'user' || m.role === 'assistant'
       || m.role === 'tool' || m.role === 'function');
 
+  // ---- 动态上下文：普通问答也走同一套压缩，不然长会话一样会把窗口撑爆 ----
+  let finalMessages = safeMessages;
+  try {
+    const ctxmod = require('./jarvis/context');
+    const sysMsgs = safeMessages.filter((m) => m.role === 'system');
+    const rest = safeMessages.filter((m) => m.role !== 'system');
+    if (cfg.ctxAutoCompress === false) {
+      finalMessages = safeMessages;
+    } else {
+      const budget = Math.max(1024,
+        (Number(cfg.ctxWindow) || 128000)
+          - (Number(cfg.ctxReplyReserve) || 8000)
+          - ctxmod.totalTokens(sysMsgs));
+      const sessionId = (() => {
+        try { const s = jstore.getActiveSession(); return (s && s.id) || null; } catch (e) { return null; }
+      })();
+      const priorSummary = sessionId ? (jstore.getSessionSummary(sessionId) || '') : '';
+      const cres = ctxmod.compress({
+        messages: rest,
+        budget,
+        keepTurns: Number(cfg.ctxKeepTurns) || 8,
+        toolOutputMax: Number(cfg.ctxToolOutputMax) || 1200,
+        priorSummary
+      });
+      finalMessages = [...sysMsgs, ...cres.messages];
+      try {
+        sender && !sender.isDestroyed() && sender.send('chat:context', { ...cres.stats, budget, at: Date.now() });
+      } catch (e) { /* ignore */ }
+      if (cres.stats.compressed) {
+        logLine('ctx', `上下文压缩：${cres.stats.beforeTokens} → ${cres.stats.afterTokens} token`
+          + `（预算 ${budget}）：${(cres.stats.parts || []).join('；')}`);
+      }
+    }
+  } catch (e) {
+    logLine('ctx', '上下文压缩失败，按原样发送: ' + ((e && e.message) || e));
+  }
+
   try {
     const res = await fetch(baseUrl + '/chat/completions', {
       method: 'POST',
@@ -1021,7 +1144,7 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
       },
       body: JSON.stringify({
         model,
-        messages: safeMessages,
+        messages: finalMessages,
         stream: true,
         temperature: 0.7
       }),
@@ -1129,13 +1252,25 @@ ipcMain.handle('config:set', (_e, patch) => {
 
   // 热更新快捷键 / 悬浮球透明度
   if (patch.hotkey && patch.hotkey !== cur.hotkey) registerHotkeys();
+  if (patch.petSummonHotkey && patch.petSummonHotkey !== cur.petSummonHotkey) {
+    setPetSummonHotkey(patch.petSummonHotkey);
+  }
+  if (patch.captureRegionHotkey && patch.captureRegionHotkey !== cur.captureRegionHotkey) {
+    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
+  }
+  if (patch.captureFullHotkey && patch.captureFullHotkey !== cur.captureFullHotkey) {
+    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
+  }
+  if (patch.captureEnabled !== undefined && patch.captureEnabled !== cur.captureEnabled) {
+    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
+  }
   if (typeof patch.ballOpacity === 'number') {
     ballWin && !ballWin.isDestroyed() && ballWin.setOpacity(patch.ballOpacity);
   }
 
   // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
   try {
-    if ('petEnabled' in patch || 'petTop' in patch) pet.applyConfig(config);
+    if ('petEnabled' in patch || 'petTop' in patch || 'petKeepTop' in patch) pet.applyConfig(config);
     const pw = pet.window;
     if (pw && !pw.isDestroyed()) {
       if ('petSize' in patch) pet.resize();
@@ -1187,6 +1322,37 @@ ipcMain.handle('tray:reload', () => {
   return trayDiag();
 });
 
+// 宠物：召唤 / 体检 / 改召唤快捷键 / 重夺最上层
+ipcMain.handle('pet:health', () => {
+  const d = pet.diag();
+  const hints = [];
+  if (d.exists !== true) hints.push('窗口不存在（点「重建窗口」）');
+  else if (d.visible !== true) hints.push('窗口存在但被隐藏（点「叫回主屏」）');
+  if (d.exists && d.onScreen === false) hints.push('窗口在所有屏幕之外（点「叫回主屏」）');
+  if (d.exists && d.alwaysOnTop === false) hints.push('当前没有置顶，会被其它窗口盖住（打开「始终最上层」）');
+  if (d.exists && d.visible === true && d.onScreen !== false && d.alwaysOnTop === true) {
+    hints.push('窗口本身正常。如果屏幕上依然看不到，多半是被会议共享 / 全屏播放器这类置顶窗口压住了，点「重新顶到最上层」即可。');
+  }
+  return {
+    ...d,
+    keepTop: loadConfig().petKeepTop !== false,
+    summonHotkey: petSummonHotkey || loadConfig().petSummonHotkey || '',
+    hints
+  };
+});
+ipcMain.handle('pet:summon-out', () => { setPetEnabled(true); return pet.summon(); });
+ipcMain.handle('pet:top-out', () => pet.resyncTop('设置页'));
+ipcMain.handle('pet:hard-recover-out', () => pet.hardRecover('设置页'));
+ipcMain.handle('pet:summon-hotkey-get', () => petSummonHotkey || loadConfig().petSummonHotkey || '');
+ipcMain.handle('pet:summon-hotkey-set', (_e, accel) => {
+  const r = setPetSummonHotkey(accel);
+  if (r.ok) {
+    config = { ...loadConfig(), petSummonHotkey: r.hotkey };
+    saveConfig(config);
+  }
+  return r;
+});
+
 // 窗口控制
 ipcMain.handle('win:panel-open', () => createPanelWindow());ipcMain.handle('win:panel-open-voice', () => triggerVoiceAsk());
 ipcMain.handle('win:panel-hide', () => {
@@ -1195,7 +1361,11 @@ ipcMain.handle('win:panel-hide', () => {
 ipcMain.handle('win:panel-close', () => {
   panelWin && !panelWin.isDestroyed() && panelWin.close();
 });
-ipcMain.handle('win:settings-open', () => createSettingsWindow());
+ipcMain.handle('win:settings-open', (_e, tab) => createSettingsWindow(tab));
+// 命令面板用：读一眼剪贴板（「把剪贴板记进记忆」）
+ipcMain.handle('clip:read', () => {
+  try { return { ok: true, text: clipboard.readText() || '' }; } catch (e) { return { ok: false, text: '', error: (e && e.message) || String(e) }; }
+});
 ipcMain.handle('win:settings-close', () => {
   settingsWin && !settingsWin.isDestroyed() && settingsWin.close();
 });
@@ -1260,6 +1430,7 @@ ipcMain.handle('ball:show-menu', () => {
     { label: '设置', click: () => createSettingsWindow() },
     { label: '🐧 显示桌面宠物', type: 'checkbox', checked: petOn, click: () => setPetEnabled(!petOn) },
     { label: '把宠物叫回主屏', click: () => { setPetEnabled(true); pet.rescue(); } },
+    { label: '召唤宠物到鼠标处', click: () => { setPetEnabled(true); pet.summon(); } },
     { label: '隐藏悬浮球', click: () => ballWin.hide() },
     { type: 'separator' },
     { label: '退出', click: () => { app.isQuiting = true; app.quit(); } }
@@ -1836,6 +2007,18 @@ function bootstrapApp() {
     // ---- 自动更新 ----
     try {
       updater.bindConfig(() => loadConfig());
+      // 更新下好之后不再弹对话框打断主人，只给一个轻提示
+      updater.bindNotify((msg) => {
+        try { pet.petSay(String(msg).slice(0, 40)); } catch (e) { /* ignore */ }
+        try {
+          if (Notification.isSupported()) {
+            new Notification({ title: '小问助手 · 更新就绪', body: String(msg).slice(0, 180) }).show();
+          } else if (tray && !tray.isDestroyed()) {
+            tray.displayBalloon({ icon: getTrayIcon(), title: '小问助手 · 更新就绪', content: String(msg).slice(0, 180) });
+          }
+        } catch (e) { /* ignore */ }
+        logLine('updater', String(msg));
+      });
       updater.register();
       // 晚一点再查：先把窗口和宠物都拉起来，别让更新检查拖慢启动
       setTimeout(() => updater.checkOnBoot(), 8000);
@@ -1915,7 +2098,44 @@ function bootstrapApp() {
         ballWin.setPosition(Math.max(workArea.x, nx), Math.max(workArea.y, ny));
       }
       try { pet.reposition(); } catch (e) { /* ignore */ }
+      // 分辨率/缩放变了，置顶组也会被系统重排，顺手重夺一次
+      try { pet.resyncTop('display-metrics-changed'); } catch (e) { /* ignore */ }
     });
+
+    // 显示器增删（插拔外接屏 / 投屏）：把宠物挪回可见区域，
+    // 否则窗口很容易留在已经不存在的那块屏上 —— 现象正是「宠物没显示」。
+    const onDisplaysChanged = (why) => {
+      try {
+        if (!pet.diag().onScreen) {
+          logLine('pet', `显示器变化（${why}）后宠物不在任何屏幕上，拉回主屏`);
+          pet.rescue();
+        } else {
+          pet.resyncTop(why);
+        }
+      } catch (e) { /* ignore */ }
+    };
+    screen.on('display-added', () => onDisplaysChanged('display-added'));
+    screen.on('display-removed', () => onDisplaysChanged('display-removed'));
+
+    // 休眠唤醒 / 会话解锁：透明 + 软件渲染的窗口在此时有概率「表面坏死」——
+    // API 说可见、尺寸位置都对，屏幕上却什么都没有。重建窗口是唯一可靠的解法。
+    try {
+      powerMonitor.on('resume', () => {
+        logLine('pet', '系统从休眠唤醒，重建宠物窗口');
+        try { pet.hardRecover('resume'); } catch (e) { /* ignore */ }
+      });
+      powerMonitor.on('unlock-screen', () => {
+        try {
+          const d = pet.diag();
+          if (!d.exists || d.visible !== true) {
+            logLine('pet', '会话解锁后宠物不可见，重建窗口');
+            pet.hardRecover('unlock-screen');
+          } else {
+            pet.resyncTop('unlock-screen');
+          }
+        } catch (e) { /* ignore */ }
+      });
+    } catch (e) { /* powerMonitor 在个别环境下不可用 */ }
   });
 
   app.on('window-all-closed', () => {
@@ -1924,6 +2144,7 @@ function bootstrapApp() {
 
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    try { updater.stopIdleWatch(); } catch (e) { /* ignore */ }
     // 收掉可能还在跑的语音识别会话，避免 WebSocket 悬挂
     asrCleanup('app-quit');
     try { jarvis.cleanup(); } catch (e) { /* ignore */ }

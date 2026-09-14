@@ -148,6 +148,10 @@ async function initChat() {
   bindOrch();
   bindUpdater();
   bindProactive();
+  bindPalette();
+  bindQuickSchedule();
+  bindCtx();
+  bindIntent();
   renderSessionList();
 
   // 截图结果（快捷键 / 工具调用）自动带到输入框
@@ -245,7 +249,12 @@ function toggleDrawer(show) {
 function bindEvents() {
   els.btnSend.addEventListener('click', () => send());
   els.input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      // 只敲一个 / 就是「看所有能力」，不是发一条消息
+      if ((els.input.value || '').trim() === '/') { els.input.value = ''; autoResize(); updateIntent(); openPalette(); return; }
+      send();
+    }
   });
   els.input.addEventListener('input', autoResize);
 
@@ -305,7 +314,10 @@ function scrollToBottom() {
   requestAnimationFrame(() => { els.messages.scrollTop = els.messages.scrollHeight; });
 }
 function clearMessageNodes() {
-  [...els.messages.querySelectorAll('.msg, .tool-card')].forEach((n) => n.remove());
+  // 工作台已经全是「卡」，旧的 .msg / .tool-card 一并清掉（兼容历史会话的残留节点）
+  [...els.messages.querySelectorAll('.tcard, .msg, .tool-card')].forEach((n) => n.remove());
+  currentCard = null;
+  currentAiNode = null;
 }
 function setStatus(t) { els.statusTip.textContent = t; }
 
@@ -334,6 +346,7 @@ async function send(textOverride) {
   lastUserText = text;
   const userNode = addMessageBubble('user', text);
   if (userNode && shots.length) {
+    const host = userNode.querySelector('.tcard-body') || userNode;
     const wrap = document.createElement('div');
     wrap.className = 'msg-shots';
     shots.forEach((s) => {
@@ -344,7 +357,7 @@ async function send(textOverride) {
       im.alt = '截图';
       wrap.appendChild(im);
     });
-    if (wrap.children.length) userNode.appendChild(wrap);
+    if (wrap.children.length) host.appendChild(wrap);
   }
   messages.push({ role: 'user', content: text });
   persist({ role: 'user', content: text + (shots.length ? `\n[附 ${shots.length} 张截图]` : '') });
@@ -487,27 +500,160 @@ const TOOL_LABEL = {
   get_datetime: '获取时间', system_info: '系统信息', load_skill: '加载技能'
 };
 
+// ---------- 任务卡渲染 ----------
+/**
+ * 不搞一问一答的气泡流。
+ *
+ * 这里每一屏都是「一张卡 = 一件事」：
+ *   卡头   你想干什么（原文 + 状态徽标 + 时间）
+ *   轨迹   小问为了这件事调了什么工具（默认折叠，跑的时候自动展开）
+ *   正文   结论
+ *   卡脚   下一步能干什么（复制 / 朗读 / 重答 / 定成定时任务 / 派给子代理 / 记进记忆）
+ *
+ * 主动播报（地震、热搜、定时任务）也是一张卡，只是换个图标和标签 ——
+ * 于是整个界面从「聊天记录」变成「事情的时间线」。
+ */
+let currentCard = null;
+let cardSeq = 0;
+
+function cardTime(d = new Date()) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function createTaskCard(askText, opts = {}) {
+  const kind = opts.kind || 'task';
+  const card = document.createElement('article');
+  card.className = 'tcard' + (kind === 'proactive' ? ' proactive' : '') + (kind === 'system' ? ' systemish' : '');
+  card.dataset.state = opts.state || 'thinking';
+  card.dataset.startedAt = String(Date.now());
+  cardSeq++;
+  card.dataset.seq = String(cardSeq);
+
+  const head = document.createElement('header');
+  head.className = 'tcard-head';
+  head.innerHTML = `
+    <span class="tcard-icon">${kind === 'proactive' ? '🔔' : '◆'}</span>
+    <span class="tcard-idx">#${cardSeq}</span>
+    <span class="tcard-ask"></span>
+    ${kind === 'proactive' ? '<span class="tcard-kind">主动播报</span>' : ''}
+    <span class="tcard-state"><i></i><b>思考中</b></span>
+    <span class="tcard-time">${cardTime()}</span>`;
+  head.querySelector('.tcard-ask').textContent = askText || '（自主行动）';
+
+  const body = document.createElement('div');
+  body.className = 'tcard-body';
+  body.innerHTML = `
+    <div class="tcard-trace" hidden>
+      <button class="tcard-trace-head" type="button">
+        <span class="tt-arrow">▸</span>
+        <span>执行轨迹</span>
+        <b class="tt-count">0</b>
+        <span class="tt-hint"></span>
+      </button>
+      <div class="tcard-trace-list"></div>
+    </div>
+    <div class="bubble"></div>`;
+
+  const foot = document.createElement('footer');
+  foot.className = 'tcard-foot';
+  foot.hidden = true;
+
+  card.appendChild(head);
+  card.appendChild(body);
+  card.appendChild(foot);
+
+  // 轨迹默认折叠成一行；点一下展开/收起（跑的时候代码会自动展开）
+  body.querySelector('.tcard-trace-head').addEventListener('click', () => {
+    const t = body.querySelector('.tcard-trace');
+    const collapsed = t.dataset.collapsed === '1';
+    t.dataset.collapsed = collapsed ? '0' : '1';
+    body.querySelector('.tt-arrow').textContent = collapsed ? '▾' : '▸';
+  });
+  return card;
+}
+
+/** 卡头状态徽标：thinking / work / done / error / stopped */
+function setCardState(card, state, text) {
+  const c = card || currentCard;
+  if (!c) return;
+  c.dataset.state = state;
+  const b = c.querySelector('.tcard-state b');
+  if (b) b.textContent = text || ({
+    thinking: '思考中', work: '执行中', done: '已完成', error: '出错了', stopped: '已停止', queued: '排队中', running: '运行中'
+  }[state] || state);
+}
+
+function cardOf(node) {
+  if (!node) return null;
+  return node.classList && node.classList.contains('tcard') ? node : node.closest('.tcard');
+}
+
+/** 轨迹区：有工具调用时才展开，跑完自动折叠（不抢正文的注意力） */
+function traceList(card) {
+  return (card || currentCard).querySelector('.tcard-trace-list');
+}
+
+function showTrace(card, show) {
+  const t = (card || currentCard).querySelector('.tcard-trace');
+  if (t) t.hidden = !show;
+}
+
+function bumpTrace(card, hint) {
+  const c = card || currentCard;
+  const t = c.querySelector('.tcard-trace');
+  const n = c.querySelector('.tt-count');
+  if (!t || !n) return;
+  t.hidden = false;
+  t.dataset.collapsed = '0';   // 正在干活：让主人看得见它在动
+  const arrow = c.querySelector('.tt-arrow');
+  if (arrow) arrow.textContent = '▾';
+  n.textContent = String(traceList(c).childElementCount);
+  if (hint != null) {
+    const h = c.querySelector('.tt-hint');
+    if (h) h.textContent = hint;
+  }
+}
+
+/** 桌面宠物 → 任务卡（Agent 干活时的状态联动） */
 function renderToolCard(p) {
   if (!p) return;
-  let node = document.getElementById('tool-' + p.id);
+  const card = currentCard;
+  if (!card) return;
+  showTrace(card);
+  setCardState(card, 'work');
+  setStatus('正在干活…');
+
+  const list = traceList(card);
+  let node = list.querySelector('#tool-' + p.id);
+  const label = TOOL_LABEL[p.name] || (p.name.startsWith('mcp__') ? 'MCP ' + p.name.split('__')[2] : p.name);
+  const brief = briefArgs(p.name, p.args);
+
   if (p.status === 'start') {
     if (node) node.remove();
     node = document.createElement('div');
     node.id = 'tool-' + p.id;
     node.className = 'tool-card';
-    const label = TOOL_LABEL[p.name] || (p.name.startsWith('mcp__') ? 'MCP ' + p.name.split('__')[2] : p.name);
-    const brief = briefArgs(p.name, p.args);
     node.innerHTML = `<div class="tool-head"><span class="tool-dot running"></span>
       <span class="tool-name">${escapeHtml(label)}</span>
       ${p.danger ? '<span class="tool-tag danger">高危</span>' : ''}
       <span class="tool-status">执行中…</span></div>
       <div class="tool-args">${escapeHtml(brief)}</div>`;
-    els.messages.appendChild(node);
+    list.appendChild(node);
+    bumpTrace(card, label);
     scrollToBottom();
     setStatus(`正在${label}…`);
     return;
   }
-  if (!node) return;
+
+  if (!node) {
+    node = document.createElement('div');
+    node.id = 'tool-' + p.id;
+    node.className = 'tool-card';
+    node.innerHTML = `<div class="tool-head"><span class="tool-dot done"></span>
+      <span class="tool-name">${escapeHtml(label)}</span>
+      <span class="tool-status">—</span></div>`;
+    list.appendChild(node);
+  }
   const head = node.querySelector('.tool-status');
   const dot = node.querySelector('.tool-dot');
   if (p.status === 'rejected') {
@@ -525,13 +671,14 @@ function renderToolCard(p) {
     // 截图结果可以直接点开
     const f = p.output && /([A-Za-z]:\\[^\s]+\.png)/.exec(p.output);
     if (f) {
-      const b = document.createElement('button');
-      b.className = 'tool-open';
-      b.textContent = '打开截图';
-      b.onclick = () => window.xw.toolsOpenFile(f[1]);
-      node.appendChild(b);
+      const btn = document.createElement('button');
+      btn.className = 'tool-open';
+      btn.textContent = '打开截图';
+      btn.onclick = () => window.xw.toolsOpenFile(f[1]);
+      node.appendChild(btn);
     }
   }
+  bumpTrace(card);
   scrollToBottom();
 }
 
@@ -570,74 +717,115 @@ function bindConfirmEvents() {
   } catch (e) { /* ignore */ }
 }
 
-// ---------- 气泡渲染 ----------
-function addMessageBubble(role, content, { animate = true, thinking = false } = {}) {
+// ---------- 卡片入口（保持老签名，内部改成卡片） ----------
+function addMessageBubble(role, content, { animate = true, thinking = false, kind = 'task' } = {}) {
   const r = normalizeRole(role);
-  const wrap = document.createElement('div');
-  wrap.className = `msg ${r === 'user' ? 'user' : 'ai'}`;
-  if (!animate) wrap.style.animation = 'none';
 
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.textContent = r === 'user' ? '我' : (persona && persona.assistantName ? persona.assistantName.slice(0, 1) : '问');
+  if (r === 'user') {
+    const card = createTaskCard(content, { kind });
+    els.messages.appendChild(card);
+    currentCard = card;
+    if (animate) scrollToBottom();
+    return card.querySelector('.tcard-ask');
+  }
 
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  // 助手侧：没卡就单独开一张（例如会话回放时第一条就是回答）
+  let card = currentCard;
+  if (!card || card.dataset.closed === '1') {
+    card = createTaskCard(kind === 'proactive' ? (content || '主动播报') : '（自主行动）', { kind });
+    if (kind !== 'proactive') card.classList.add('standalone');
+    els.messages.appendChild(card);
+    currentCard = card;
+  }
 
+  const bubble = card.querySelector('.bubble');
   if (thinking) bubble.innerHTML = `<span class="thinking-dots"><i></i><i></i><i></i></span>`;
   else if (r === 'assistant') bubble.innerHTML = renderMarkdown(content);
   else bubble.textContent = content;
 
-  body.appendChild(bubble);
-  if (r === 'assistant' && !thinking) body.appendChild(buildActions(content, bubble));
+  // 回放历史（animate=false）时，有内容的回答直接当「已完成」，
+  // 否则旧消息会一直挂着「思考中」的状态徽标，看着像卡住了
+  if (!animate && r === 'assistant' && String(content || '').trim() && !thinking) {
+    setCardState(card, 'done');
+    const foot = card.querySelector('.tcard-foot');
+    if (foot) foot.hidden = true;   // 历史消息不给动作按钮，免得误点「重答」
+    card.dataset.closed = '1';
+  }
 
-  wrap.appendChild(avatar);
-  wrap.appendChild(body);
-  els.messages.appendChild(wrap);
   if (animate) scrollToBottom();
-  return wrap;
+  return card;
 }
 
 function renderStreaming(node, text, isError = false) {
   if (!node) return;
-  const bubble = node.querySelector('.bubble');
+  const card = cardOf(node);
+  const bubble = (card || node).querySelector('.bubble');
   if (!bubble) return;
-  bubble.innerHTML = isError ? renderMarkdown(text) : renderMarkdown(text) + '<span class="cursor"></span>';
+  bubble.innerHTML = renderMarkdown(text) + (isError ? '' : '<span class="cursor"></span>');
+  // 正在调工具时不要把状态徽标降级回「思考中」（工具还在跑）
+  if (card && card.dataset.state !== 'work') setCardState(card, isError ? 'error' : 'thinking');
 }
 
-function finalizeAiNode(node, text) {
+function finalizeAiNode(node, text, state = 'done') {
   if (!node) return;
-  const bubble = node.querySelector('.bubble');
+  const card = cardOf(node);
+  const bubble = (card || node).querySelector('.bubble');
   if (bubble) bubble.innerHTML = renderMarkdown(text);
-  const body = node.querySelector('.msg-body');
-  if (body && !body.querySelector('.msg-actions')) body.appendChild(buildActions(text, bubble));
+
+  if (card) {
+    setCardState(card, state);
+    // 跑完自动折叠轨迹，把注意力交还给结论
+    const t = card.querySelector('.tcard-trace');
+    if (t && !t.hidden && traceList(card).childElementCount > 0) {
+      t.dataset.collapsed = '1';
+      const arrow = card.querySelector('.tt-arrow');
+      if (arrow) arrow.textContent = '▸';
+    }
+    // 计时：卡头时间改成「起 → 止 + 用时」
+    const started = Number(card.dataset.startedAt || 0);
+    if (started) {
+      const ms = Date.now() - started;
+      const timeEl = card.querySelector('.tcard-time');
+      if (timeEl) timeEl.textContent = `${cardTime(new Date(started))} · ${(ms / 1000).toFixed(1)}s`;
+    }
+    const foot = card.querySelector('.tcard-foot');
+    if (foot) {
+      foot.hidden = false;
+      if (!foot.querySelector('.msg-actions')) foot.appendChild(buildActions(text, bubble, card));
+    }
+    card.dataset.closed = '1';
+  }
+  scrollToBottom();
 }
 
-function buildActions(text, bubble) {
+/** 卡脚动作：常规动作 + 一键「把这件事变成长期动作」 */
+function buildActions(text, bubble, card) {
   const bar = document.createElement('div');
   bar.className = 'msg-actions';
 
-  const copyBtn = document.createElement('button');
-  copyBtn.textContent = '复制';
-  copyBtn.onclick = () => {
+  const mk = (label, title, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (title) b.title = title;
+    b.onclick = fn;
+    bar.appendChild(b);
+    return b;
+  };
+
+  const copyBtn = mk('复制', '复制这条结论', () => {
     navigator.clipboard.writeText(text);
     copyBtn.textContent = '已复制';
     setTimeout(() => (copyBtn.textContent = '复制'), 1400);
-  };
+  });
 
-  const speakBtn = document.createElement('button');
-  speakBtn.textContent = '朗读';
-  const plain = toPlainText(text);
-  speakBtn.onclick = () => {
+  const speakBtn = mk('朗读', '用语音念出来', () => {
     if (speech.isSpeaking() || currentAudio) {
       speech.stopSpeaking();
       stopAudio();
       speakBtn.classList.remove('on');
       speakBtn.textContent = '朗读';
     } else {
-      speakText(plain);
+      speakText(toPlainText(text));
       speakBtn.classList.add('on');
       speakBtn.textContent = '停止';
       const un = () => {
@@ -647,25 +835,327 @@ function buildActions(text, bubble) {
       };
       document.addEventListener('speech-ended', un);
     }
-  };
+  });
 
-  const retryBtn = document.createElement('button');
-  retryBtn.textContent = '重答';
-  retryBtn.onclick = () => {
+  mk('重答', '丢掉这次回答重新问一遍', () => {
     if (streaming) return;
-    const wrap = bar.closest('.msg');
+    const wrap = bar.closest('.tcard') || bar.closest('.msg');
     const idx = messages.findIndex((m) => normalizeRole(m.role) === 'assistant' && m.content === text);
     if (idx >= 0) messages.splice(idx, 1);
     wrap && wrap.remove();
     const lastIdx = messages.map((m) => m.role).lastIndexOf('user');
     if (lastIdx >= 0) messages.splice(lastIdx, 1);
     if (lastUserText) send(lastUserText);
-  };
+  });
 
-  bar.appendChild(copyBtn);
-  bar.appendChild(speakBtn);
-  bar.appendChild(retryBtn);
+  // 把「这一次的结论」变成长期动作 —— 这是工作台和聊天页最大的区别
+  mk('⏰ 定成定时任务', '按这件事建一个定时任务', () => {
+    const ask = card ? (card.querySelector('.tcard-ask') || {}).textContent || '' : '';
+    openQuickSchedule(ask || lastUserText, text);
+  });
+
+  mk('🧩 派给子代理', '把它交给子代理去做（可以并行）', async () => {
+    if (streaming) return;
+    const ask = card ? (card.querySelector('.tcard-ask') || {}).textContent || '' : '';
+    send(`把这件事交给子代理去做：${ask || lastUserText}`);
+  });
+
+  mk('🧠 记进记忆', '让小问长期记住这条结论', async () => {
+    const ask = card ? (card.querySelector('.tcard-ask') || {}).textContent || '' : '';
+    try {
+      await window.xw.memoryAdd({
+        text: `${ask ? ask + ' → ' : ''}${String(text).slice(0, 200)}`,
+        tags: ['工作台'], source: 'auto'
+      });
+      setToast('已记进长期记忆');
+    } catch (e) {
+      setToast('记录失败：' + ((e && e.message) || e));
+    }
+  });
+
   return bar;
+}
+
+// ---------- 意图预览：还没发出去，就先把「我打算怎么干」摊开 ----------
+/**
+ * 传统问答页的毛病：你打完字点发送，然后盯着一个三点动画发呆。
+ * 工作台应该是「说完就看见计划」：输入框下面常驻一条意图条，
+ * 边打字边告诉主人 —— 这件事小问会去查资料 / 动电脑 / 排定时任务。
+ * 命中「长期要做」的，直接把「就这么办」按钮递到手边。
+ */
+const INTENT_RULES = [
+  { re: /(每天|每周|每月|每隔|每小时|每\s*\d+\s*(分钟|小时)|提醒我|定个?闹钟|定时|排个|日程|周期|早报|日报|周报)/,
+    ico: '⏰', text: '这是「长期要做」的事 —— 我可以直接排成定时任务，到点自己跑、自己播报。', act: 'schedule' },
+  { re: /(截图|截屏|截个图|screenshot)/i,
+    ico: '📷', text: '要动手截图：Alt+Shift+A 框选、Alt+Shift+F 全屏，结果会自动贴进输入框。' },
+  { re: /(记住|记一下|记下来|帮我记|存进记忆|以后都)/,
+    ico: '🧠', text: '这条我会顺手写进长期记忆，以后不用重复交代。' },
+  { re: /(写|生成|整理|总结|复盘|报告|方案|文案|翻译|润色|起个名)/,
+    ico: '✍️', text: '这是要「出一份东西」：我先给结论，再给能直接用的成稿。' },
+  { re: /(查一下|查查|搜|看看|怎么样|多少钱|最新|新闻|行情|股价|天气|热搜)/,
+    ico: '🔍', text: '需要外部信息：我去查完再回你，并且标明来源。' },
+  { re: /(装|卸载|运行|执行|打开|关闭|清理|删除|拷贝|复制到|移动|批量)/,
+    ico: '⚙️', text: '要动你的电脑：高危步骤我会先弹一句确认，再动手。' }
+];
+
+let intentAct = '';
+
+function updateIntent() {
+  const bar = $('intentBar');
+  if (!bar) return;
+  const v = (els.input.value || '').trim();
+  if (!v) { bar.hidden = true; intentAct = ''; return; }
+
+  let hit = null;
+  for (const r of INTENT_RULES) { if (r.re.test(v)) { hit = r; break; } }
+  if (!hit) {
+    // 什么都不像的时候，也别沉默：至少告诉主人「我会当成一件事去办」
+    $('intentIco').textContent = '◆';
+    $('intentText').textContent = 'Enter 就交给小问办 —— 会在这儿留一张卡，不是聊天记录。';
+    $('intentGo').hidden = true;
+    intentAct = '';
+    bar.hidden = false;
+    return;
+  }
+
+  $('intentIco').textContent = hit.ico;
+  $('intentText').textContent = hit.text;
+  intentAct = hit.act || '';
+  $('intentGo').hidden = hit.act !== 'schedule';
+  bar.hidden = false;
+}
+
+function bindIntent() {
+  const bar = $('intentBar');
+  if (!bar || !els.input) return;
+  els.input.addEventListener('input', updateIntent);
+  const go = $('intentGo');
+  go && (go.onclick = () => { openQuickSchedule(els.input.value.trim().slice(0, 40), els.input.value.trim()); });
+}
+
+// ---------- 上下文环：这一轮塞了多少字，压没压过 ----------
+function renderContext(st) {
+  const ring = $('ctxRing');
+  const badge = $('ctxBadge');
+  const btn = $('btnCtx');
+  if (!ring || !st) return;
+  const C = 94.2; // 2πr, r=15
+  const used = Number(st.afterTokens || 0);
+  const budget = Number(st.budget || 1) || 1;
+  const ratio = Math.max(0, Math.min(1, used / budget));
+  ring.setAttribute('stroke-dashoffset', String(C * (1 - ratio)));
+  ring.setAttribute('stroke', ratio > 0.9 ? '#ef4444' : ratio > 0.7 ? '#f59e0b' : 'currentColor');
+  if (btn) btn.classList.toggle('on', ratio > 0.6);
+  if (badge) badge.hidden = !st.compressed;
+  const pct = Math.round(ratio * 100);
+  const parts = [`上下文 ${used} / ${budget} tokens（${pct}%）`];
+  if (st.compressed) {
+    parts.push('已自动压缩');
+    if (st.clippedTools) parts.push(`截断工具输出 ${st.clippedTools} 条`);
+    if (st.digestLines) parts.push(`折叠成纪要 ${st.digestLines} 行`);
+    if (st.droppedMessages) parts.push(`丢弃最旧 ${st.droppedMessages} 条`);
+    parts.push(`保留最近 ${st.keptTurns ?? '—'} 轮原文`);
+    if (st.ratio != null) parts.push(`压缩比 ${(st.ratio * 100).toFixed(0)}%`);
+  } else {
+    parts.push('无需压缩');
+  }
+  if (btn) btn.title = parts.join(' · ');
+}
+
+function bindCtx() {
+  try { window.xw.onContext && window.xw.onContext((st) => renderContext(st)); } catch (e) { /* ignore */ }
+  const btn = $('btnCtx');
+  btn && (btn.onclick = () => setStatus(btn.title || '上下文用量'));
+}
+
+// ---------- 命令面板（Ctrl+K）：能力入口，不是第二个输入框 ----------
+let palItems = [];
+let palSel = 0;
+
+function paletteCommands() {
+  return [
+    { g: '常用', ico: '🆕', title: '新建一个工作台', sub: '清屏重来', run: () => newChat() },
+    { g: '常用', ico: '⚙️', title: '打开设置', run: () => window.xw.openSettings('') },
+    { g: '常用', ico: '📷', title: '框选截图后提问', sub: 'Alt+Shift+A', run: () => window.xw.captureRegion() },
+    { g: '常用', ico: '🖼️', title: '全屏截图后提问', sub: 'Alt+Shift+F', run: () => window.xw.captureFull() },
+    { g: '常用', ico: '🐧', title: '召唤桌面宠物到鼠标处', sub: 'Alt+Ctrl+P', run: () => { window.xw.petSummon(); setToast('宠物已召唤到鼠标处'); } },
+    { g: '定时', ico: '⏰', title: '新建一个定时任务', run: () => openQuickSchedule('', '') },
+    { g: '定时', ico: '📋', title: '看所有定时任务', sub: '设置 · 定时任务', run: () => window.xw.openSettings('schedule') },
+    { g: '定时', ico: '▶️', title: '立刻把定时任务跑一遍', run: () => window.xw.openSettings('schedule') },
+    { g: '关注', ico: '🔥', title: '现在就看一眼热搜', run: () => doWatchCheck('hot') },
+    { g: '关注', ico: '🌏', title: '现在检查一次地震', run: () => doWatchCheck('quake') },
+    { g: '关注', ico: '🔔', title: '设置主动关注', sub: '设置 · 主动关注', run: () => window.xw.openSettings('watch') },
+    { g: '记忆', ico: '🧠', title: '把剪贴板内容记进记忆', run: () => rememberClipboard() },
+    { g: '记忆', ico: '📚', title: '打开人格与记忆', run: () => window.xw.openSettings('persona') },
+    { g: '技能', ico: '🧩', title: '看看有哪些技能', run: () => window.xw.openSettings('skills') },
+    { g: '技能', ico: '🛠️', title: 'Agent 能力开关', run: () => window.xw.openSettings('agent') },
+    { g: '上下文', ico: '🫧', title: '清空当前上下文', sub: '重新开始记', run: () => { messages = []; newChat(); } }
+  ];
+}
+
+async function doWatchCheck(source) {
+  setToast('这就去看一眼…');
+  try {
+    const r = await window.xw.watchCheck(source);
+    setStatus(r && r.ok === false ? ('检查失败：' + (r.error || '')) : '已检查，有新消息会主动播报');
+  } catch (e) {
+    setStatus('检查失败：' + ((e && e.message) || e));
+  }
+}
+
+async function rememberClipboard() {
+  try {
+    const r = await window.xw.clipboardRead();
+    const text = (r && r.text) || '';
+    if (!String(text).trim()) return setToast('剪贴板是空的');
+    await window.xw.memoryAdd({ text: String(text).slice(0, 2000), tags: ['剪贴板'], source: 'user' });
+    setToast('已记进长期记忆');
+  } catch (e) {
+    setToast('记录失败：' + ((e && e.message) || e));
+  }
+}
+
+function openPalette() {
+  const mask = $('paletteMask');
+  if (!mask) return;
+  mask.classList.add('show');
+  const inp = $('paletteInput');
+  inp.value = '';
+  palSel = 0;
+  renderPalette('');
+  setTimeout(() => inp.focus(), 10);
+}
+
+function closePalette() {
+  const mask = $('paletteMask');
+  if (mask) mask.classList.remove('show');
+}
+
+function renderPalette(q) {
+  const list = $('paletteList');
+  if (!list) return;
+  const all = paletteCommands();
+  const kw = String(q || '').trim().toLowerCase();
+  palItems = kw ? all.filter((c) => (c.title + ' ' + (c.sub || '') + ' ' + c.g).toLowerCase().includes(kw)) : all;
+
+  list.innerHTML = '';
+  let lastGroup = '';
+  palItems.forEach((c, i) => {
+    if (c.g !== lastGroup) {
+      lastGroup = c.g;
+      const g = document.createElement('div');
+      g.className = 'pal-group';
+      g.textContent = c.g;
+      list.appendChild(g);
+    }
+    const item = document.createElement('div');
+    item.className = 'pal-item' + (i === palSel ? ' active' : '');
+    item.innerHTML = `<span class="pal-ico">${c.ico}</span><span class="pal-title"></span>${c.sub ? `<span class="pal-sub">${escapeHtml(c.sub)}</span>` : ''}`;
+    item.querySelector('.pal-title').textContent = c.title;
+    item.onmouseenter = () => { palSel = i; markPalActive(); };
+    item.onclick = () => runPalette(i);
+    list.appendChild(item);
+  });
+
+  if (!palItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'pal-group';
+    empty.textContent = '没找到对应命令 —— 直接 Enter 就把这句话交给小问办';
+    list.appendChild(empty);
+  }
+}
+
+function markPalActive() {
+  const list = $('paletteList');
+  if (!list) return;
+  [...list.querySelectorAll('.pal-item')].forEach((n, i) => n.classList.toggle('active', i === palSel));
+  const act = list.querySelector('.pal-item.active');
+  act && act.scrollIntoView({ block: 'nearest' });
+}
+
+function runPalette(i) {
+  const cmd = palItems[i];
+  closePalette();
+  if (!cmd) return;
+  try { cmd.run(); } catch (e) { setStatus('命令执行失败：' + ((e && e.message) || e)); }
+}
+
+function bindPalette() {
+  const mask = $('paletteMask');
+  const inp = $('paletteInput');
+  if (!mask || !inp) return;
+
+  mask.addEventListener('click', (e) => { if (e.target === mask) closePalette(); });
+  inp.addEventListener('input', () => { palSel = 0; renderPalette(inp.value); });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (palItems.length) { palSel = (palSel + 1) % palItems.length; markPalActive(); } }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); if (palItems.length) { palSel = (palSel - 1 + palItems.length) % palItems.length; markPalActive(); } }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const typed = inp.value.trim();
+      if (palItems.length && !(typed && !palItems[palSel])) return runPalette(palSel);
+      // 没有匹配命令：就把输入的内容当成一句话发给小问
+      closePalette();
+      if (typed) send(typed);
+    } else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const k = (e.key || '').toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && k === 'k') { e.preventDefault(); openPalette(); return; }
+    if (e.key === 'Escape' && mask.classList.contains('show')) closePalette();
+  });
+}
+
+// ---------- 快捷定时：把一张卡上的结论变成长期动作 ----------
+function openQuickSchedule(title, prompt) {
+  const mask = $('qsMask');
+  if (!mask) return;
+  $('qsTitle').value = String(title || '').slice(0, 40);
+  $('qsWhen').value = '';
+  $('qsPrompt').value = String(prompt || '');
+  $('qsHint').textContent = '';
+  mask.classList.add('show');
+  setTimeout(() => $('qsWhen').focus(), 10);
+}
+
+function closeQuickSchedule() {
+  const mask = $('qsMask');
+  if (mask) mask.classList.remove('show');
+}
+
+function bindQuickSchedule() {
+  const mask = $('qsMask');
+  if (!mask) return;
+  mask.addEventListener('click', (e) => { if (e.target === mask) closeQuickSchedule(); });
+  document.querySelectorAll('.qs-chips button').forEach((b) => {
+    b.addEventListener('click', () => { $('qsWhen').value = b.dataset.when; $('qsHint').textContent = ''; });
+  });
+  $('qsCancel').onclick = closeQuickSchedule;
+  $('qsOk').onclick = async () => {
+    const when = $('qsWhen').value.trim();
+    const prompt = $('qsPrompt').value.trim();
+    if (!prompt) { $('qsHint').textContent = '得先写清楚到点做什么'; return; }
+    if (!when) { $('qsHint').textContent = '得写清楚多久做一次，比如「每天 08:30」'; return; }
+    const r = await window.xw.scheduleAdd({ title: $('qsTitle').value.trim(), prompt, when, wake: true });
+    if (!r || r.ok === false) { $('qsHint').textContent = (r && r.error) || '创建失败'; return; }
+    closeQuickSchedule();
+    setToast(`已排好：${(r.task && r.task.title) || '定时任务'}`);
+    // 顺手在时间线上留一张卡，主人知道这事已经落地了
+    const card = createTaskCard(`排了个定时任务：${(r.task && r.task.title) || prompt.slice(0, 20)}`, { kind: 'system' });
+    card.dataset.state = 'done';
+    const bubble = card.querySelector('.bubble');
+    if (bubble) {
+      bubble.textContent = `到点我会自己去做：${prompt}\n${(r.task && r.task.whenText) || when}`;
+    }
+    const foot = card.querySelector('.tcard-foot');
+    const foot2 = card.querySelector('.tcard-state b');
+    if (foot2) foot2.textContent = '已安排';
+    if (foot) foot.hidden = true;
+    els.messages.appendChild(card);
+    card.dataset.closed = '1';
+    scrollToBottom();
+  };
 }
 
 // ---------- 语音输出 ----------
@@ -858,16 +1348,35 @@ function initSettings() {
   fillAll();
 }
 
+function activateTab(tab) {
+  if (!tab) return;
+  const btn = document.querySelector(`.st-nav-item[data-tab="${tab}"]`);
+  if (!btn) return;
+  document.querySelectorAll('.st-nav-item').forEach((b) => b.classList.remove('active'));
+  document.querySelectorAll('.st-section').forEach((s) => s.classList.remove('active'));
+  btn.classList.add('active');
+  curSettingsTab = tab;
+  const sec = document.querySelector(`.st-section[data-tab="${tab}"]`);
+  if (sec) sec.classList.add('active');
+  const wrap = document.querySelector('.st-wrap');
+  if (wrap) wrap.scrollTop = 0;
+}
+
+function settingsTabFromHash() {
+  const m = /#settings\/([a-z0-9-]+)/i.exec(decodeURIComponent(location.hash || location.href || ''));
+  return m ? m[1] : '';
+}
+
 function buildTabs() {
   document.querySelectorAll('.st-nav-item').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.st-nav-item').forEach((b) => b.classList.remove('active'));
-      document.querySelectorAll('.st-section').forEach((s) => s.classList.remove('active'));
-      btn.classList.add('active');
-      const sec = document.querySelector(`.st-section[data-tab="${btn.dataset.tab}"]`);
-      if (sec) sec.classList.add('active');
-    });
+    btn.addEventListener('click', () => activateTab(btn.dataset.tab));
   });
+  // 命令面板里指定的标签页（#settings/pet 这种）直接跳过去
+  const want = settingsTabFromHash();
+  if (want) activateTab(want);
+  try {
+    window.xw.onSettingsTab && window.xw.onSettingsTab((t) => activateTab(t));
+  } catch (e) { /* ignore */ }
 }
 
 function fillAll() {
@@ -1527,13 +2036,34 @@ function bindPet() {
     cfg = await window.xw.setConfig({ petOpacity: Number(op.value) / 100 });
   });
 
-  ['stPetTop', 'stPetWalk', 'stPetInteraction', 'stPetAgentLink'].forEach((id) => {
+  ['stPetTop', 'stPetWalk', 'stPetInteraction', 'stPetAgentLink', 'stPetKeepTop'].forEach((id) => {
     const el = $(id);
+    if (!el) return;
     const key = id.replace('stPet', 'pet');
     el.checked = cfg[key] !== false;
     el.addEventListener('change', async () => {
       cfg = await window.xw.setConfig({ [key]: el.checked });
+      if (id === 'stPetKeepTop' && el.checked) {
+        await window.xw.petTop();
+        setToast('已开启「始终最上层」，宠物会周期性重新顶到最前面');
+      }
     });
+  });
+
+  // 召唤宠物快捷键（录制式，按下去就能用）
+  if ($('stPetSummonKey')) {
+    $('stPetSummonKey').value = cfg.petSummonHotkey || 'CommandOrControl+Alt+P';
+  }
+  setupHotkeyRecorder({
+    inputId: 'stPetSummonKey', btnId: 'stPetSummonRec',
+    label: '召唤宠物',
+    onApply: async (v) => {
+      const r = await window.xw.petSummonHotkeySet(v);
+      if (r && r.ok === false) setToast(r.error || '这个组合键用不了');
+      const now = await window.xw.petSummonHotkeyGet();
+      if ($('stPetSummonKey')) $('stPetSummonKey').value = now || '';
+      cfg.petSummonHotkey = now;
+    }
   });
 
   // 统一的显示 / 隐藏：走 petEnabled 配置，保证「配置 = 实际状态」，重启也一致
@@ -1556,6 +2086,31 @@ function bindPet() {
       setToast('叫回失败：' + ((e && e.message) || e));
     }
     refreshPetDiag();
+  });
+
+  $('stPetSummon').addEventListener('click', async () => {
+    try {
+      await window.xw.setConfig({ petEnabled: true });
+      cfg = await window.xw.getConfig();
+      on.checked = true;
+      await window.xw.petSummon();
+      setToast('宠物已召唤到鼠标所在屏幕的右下角');
+    } catch (e) {
+      setToast('召唤失败：' + ((e && e.message) || e));
+    }
+    refreshPetDiag();
+  });
+
+  $('stPetTopNow').addEventListener('click', async () => {
+    await window.xw.petTop();
+    setToast('已重新顶到最上层');
+    refreshPetDiag();
+  });
+
+  $('stPetRebuild').addEventListener('click', async () => {
+    await window.xw.petHardRecover();
+    setToast('宠物窗口已重建');
+    setTimeout(refreshPetDiag, 900);
   });
 
   $('stPetFeed').addEventListener('click', async () => {
@@ -1594,12 +2149,34 @@ async function refreshPetDiag() {
     const d = await window.xw.petDiag();
     if (!d || !d.exists) {
       el.textContent = '宠物窗口状态：未创建' + (d && d.enabled === false ? '（设置里是关闭的）' : '');
-      return;
+    } else {
+      el.textContent = `宠物窗口状态：${d.visible ? '可见' : '已隐藏'} · 位置 ${d.pos.join(', ')} · 尺寸 ${d.size.join('×')}`
+        + (d.size[1] !== d.expectedHeight ? `（应为 ${d.expectedHeight}，可点「叫回主屏」修正）` : '');
     }
-    el.textContent = `宠物窗口状态：${d.visible ? '可见' : '已隐藏'} · 位置 ${d.pos.join(', ')} · 尺寸 ${d.size.join('×')}`
-      + (d.size[1] !== d.expectedHeight ? `（应为 ${d.expectedHeight}，可点「叫回主屏」修正）` : '');
   } catch (e) {
     el.textContent = '宠物窗口状态：读取失败 ' + ((e && e.message) || e);
+  }
+  refreshPetHealth();
+}
+
+/** 宠物体检：一句话说清「为什么看不见」，以及该点哪个按钮 */
+async function refreshPetHealth() {
+  const el = $('stPetHealth');
+  if (!el || !window.xw.petHealth) return;
+  try {
+    const h = await window.xw.petHealth();
+    const bits = [];
+    bits.push(h.exists ? (h.visible ? '窗口可见' : '窗口被隐藏') : '窗口不存在');
+    if (h.exists) {
+      bits.push(h.onScreen ? '在屏幕内' : '在屏幕外');
+      bits.push(h.alwaysOnTop ? '已置顶' : '未置顶');
+      bits.push(h.keepTop ? '周期重夺开启' : '周期重夺关闭');
+    }
+    const head = `体检：${bits.join(' · ')}。`;
+    const hint = (h.hints || []).join(' ');
+    el.innerHTML = `${escapeHtml(head)}${hint ? '<br>' + escapeHtml(hint) : ''}`;
+  } catch (e) {
+    el.textContent = '体检失败：' + ((e && e.message) || e);
   }
 }
 
@@ -1642,6 +2219,10 @@ async function refreshTrayDiag() {
 
 // ---------- 定时任务 ----------
 let schCache = [];
+const schRunning = new Map();   // taskId -> 开始时间（本地乐观标记）
+let schTicker = null;
+let schLastDone = null;
+let curSettingsTab = 'general';
 
 function buildWeekdayPicker() {
   const box = $('schDays');
@@ -1714,6 +2295,33 @@ function bindSchedule() {
     setToast(r && r.ok ? `已添加「${presets[idx].title}」` : ('添加失败：' + ((r && r.error) || '')));
     fillSchedule();
   });
+
+  // 任务在后台异步跑，界面靠事件跟上（开始 / 结束 / 排队）
+  if (window.xw.onScheduleEvent) {
+    window.xw.onScheduleEvent((p) => {
+      if (!p) return;
+      if (p.type === 'start') {
+        schRunning.set(p.id, Date.now());
+        if (!p.manual) setToast(`「${p.title}」到点了，正在办…`);
+      } else {
+        schRunning.delete(p.id);
+        if (!p.silent) {
+          setToast(p.ok === false
+            ? `「${p.title}」没办成：${String(p.text || '').slice(0, 40)}`
+            : `「${p.title}」办好了（${Math.round((p.ms || 0) / 1000)}s）`);
+        }
+        schLastDone = { id: p.id, at: Date.now() };
+      }
+      if (curSettingsTab === 'schedule') fillSchedule();
+    });
+  }
+
+  // 运行中的任务要显示已用时长，每秒刷新一次
+  if (!schTicker) {
+    schTicker = setInterval(() => {
+      if (curSettingsTab === 'schedule' && schRunning.size) fillSchedule();
+    }, 1000);
+  }
 }
 
 async function fillSchedule() {
@@ -1729,19 +2337,27 @@ async function fillSchedule() {
     return;
   }
 
-  box.innerHTML = list.map((t) => `
-    <div class="sched-item${t.enabled === false ? ' off' : ''}">
+  box.innerHTML = list.map((t) => {
+    const isRunning = schRunning.has(t.id);
+    const elapsed = isRunning ? Math.round((Date.now() - schRunning.get(t.id)) / 1000) : 0;
+    const last = t.lastResult
+      ? `<div class="sched-prompt">上次${t.lastOk === false ? '失败' : ''}：${escapeHtml(String(t.lastResult).slice(0, 80))}</div>`
+      : '';
+    return `
+    <div class="sched-item${t.enabled === false ? ' off' : ''}${isRunning ? ' running' : ''}">
       <div class="sched-main">
-        <div class="sched-title">${escapeHtml(t.title)}${t.source === 'ai' ? '<span class="tag-ai">小问自排</span>' : ''}</div>
+        <div class="sched-title">${escapeHtml(t.title)}${t.source === 'ai' ? '<span class="tag-ai">小问自排</span>' : ''}${isRunning ? `<span class="tag-run">运行中 ${elapsed}s</span>` : ''}</div>
         <div class="sched-meta">${escapeHtml(t.whenText)} · ${escapeHtml(t.etaText)}${t.runCount ? ` · 已执行 ${t.runCount} 次` : ''}</div>
         <div class="sched-prompt">${escapeHtml(String(t.prompt || '').slice(0, 90))}</div>
+        ${last}
       </div>
       <div class="sched-ops">
-        <button class="btn-mini" data-act="run" data-id="${t.id}">跑一次</button>
+        <button class="btn-mini" data-act="run" data-id="${t.id}"${isRunning ? ' disabled' : ''}>${isRunning ? '跑着呢' : '跑一次'}</button>
         <button class="btn-mini" data-act="toggle" data-id="${t.id}">${t.enabled === false ? '启用' : '暂停'}</button>
         <button class="btn-mini danger" data-act="del" data-id="${t.id}">删除</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   box.querySelectorAll('button[data-act]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -1749,9 +2365,14 @@ async function fillSchedule() {
       const act = btn.dataset.act;
       const item = schCache.find((x) => x.id === id);
       if (act === 'run') {
-        setToast('正在执行，结果会主动播报给你…');
+        // 异步执行：踢一脚就走，结果会自己播报过来（不再阻塞界面）
         const r = await window.xw.scheduleRun(id);
-        setToast(r && r.ok ? '执行完成' : `执行失败：${(r && (r.error || r.text)) || '未知原因'}`);
+        if (r && r.ok === false) {
+          setToast(`没能开跑：${r.error || '未知原因'}`);
+        } else {
+          schRunning.set(id, Date.now());
+          setToast(r && r.queued ? '前面还有任务在跑，已排队' : '已经开跑了，结果会主动告诉你');
+        }
       } else if (act === 'toggle') {
         await window.xw.scheduleUpdate(id, { enabled: item ? item.enabled === false : true });
       } else if (act === 'del') {
@@ -1844,13 +2465,71 @@ async function refreshWatchStatus() {
 }
 
 // ---------- 主进程主动播报（定时任务 / 地震 / 热搜） ----------
+// 正在进行的主动播报：title -> card（回执先落地，结果回来时再改写同一张卡）
+const proactiveCards = new Map();
+
+// 播报来源的中文标签：卡片标题已经写清了「是什么事」，这里只标「哪儿来的」
+const KIND_LABEL = {
+  hot: '热搜', quake: '地震', schedule: '定时任务', watch: '关注',
+  notice: '提醒', capture: '截图', update: '升级', news: '资讯', weather: '天气'
+};
+
+function proactiveCard(title, kind, state) {
+  const card = createTaskCard(title, { kind: 'proactive', state });
+  const head = card.querySelector('.tcard-kind');
+  if (head) {
+    // 认不出来的来源就不标了，免得给主人看一串英文 id
+    const label = KIND_LABEL[kind] || '';
+    if (label) head.textContent = label;
+    else head.remove();
+  }
+  els.messages.appendChild(card);
+  card.dataset.closed = '1';
+  return card;
+}
+
+/** 标题已经在卡头上了，正文只放内容，别再复述一遍 */
+function fillProactiveBubble(card, title, text) {
+  const bubble = card.querySelector('.bubble');
+  if (bubble) bubble.innerHTML = renderMarkdown(text);
+}
+
 function bindProactive() {
   try {
     window.xw.onProactive((p) => {
       if (!p || !p.text) return;
-      try { addMessageBubble('assistant', `**${p.title || '小问提醒'}**\n\n${p.text}`, { animate: true }); } catch (e) { /* ignore */ }
+      const title = String(p.title || '小问提醒');
+      const phase = String(p.phase || 'done');
+
+      // 回执 / 进度：同一件事只留一张卡，先把「我在干了」摊出来
+      if (phase === 'ack' || phase === 'progress') {
+        let card = proactiveCards.get(title);
+        if (!card || !card.isConnected) {
+          card = proactiveCard(title, p.kind, 'work');
+          proactiveCards.set(title, card);
+        }
+        setCardState(card, 'work');
+        fillProactiveBubble(card, title, p.text);
+        setStatus(`${title} · 执行中…`);
+        scrollToBottom();
+        return;
+      }
+
+      // 结果：优先改写那张还在跑的回执卡，没有再新开一张
+      let card = proactiveCards.get(title);
+      if (card && card.isConnected) proactiveCards.delete(title);
+      else card = proactiveCard(title, p.kind, 'done');
+
+      setCardState(card, 'done');
+      fillProactiveBubble(card, title, p.text);
+      const foot = card.querySelector('.tcard-foot');
+      if (foot && !foot.querySelector('.msg-actions')) {
+        foot.hidden = false;
+        foot.appendChild(buildActions(p.text, card.querySelector('.bubble'), card));
+      }
       scrollToBottom();
-      setStatus(p.title || '小问提醒');
+      setStatus(title);
+
       if (p.speak) { try { speakText(p.text); } catch (e) { /* ignore */ } }
       // 面板是后来才打开的：靠会话历史补齐，这里只保证当前显示不丢
     });
@@ -2018,12 +2697,140 @@ function renderUpdater(s) {
   if (dl) dl.style.display = s.state === 'available' ? '' : 'none';
 }
 
+// ================== 快捷键录制 ==================
+/**
+ * 把 KeyboardEvent 翻译成 Electron 的 accelerator。
+ * 返回 null 表示这个键不能单独作为快捷键（纯修饰键 / 不支持）。
+ */
+function hkAccelFromEvent(e) {
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+
+  const k = e.key;
+  const NAV = {
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+    Enter: 'Return', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete',
+    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+    Insert: 'Insert', PrintScreen: 'PrintScreen', ' ': 'Space',
+    '+': 'Plus', '-': 'Minus', '=': 'Equal', ',': 'Comma', '.': 'Period',
+    '/': 'Slash', ';': 'Semicolon', "'": 'Quote', '`': 'Backquote',
+    '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash'
+  };
+  const PURE_MOD = ['Control', 'Alt', 'Shift', 'Meta', 'ContextMenu', 'CapsLock', 'OS'];
+
+  let key = null;
+  if (PURE_MOD.includes(k)) return null;
+  if (/^F\d{1,2}$/.test(k)) key = k;
+  else if (Object.prototype.hasOwnProperty.call(NAV, k)) key = NAV[k];
+  else if (k.length === 1) key = k.toUpperCase();
+  if (!key) return null;
+
+  // 字母数字必须带修饰键，否则会把整个键盘抢走
+  const isFn = /^F\d{1,2}$/.test(key);
+  if (!mods.length && !isFn) return null;
+
+  return mods.concat(key).join('+');
+}
+
+/**
+ * 给一个只读输入框装上「录制」能力。
+ * @param {{inputId:string,btnId:string,clearId?:string,label:string,onApply:(v:string)=>Promise<void>|void}} o
+ */
+function setupHotkeyRecorder(o) {
+  const input = $(o.inputId);
+  const btn = $(o.btnId);
+  if (!input || !btn) return;
+  const clearBtn = o.clearId ? $(o.clearId) : null;
+  let recording = false;
+  let saved = input.value;
+
+  const stop = () => {
+    recording = false;
+    input.classList.remove('recording');
+    input.blur();
+    btn.textContent = '录制';
+    if (!input.value) input.value = saved;
+  };
+
+  btn.addEventListener('click', () => {
+    recording = true;
+    saved = input.value;
+    input.classList.add('recording');
+    input.value = '';
+    input.placeholder = '按下组合键…（Esc 取消，Delete 清空）';
+    btn.textContent = '取消';
+    input.focus();
+  });
+
+  input.addEventListener('blur', () => {
+    if (recording) stop();
+  });
+
+  input.addEventListener('keydown', async (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.key === 'Escape') { stop(); return; }
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      input.value = '';
+      stop();
+      await o.onApply('');
+      setToast(`${o.label}快捷键已清空`);
+      return;
+    }
+
+    const accel = hkAccelFromEvent(e);
+    if (!accel) {
+      input.placeholder = '需要至少一个修饰键（Ctrl / Alt / Shift）…';
+      return;
+    }
+
+    // 先问主进程这个键能不能注册，能才落盘
+    let probe = { ok: true };
+    try { probe = await window.xw.captureProbeHotkey(accel); } catch (err) { probe = { ok: true }; }
+    if (probe && probe.ok === false) {
+      input.value = '';
+      input.placeholder = probe.error || '这个组合键用不了';
+      input.classList.add('recording');
+      return;
+    }
+
+    input.value = accel;
+    stop();
+    await o.onApply(accel);
+    setToast(`${o.label}快捷键已设为 ${accel}`);
+  });
+}
+
+/** 显示截图快捷键注册结果（占用 / 非法都会如实说） */
+function renderHotkeyState(st) {
+  const el = $('capHkState');
+  if (!el) return;
+  if (!st) { el.textContent = ''; return; }
+  if (st.enabled === false) {
+    el.innerHTML = '<span class="hk-state-bad">截图快捷键已关闭</span>';
+    return;
+  }
+  const items = st.items || [];
+  if (!items.length) { el.textContent = '快捷键状态：—'; return; }
+  el.innerHTML = items.map((it) => (it.ok
+    ? `<span class="hk-state-ok">✅ ${it.label} ${it.accel}</span>`
+    : `<span class="hk-state-bad">❌ ${it.label}：${it.error}</span>`
+  )).join('　');
+}
+
 // ================== 截图与更新设置 ==================
 function bindCapture() {
   const toggles = {
     capEnabled: 'captureEnabled',
     upEnabled: 'autoUpdate',
     upSilent: 'autoUpdateSilent',
+    upSilentInstall: 'autoUpdateSilentInstall',
+    upIdleInstall: 'autoUpdateInstallWhenIdle',
     upOnQuit: 'autoUpdateInstallOnQuit',
     upPre: 'autoUpdatePrerelease'
   };
@@ -2033,18 +2840,36 @@ function bindCapture() {
     el.addEventListener('change', async () => {
       cfg = await window.xw.setConfig({ [key]: el.checked });
       setToast('已保存');
+      if (id === 'capEnabled') renderHotkeyState(await window.xw.captureHotkeys());
     });
   });
 
-  const texts = { capRegionKey: 'captureRegionHotkey', capFullKey: 'captureFullHotkey', capDir: 'captureDir' };
-  Object.entries(texts).forEach(([id, key]) => {
-    const el = $(id);
-    if (!el) return;
-    el.addEventListener('change', async () => {
-      cfg = await window.xw.setConfig({ [key]: el.value.trim() });
+  // 截图快捷键：不再让主人手打字符串（写错一个空格就静默失效），
+  // 改成「录制」——按下组合键即写入，并立刻回显能不能用。
+  setupHotkeyRecorder({
+    inputId: 'capRegionKey', btnId: 'capRegionRec', clearId: 'capRegionClear',
+    label: '框选截图',
+    onApply: async (v) => {
+      cfg = await window.xw.setConfig({ captureRegionHotkey: v });
+      renderHotkeyState(await window.xw.captureHotkeys());
+    }
+  });
+  setupHotkeyRecorder({
+    inputId: 'capFullKey', btnId: 'capFullRec', clearId: 'capFullClear',
+    label: '整屏截图',
+    onApply: async (v) => {
+      cfg = await window.xw.setConfig({ captureFullHotkey: v });
+      renderHotkeyState(await window.xw.captureHotkeys());
+    }
+  });
+
+  const capDir = $('capDir');
+  if (capDir) {
+    capDir.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ captureDir: capDir.value.trim() });
       setToast('已保存');
     });
-  });
+  }
 
   const after = $('capAfter');
   if (after) {
@@ -2085,8 +2910,11 @@ function fillCapture() {
   set('capDir', cfg.captureDir || '');
   setChk('upEnabled', cfg.autoUpdate !== false);
   setChk('upSilent', cfg.autoUpdateSilent !== false);
+  setChk('upSilentInstall', cfg.autoUpdateSilentInstall !== false);
+  setChk('upIdleInstall', cfg.autoUpdateInstallWhenIdle !== false);
   setChk('upOnQuit', cfg.autoUpdateInstallOnQuit !== false);
   setChk('upPre', cfg.autoUpdatePrerelease === true);
+  window.xw.captureHotkeys().then(renderHotkeyState).catch(() => {});
   bindUpdater();
 }
 
@@ -2122,6 +2950,8 @@ function collectPatch() {
     petSize: Number($('stPetSize').value) || 120,
     petOpacity: Number($('stPetOpacity').value) / 100,
     petTop: $('stPetTop').checked,
+    petKeepTop: $('stPetKeepTop').checked,
+    petSummonHotkey: $('stPetSummonKey').value.trim() || 'CommandOrControl+Alt+P',
     petWalk: $('stPetWalk').checked,
     petInteraction: $('stPetInteraction').checked,
     petAgentLink: $('stPetAgentLink').checked,

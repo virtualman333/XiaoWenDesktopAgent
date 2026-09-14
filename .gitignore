@@ -35,3 +35,7 @@ config.json
 # 模板文件是给新机参考的，必须入库
 !.env.example
 !.env.sample
+
+# ---- 打包/构建临时残留 ----
+vite.config.mjs.timestamp-*.mjs
+build/_*.tmp

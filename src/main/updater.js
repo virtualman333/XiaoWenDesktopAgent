@@ -7,7 +7,7 @@
  *   3) 所有状态通过 updater:event 广播给每个窗口，界面自己决定怎么展示；
  *   4) 下载完成后不强制重启，等主人点「立即安装」或下次启动时生效。
  */
-const { app, ipcMain, BrowserWindow, dialog } = require('electron');
+const { app, ipcMain, BrowserWindow, dialog, powerMonitor } = require('electron');
 
 let autoUpdater = null;
 try {
@@ -19,6 +19,11 @@ const available = !!autoUpdater;
 
 let getConfig = () => ({});
 let bootChecked = false;
+let pendingVersion = '';    // 已下好、等着装的版本
+let idleTimer = null;       // 空闲安装巡检
+let installKicked = false;  // 防止重复触发安装
+let notify = () => {};      // 由 main.js 注入：轻提示（托盘气泡 / 宠物），不打断主人
+function bindNotify(fn) { if (typeof fn === 'function') notify = fn; }
 
 const state = {
   state: 'idle',        // idle | checking | available | downloading | downloaded | error | disabled | unpackaged
@@ -94,26 +99,38 @@ function bindEvents() {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    pendingVersion = (info && info.version) || '';
+    const cfg = getConfig() || {};
+    const silentInstall = cfg.autoUpdateSilentInstall !== false;
     setState({
       state: 'downloaded',
-      message: `v${info && info.version ? info.version : ''} 已下载完成，重启后生效`,
-      version: (info && info.version) || '',
+      message: silentInstall
+        ? `v${pendingVersion} 已就绪，空闲时会自动静默安装`
+        : `v${pendingVersion} 已下载完成，重启后生效`,
+      version: pendingVersion,
       percent: 100
     });
-    // 主人在忙就只弹气泡，不打断；点「立即安装」才重启
-    const cfg = getConfig() || {};
-    if (cfg.autoUpdateNotify !== false) {
+
+    // 静默安装模式下：不弹任何对话框（那是最打断人的东西），只做轻提示。
+    // 安装时机交给「空闲自动安装」或主人主动点 / 退出时。
+    if (silentInstall) {
+      try {
+        notify(`新版本 v${pendingVersion} 已下好，你手头没事的时候我会自动静默装好并重启。`);
+      } catch (e) { /* ignore */ }
+      startIdleWatch();
+    } else if (cfg.autoUpdateNotify !== false) {
+      // 非静默模式：老老实实问一句，主人点「立即」才走带界面的安装
       try {
         dialog.showMessageBox({
           type: 'info',
           title: '小问助手 · 更新就绪',
-          message: `新版本 v${(info && info.version) || ''} 已下载完成`,
+          message: `新版本 v${pendingVersion} 已下载完成`,
           detail: '现在重启安装？重启后会自动回到桌面。',
           buttons: ['立即重启安装', '稍后再说'],
           defaultId: 0,
           cancelId: 1
         }).then((r) => {
-          if (r && r.response === 0) installNow();
+          if (r && r.response === 0) installNow(false);
         }).catch(() => { /* ignore */ });
       } catch (e) { /* ignore */ }
     }
@@ -192,16 +209,53 @@ function downloadNow() {
   return getState();
 }
 
-function installNow() {
+function installNow(silent) {
   if (!configured()) return false;
+  const cfg = getConfig() || {};
+  // silent 默认跟着设置走：静默安装不弹 NSIS 向导，装完 forceRunAfter 自动拉起
+  const isSilent = typeof silent === 'boolean'
+    ? silent
+    : cfg.autoUpdateSilentInstall !== false;
+  if (installKicked) return true;
+  installKicked = true;
   try {
-    // isSilent=false, forceRunAfter=true：装完立刻拉起新版本
-    autoUpdater.quitAndInstall(false, true);
+    log(`开始安装更新（静默=${isSilent}）`);
+    autoUpdater.quitAndInstall(isSilent, true);
     return true;
   } catch (e) {
+    installKicked = false;
     setState({ state: 'error', message: friendlyError(e) });
     return false;
   }
+}
+
+/**
+ * 空闲自动安装：主人在忙的时候（有键鼠输入）绝不重启，
+ * 连续 IDLE_NEED 秒没有输入就静默装好并重启 —— 真正「无感」的升级。
+ */
+const IDLE_NEED = 90;   // 秒
+function startIdleWatch() {
+  if (idleTimer) return;
+  idleTimer = setInterval(() => {
+    const cfg = getConfig() || {};
+    if (cfg.autoUpdateInstallWhenIdle === false) return;
+    if (state.state !== 'downloaded' || installKicked) return;
+    let idle = 0;
+    try { idle = powerMonitor.getSystemIdleTime(); } catch (e) { return; }
+    if (idle >= IDLE_NEED) {
+      log(`已空闲 ${idle}s，静默安装 v${pendingVersion}`);
+      installNow(true);
+    }
+  }, 20000);
+  if (idleTimer.unref) idleTimer.unref();
+}
+
+function stopIdleWatch() {
+  if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+}
+
+function log(m) {
+  try { if (global.__XW_LOG__) global.__XW_LOG__('[更新] ' + m); } catch (e) { /* ignore */ }
 }
 
 function register() {
@@ -210,7 +264,8 @@ function register() {
   ipcMain.handle('updater:state', () => getState());
   ipcMain.handle('updater:check', () => checkManual());
   ipcMain.handle('updater:download', () => downloadNow());
-  ipcMain.handle('updater:install', () => installNow());
+  ipcMain.handle('updater:install', () => installNow(true));
+  ipcMain.handle('updater:install-ui', () => installNow(false));
   ipcMain.handle('updater:open-releases', () => {
     try { require('electron').shell.openExternal('https://github.com/virtualman333/XiaoWenDesktopAgent/releases'); } catch (e) { /* ignore */ }
     return true;
@@ -222,7 +277,10 @@ function bindConfig(fn) { getConfig = fn; }
 module.exports = {
   register,
   bindConfig,
+  bindNotify,
   checkOnBoot,
   getState,
+  installNow,
+  stopIdleWatch,
   isAvailable: () => available
 };

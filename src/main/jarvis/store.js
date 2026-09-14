@@ -233,6 +233,25 @@ function getSession(id) {
   return data.sessions.find((s) => s.id === id) || null;
 }
 
+/**
+ * 会话的滚动摘要（动态上下文用）。
+ * 存在会话对象上，跟着会话走：换会话就换摘要，不会串味。
+ */
+function getSessionSummary(id) {
+  const s = getSession(id);
+  return (s && typeof s.summary === 'string') ? s.summary : '';
+}
+
+function setSessionSummary(id, summary) {
+  const data = getSessions();
+  const s = data.sessions.find((x) => x.id === id);
+  if (!s) return false;
+  s.summary = String(summary || '').slice(0, 4000);
+  s.summaryAt = Date.now();
+  saveSessions(data);
+  return true;
+}
+
 function getActiveSession() {
   const data = getSessions();
   let s = data.sessions.find((x) => x.id === data.activeId);
@@ -358,6 +377,8 @@ module.exports = {
   renameSession,
   deleteSession,
   setActiveSession,
+  getSessionSummary,
+  setSessionSummary,
   // mcp / tools
   getMcpServers,
   saveMcpServers,

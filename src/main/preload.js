@@ -29,7 +29,13 @@ contextBridge.exposeInMainWorld('xw', {
   openPanelVoice: () => ipcRenderer.invoke('win:panel-open-voice'),
   hidePanel: () => ipcRenderer.invoke('win:panel-hide'),
   closePanel: () => ipcRenderer.invoke('win:panel-close'),
-  openSettings: () => ipcRenderer.invoke('win:settings-open'),
+  openSettings: (tab) => ipcRenderer.invoke('win:settings-open', tab || ''),
+  // 设置窗口已开着时，从命令面板再跳一次标签页
+  onSettingsTab: (cb) => {
+    const h = (_e, tab) => cb(tab);
+    ipcRenderer.on('settings:tab', h);
+    return () => ipcRenderer.removeListener('settings:tab', h);
+  },
   closeSettings: () => ipcRenderer.invoke('win:settings-close'),
 
   // ---- 悬浮球 ----
@@ -120,6 +126,7 @@ contextBridge.exposeInMainWorld('xw', {
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterDownload: () => ipcRenderer.invoke('updater:download'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
+  updaterInstallUI: () => ipcRenderer.invoke('updater:install-ui'),
   updaterOpenReleases: () => ipcRenderer.invoke('updater:open-releases'),
   onUpdaterEvent: (cb) => {
     const h = (_e, p) => cb(p);
@@ -157,6 +164,17 @@ contextBridge.exposeInMainWorld('xw', {
   petRescue: () => ipcRenderer.invoke('pet:rescue'),
   petReload: () => ipcRenderer.invoke('pet:reload'),
   petDiag: () => ipcRenderer.invoke('pet:diag'),
+  // 宠物被别的置顶窗口（会议共享 / 全屏播放器）压住时：召唤到鼠标处 / 重夺最上层 / 硬重建
+  petSummon: () => ipcRenderer.invoke('pet:summon-out'),
+  petTop: () => ipcRenderer.invoke('pet:top-out'),
+  petHardRecover: () => ipcRenderer.invoke('pet:hard-recover-out'),
+  petHealth: () => ipcRenderer.invoke('pet:health'),
+  petSummonHotkeyGet: () => ipcRenderer.invoke('pet:summon-hotkey-get'),
+  petSummonHotkeySet: (a) => ipcRenderer.invoke('pet:summon-hotkey-set', a),
+  // 截图快捷键：状态 / 试按键 / 应用
+  captureHotkeys: () => ipcRenderer.invoke('capture:hotkeys'),
+  captureProbeHotkey: (a) => ipcRenderer.invoke('capture:probe-hotkey', a),
+  captureSetHotkeys: (p) => ipcRenderer.invoke('capture:set-hotkeys', p),
   // 托盘：右下角图标看不见时用的自检与重建
   trayDiag: () => ipcRenderer.invoke('tray:diag'),
   trayReload: () => ipcRenderer.invoke('tray:reload'),
@@ -187,6 +205,7 @@ contextBridge.exposeInMainWorld('xw', {
   // 长期记忆
   memoryList: () => ipcRenderer.invoke('memory:list'),
   memoryAdd: (m) => ipcRenderer.invoke('memory:add', m),
+  clipboardRead: () => ipcRenderer.invoke('clip:read'),
   memoryRemove: (id) => ipcRenderer.invoke('memory:remove', id),
   memoryClear: () => ipcRenderer.invoke('memory:clear'),
   memorySearch: (q) => ipcRenderer.invoke('memory:search', q),
@@ -280,6 +299,19 @@ contextBridge.exposeInMainWorld('xw', {
   scheduleRemove: (id) => ipcRenderer.invoke('schedule:remove', id),
   scheduleRun: (id) => ipcRenderer.invoke('schedule:run', id),
   scheduleStatus: () => ipcRenderer.invoke('schedule:status'),
+  // 定时任务的开始 / 结束事件（异步执行，界面实时更新）
+  onScheduleEvent: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('schedule:event', h);
+    return () => ipcRenderer.removeListener('schedule:event', h);
+  },
+
+  // 本轮上下文的用量/压缩情况（面板上的「上下文」环）
+  onContext: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('chat:context', h);
+    return () => ipcRenderer.removeListener('chat:context', h);
+  },
 
   // ================= 主动关注 =================
   watchStatus: () => ipcRenderer.invoke('watch:status'),

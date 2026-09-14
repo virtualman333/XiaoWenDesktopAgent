@@ -22,6 +22,7 @@ const DRIFT_TOLERANCE = 24;   // 宽/高偏离超过这么多像素才算「跑�
 const FIX_COOLDOWN = 30000;   // 两次纠正之间的最小间隔，别和系统抢
 const TRIM_COOLDOWN = 8000;   // 热路径纠偏的最小间隔
 const TRIM_LOG_LIMIT = 8;     // 热路径日志最多记这么多条，避免刷屏
+const TOP_RESYNC_MS = 30000;  // 重夺「最上层」的间隔（见 resyncTop 注释）
 
 /**
  * 改窗口尺寸。
@@ -81,6 +82,58 @@ function moveWindow(x, y) {
     log('移动宠物失败: ' + ((e && e.message) || e));
     return false;
   }
+}
+
+// ---------- 最上层（z 序）维护 ----------
+/**
+ * 把宠物窗口重新顶到「置顶窗口组」的最上面。
+ *
+ * 为什么需要它：`alwaysOnTop: true` 只保证窗口属于**置顶组**，不保证组内次序。
+ * Windows 上同组窗口按「谁最后被激活/创建」排前后 —— 于是任何后出现的置顶窗口
+ * （会议共享视图、全屏播放器、悬浮歌词、下载悬浮窗…）都会把宠物压在下面，
+ * 而且它自己不会回来。实测：宠物窗口 WS_EX_TOPMOST / WS_VISIBLE 全都正常、
+ * getSize/getPosition 也对，用 desktopCapturer 抓屏却完全看不到它 ——
+ * 用户看到的现象就是「桌面宠物没显示」，并且怎么重启都没用（只要那个窗口还在）。
+ *
+ * `moveTop()` 对应 SetWindowPos(HWND_TOP)，能把窗口移到置顶组最前。
+ */
+function resyncTop(reason = '') {
+  if (!petWin || petWin.isDestroyed()) return false;
+  const c = cfg();
+  if (c.petTop === false) return false;       // 主人自己关了置顶，就别抢
+  if (c.petKeepTop === false && reason === 'timer') return false; // 只关了周期重夺
+  try {
+    // 'screen-saver' 是 macOS 上的级别；Windows 忽略该参数但会置 HWND_TOPMOST
+    petWin.setAlwaysOnTop(true, 'screen-saver');
+    petWin.moveTop();
+    return true;
+  } catch (e) {
+    log('重夺最上层失败: ' + ((e && e.message) || e));
+    return false;
+  }
+}
+
+let lastResyncAt = 0;
+/** 周期重夺最上层（有冷却，避免短时间内反复调用） */
+function tickTop() {
+  if (!petWin || petWin.isDestroyed()) return false;
+  if (Date.now() - lastResyncAt < TOP_RESYNC_MS - 500) return false;
+  lastResyncAt = Date.now();
+  return resyncTop('timer');
+}
+
+/**
+ * 硬恢复：销毁窗口重建。
+ *
+ * `show()` 只能让「窗口还在、只是被藏起来」的情况恢复；如果窗口表面本身坏了
+ * （透明 + 软件渲染的窗口在休眠唤醒 / 切换显示器 / 会话解锁后，偶发出现
+ * 「API 说可见、屏幕上却没有」的坏表面），只有重建才治得好。
+ */
+function hardRecover(reason = '') {
+  log(`宠物硬恢复（${reason || '未知'}）`);
+  closePetWindow();
+  createPetWindow();
+  return true;
 }
 
 // ---------- 状态文件 ----------
@@ -172,7 +225,7 @@ function createPetWindow() {
     }
   });
 
-  petWin.setAlwaysOnTop(cfg().petTop !== false, 'floating');
+  petWin.setAlwaysOnTop(cfg().petTop !== false, 'screen-saver');
   try {
     petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   } catch (e) { /* ignore */ }
@@ -213,7 +266,7 @@ function revealPet(reason = '') {
       log(`宠物体型修正 ${w}x${h} → ${PET_W}x${want}（${reason}）`);
       applySize(want);
     }
-    petWin.setAlwaysOnTop(cfg().petTop !== false, 'floating');
+    petWin.setAlwaysOnTop(cfg().petTop !== false, 'screen-saver');
   } catch (e) { /* ignore */ }
 
   try {
@@ -222,6 +275,10 @@ function revealPet(reason = '') {
     log('宠物显示失败: ' + ((e && e.message) || e));
     return false;
   }
+
+  // 刚显示出来的窗口会被排到置顶组末尾 —— 顺手顶到最前面，
+  // 否则上面只要压着一个会议/播放器窗口，宠物就白显示了。
+  resyncTop(reason || 'reveal');
 
   // 万一原点跑到屏幕外（多屏切换 / 分辨率变化），拉回来
   try {
@@ -281,6 +338,16 @@ function diag() {
   }
   const [w, h] = petWin.getSize();
   const [x, y] = petWin.getPosition();
+  let onScreen = false;
+  try {
+    // 只要和**任意**一块屏幕的可见区域有交集就算在屏幕上（多屏时主屏判断会误报）
+    onScreen = screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      return x + w > a.x && x < a.x + a.width && y + h > a.y && y < a.y + a.height;
+    });
+  } catch (e) { /* ignore */ }
+  let top = null;
+  try { top = petWin.isAlwaysOnTop(); } catch (e) { /* ignore */ }
   return {
     exists: true,
     enabled: c.petEnabled !== false,
@@ -288,8 +355,41 @@ function diag() {
     size: [w, h],
     pos: [x, y],
     expectedHeight: petHeight(),
-    opacity: petWin.getOpacity()
+    opacity: petWin.getOpacity(),
+    alwaysOnTop: top,
+    onScreen
   };
+}
+
+/**
+ * 召唤：把宠物挪到鼠标所在的屏幕上并顶到最前。
+ * 主人找不到宠物时（托盘菜单 / 快捷键 / 设置页）都走这里。
+ */
+function summon() {
+  let target = null;
+  try {
+    const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    target = d && d.workArea ? d.workArea : null;
+  } catch (e) { /* ignore */ }
+  if (!target) return rescue();
+
+  if (!petWin || petWin.isDestroyed()) {
+    createPetWindow();
+    return true;
+  }
+  try {
+    const h = petHeight();
+    applySize(h);
+    moveWindow(
+      Math.round(target.x + target.width - PET_W - 60),
+      Math.round(target.y + target.height - h - 6)
+    );
+  } catch (e) { /* ignore */ }
+  lastResyncAt = 0;
+  const ok = revealPet('summon');
+  resyncTop('summon');
+  try { petSay('我在这儿～'); } catch (e) { /* ignore */ }
+  return ok;
 }
 
 let lastFixAt = 0;
@@ -305,15 +405,39 @@ let fixIneffective = false;   // 纠正过但 setSize 被系统忽略 —— 记
  * 只在真的有问题时才动手（默认 60s 一次，偏差 > 24px 且过了冷却），
  * 并且如果一次 setSize 没生效就直接放弃，避免和系统互相刷尺寸。
  */
+let invisibleStreak = 0;
+
 function selfCheck() {
-  if (!petWin || petWin.isDestroyed()) return { ok: true, fixed: '', exists: false };
+  if (!petWin || petWin.isDestroyed()) {
+    // 窗口整个没了（被系统回收 / 渲染进程崩了），直接重建
+    invisibleStreak++;
+    if (invisibleStreak >= 2 && cfg().petEnabled !== false) {
+      invisibleStreak = 0;
+      hardRecover('窗口不存在');
+      return { ok: true, fixed: '窗口不存在 → 已重建', diag: diag() };
+    }
+    return { ok: true, fixed: '', exists: false };
+  }
 
   const d = diag();
-  if (d.enabled === false) return { ok: true, fixed: '', diag: d };
+  if (d.enabled === false) { invisibleStreak = 0; return { ok: true, fixed: '', diag: d }; }
+
   if (!d.visible) {
+    invisibleStreak++;
+    // 第一次先温和唤起；连续两次都不可见，说明窗口表面坏了，直接重建
+    if (invisibleStreak >= 2) {
+      invisibleStreak = 0;
+      hardRecover('连续两次不可见');
+      return { ok: true, fixed: '连续两次不可见 → 已重建窗口', diag: diag() };
+    }
     revealPet('self-check');
     return { ok: true, fixed: '不可见 → 已唤出', diag: diag() };
   }
+  invisibleStreak = 0;
+
+  // 在屏幕上但可能被别的置顶窗口压住 —— 无从探测，只能周期性重夺
+  tickTop();
+
   if (fixIneffective) return { ok: true, fixed: '', diag: d };
 
   const drift = Math.max(Math.abs(d.size[0] - PET_W), Math.abs(d.size[1] - d.expectedHeight));
@@ -411,6 +535,8 @@ function togglePet() {
 function petAct(action, opts = {}) {
   if (!action) return false;
   if (!petWin || petWin.isDestroyed()) return false;
+  // 要说要给主人看的时候，顺手保证它真的在最上层 —— 不然演得再热闹也看不见
+  resyncTop('act');
   try {
     petWin.webContents.send('pet:act', {
       action: String(action),
@@ -428,6 +554,7 @@ function petAct(action, opts = {}) {
 function petSay(text) {
   if (!text) return;
   if (!petWin || petWin.isDestroyed()) return;
+  resyncTop('say');
   try {
     petWin.webContents.send('pet:say', String(text));
   } catch (e) { /* ignore */ }
@@ -525,6 +652,9 @@ function registerPetIpc() {
   ipcMain.handle('pet:rescue', () => rescue());
   ipcMain.handle('pet:reload', () => reloadPet());
   ipcMain.handle('pet:diag', () => diag());
+  ipcMain.handle('pet:summon', () => summon());
+  ipcMain.handle('pet:hard-recover', () => hardRecover('手动'));
+  ipcMain.handle('pet:top', () => resyncTop('手动'));
 
   ipcMain.handle('pet:set-opacity', (_e, val) => {
     if (!petWin || petWin.isDestroyed()) return false;
@@ -535,7 +665,8 @@ function registerPetIpc() {
 
   ipcMain.handle('pet:set-top', (_e, on) => {
     if (!petWin || petWin.isDestroyed()) return false;
-    petWin.setAlwaysOnTop(!!on, 'floating');
+    petWin.setAlwaysOnTop(!!on, 'screen-saver');
+    if (on) resyncTop('手动置顶');
     return true;
   });
 
@@ -584,6 +715,8 @@ function applyConfig(c) {
   }
 }
 
+let topTimer = null;
+
 function init(opts = {}) {
   api = {
     loadRenderer: opts.loadRenderer,
@@ -596,6 +729,12 @@ function init(opts = {}) {
   // 启动时按配置决定是否出现
   const c = cfg();
   if (c.petEnabled !== false) createPetWindow();
+
+  // 周期性重夺最上层：任何后出现的置顶窗口都会把宠物压到下面，自己不回来
+  if (!topTimer) {
+    topTimer = setInterval(() => { try { tickTop(); } catch (e) { /* ignore */ } }, TOP_RESYNC_MS);
+    if (topTimer.unref) topTimer.unref();
+  }
   return { createPetWindow };
 }
 
@@ -609,7 +748,10 @@ module.exports = {
   togglePet,
   revealPet,
   rescue,
+  summon,
   reloadPet,
+  hardRecover,
+  resyncTop,
   diag,
   selfCheck,
   moveWindow,

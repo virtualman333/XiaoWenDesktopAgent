@@ -85,17 +85,20 @@
       </div>
     </div>
 
-    <!-- 消息区 -->
+    <!-- 消息区（工作台：一张卡 = 一件事） -->
     <main class="messages" id="messages">
       <div class="welcome" id="welcome">
         <div class="welcome-logo">问</div>
-        <h2 id="welcomeTitle">你好，我是小问</h2>
-        <p id="welcomeDesc">随时问我任何问题。点击右下角悬浮球或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 语音提问。</p>
+        <h2 id="welcomeTitle">今天想做点什么？</h2>
+        <p id="welcomeDesc">说一句话就行。小问会自己判断该查资料、动你的电脑、还是排个定时任务，<br>然后在这儿留一张「事情卡」——不是聊天记录，是干完的痕迹。</p>
         <div class="quick-asks">
           <button class="quick" data-q="现在几点了？顺便看看电脑内存还剩多少">现在几点 / 内存剩多少</button>
           <button class="quick" data-q="帮我看看用户目录下有哪些文件夹">看看我的用户目录</button>
           <button class="quick" data-q="截个屏，保存到用户目录">截个屏</button>
-          <button class="quick" data-q="记住：我喜欢简洁直接的回答">记住一件事</button>
+          <button class="quick" data-q="每天早上 8:30 给我播一下天气和今天要关注的事">排个每日早报</button>
+        </div>
+        <div class="welcome-tips">
+          提示：按 <kbd>Ctrl</kbd>+<kbd>K</kbd> 打开命令面板 · 输入 <kbd>/</kbd> 看所有能力 · 描述里带「每天 / 提醒 / 记一下」小问会自动帮你排好
         </div>
       </div>
     </main>
@@ -113,8 +116,23 @@
     <!-- 输入区 -->
     <footer class="composer">
       <div class="attach-bar" id="attachBar" style="display:none"></div>
+      <!-- 意图预览：还没发出去，小问就告诉你它打算怎么干 -->
+      <div class="intent-bar" id="intentBar" hidden>
+        <span class="intent-ico" id="intentIco">✦</span>
+        <span class="intent-text" id="intentText"></span>
+        <button class="intent-go" id="intentGo" hidden>就这么办</button>
+      </div>
       <div class="composer-inner">
-        <textarea id="input" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <textarea id="input" rows="1" placeholder="想做点什么？Enter 发送 · Ctrl+K 命令面板 · / 看能力"></textarea>
+        <button class="icon-btn" id="btnCtx" title="上下文用量">
+          <svg viewBox="0 0 36 36" width="20" height="20">
+            <circle cx="18" cy="18" r="15" fill="none" stroke="currentColor" stroke-opacity="0.18" stroke-width="4"/>
+            <circle id="ctxRing" cx="18" cy="18" r="15" fill="none" stroke="currentColor" stroke-width="4"
+                    stroke-dasharray="94.2" stroke-dashoffset="94.2" stroke-linecap="round"
+                    transform="rotate(-90 18 18)"/>
+          </svg>
+          <span class="ctx-badge" id="ctxBadge" hidden>压</span>
+        </button>
         <button class="icon-btn" id="btnShot" title="截图提问（Alt+Shift+A）">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
@@ -137,6 +155,45 @@
         </label>
       </div>
     </footer>
+
+    <!-- 命令面板（Ctrl+K）：不是输入框的替代品，是「能力入口」 -->
+    <div class="palette-mask" id="paletteMask">
+      <div class="palette" id="palette">
+        <input type="text" id="paletteInput" placeholder="搜索命令 / 会话 / 技能…（↑↓ 选择，Enter 执行，Esc 关闭）" autocomplete="off" />
+        <div class="palette-list" id="paletteList"></div>
+        <div class="palette-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+          <span><kbd>Enter</kbd> 执行</span>
+          <span><kbd>Esc</kbd> 关闭</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 快捷定时：把卡片上的结论变成长期动作 -->
+    <div class="qs-mask" id="qsMask">
+      <div class="qs-card">
+        <div class="qs-head">把这件事排成定时任务</div>
+        <div class="qs-body">
+          <label>任务名</label>
+          <input type="text" id="qsTitle" placeholder="例如：每日早报" />
+          <label>多久做一次</label>
+          <input type="text" id="qsWhen" placeholder="每天 08:30 / 每周一 09:00 / 每 2 小时 / 2026-09-20 09:00" />
+          <div class="qs-chips">
+            <button type="button" data-when="每天 09:00">每天 09:00</button>
+            <button type="button" data-when="每周一 09:00">每周一 09:00</button>
+            <button type="button" data-when="每 2 小时">每 2 小时</button>
+            <button type="button" data-when="每天 18:00">每天 18:00</button>
+          </div>
+          <label>到点做什么（小问会照这句去干）</label>
+          <textarea id="qsPrompt" rows="3"></textarea>
+          <div class="qs-hint" id="qsHint"></div>
+        </div>
+        <div class="qs-foot">
+          <button class="btn-ghost" id="qsCancel">取消</button>
+          <button class="btn-primary" id="qsOk">创建</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ========== 设置界面 ========== -->
@@ -597,12 +654,21 @@
           </div>
           <div class="field row">
             <label>框选截图快捷键</label>
-            <input type="text" id="capRegionKey" placeholder="Alt+Shift+A" />
+            <div class="hk-row">
+              <input type="text" id="capRegionKey" placeholder="Alt+Shift+A" readonly />
+              <button class="btn-mini" id="capRegionRec">录制</button>
+              <button class="btn-mini" id="capRegionClear">清空</button>
+            </div>
           </div>
           <div class="field row">
             <label>整屏截图快捷键</label>
-            <input type="text" id="capFullKey" placeholder="Alt+Shift+S" />
+            <div class="hk-row">
+              <input type="text" id="capFullKey" placeholder="Alt+Shift+S" readonly />
+              <button class="btn-mini" id="capFullRec">录制</button>
+              <button class="btn-mini" id="capFullClear">清空</button>
+            </div>
           </div>
+          <div class="hint" id="capHkState"></div>
           <div class="field">
             <label>截完之后</label>
             <select id="capAfter">
@@ -623,7 +689,8 @@
 
           <h3>自动更新</h3>
           <div class="hint">
-            每次启动静默检查一次 GitHub Releases，有新版本后台下好，下完问你要不要重启安装，不打断你手上的事。
+            每次启动静默检查一次 GitHub Releases，有新版本后台下好。<b>静默安装</b>不会弹安装向导，
+            装完自动回到桌面；不开的话会弹一个安装界面让你点下一步。
           </div>
           <div class="field row">
             <label><b>启动时检查更新</b></label>
@@ -632,6 +699,14 @@
           <div class="field row">
             <label>后台自动下载</label>
             <label class="switch"><input type="checkbox" id="upSilent" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label><b>静默安装</b>（不弹安装向导）</label>
+            <label class="switch"><input type="checkbox" id="upSilentInstall" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>你在忙就先不动，空闲时自动装好重启</label>
+            <label class="switch"><input type="checkbox" id="upIdleInstall" /><span></span></label>
           </div>
           <div class="field row">
             <label>退出时自动应用更新</label>
@@ -647,7 +722,7 @@
             <div class="up-actions">
               <button class="btn-ghost" id="upCheck">检查更新</button>
               <button class="btn-ghost" id="upDownload">下载</button>
-              <button class="btn-primary" id="upInstall" style="display:none">立即安装并重启</button>
+              <button class="btn-primary" id="upInstall" style="display:none">立即静默安装并重启</button>
               <button class="btn-ghost" id="upReleases">发布页</button>
             </div>
           </div>
@@ -680,6 +755,18 @@
             <label class="switch"><input type="checkbox" id="stPetTop" /><span></span></label>
           </div>
           <div class="field row">
+            <label><b>始终最上层</b>
+              <span class="hint-inline">每 30 秒重新顶一次，压得住会议共享 / 全屏播放器</span></label>
+            <label class="switch"><input type="checkbox" id="stPetKeepTop" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>召唤宠物快捷键</label>
+            <div class="hk-row">
+              <input type="text" id="stPetSummonKey" placeholder="Ctrl+Alt+P" readonly />
+              <button class="btn-mini" id="stPetSummonRec">录制</button>
+            </div>
+          </div>
+          <div class="field row">
             <label>自动散步</label>
             <label class="switch"><input type="checkbox" id="stPetWalk" /><span></span></label>
           </div>
@@ -703,10 +790,19 @@
           <div class="pet-actions">
             <button class="btn-ghost" id="stPetToggle">显示 / 隐藏</button>
             <button class="btn-ghost" id="stPetRescue">📍 叫回主屏</button>
+            <button class="btn-ghost" id="stPetSummon">🎯 召唤到鼠标处</button>
+            <button class="btn-ghost" id="stPetTopNow">⬆️ 重新顶到最上层</button>
+            <button class="btn-ghost" id="stPetRebuild">🔧 重建窗口</button>
             <button class="btn-ghost" id="stPetFeed">🍖 喂一口</button>
             <button class="btn-ghost" id="stPetReset">重置成长数据</button>
           </div>
           <div class="hint" id="stPetDiag">宠物窗口状态：—</div>
+          <div class="hint" id="stPetHealth"></div>
+          <div class="hint">
+            <b>看不见宠物？</b>先看上面这行体检结论。最常见的原因是它被别的<b>置顶窗口</b>
+            （会议共享视图、全屏播放器、悬浮歌词…）压住了——窗口本身完全正常，
+            只是不在最前面。打开「始终最上层」或点一下「重新顶到最上层」就能抢回来。
+          </div>
         </section>
 
         <!-- ---------- 定时任务 ---------- -->

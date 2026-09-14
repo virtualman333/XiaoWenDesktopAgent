@@ -12,6 +12,7 @@
 const tools = require('./tools');
 const skills = require('./skills');
 const store = require('./store');
+const ctx = require('./context');
 
 let mcpManager = null;
 function bindMcp(m) { mcpManager = m; }
@@ -272,7 +273,47 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   }
 
   const history = sanitizeMessages(messages);
-  const convo = [systemMsg, ...history.filter((m) => m.role !== 'system')];
+  const historyNoSys = history.filter((m) => m.role !== 'system');
+
+  // ---- 动态上下文：按模型窗口算预算，超了就地压缩（同步，必然兜住） ----
+  const budget = Math.max(
+    1024,
+    (Number(cfg.ctxWindow) || 128000)
+      - (Number(cfg.ctxReplyReserve) || 8000)
+      - ctx.msgTokens(systemMsg)
+  );
+  let priorSummary = '';
+  if (opts.useMemory !== false && opts.sessionId) {
+    try { priorSummary = store.getSessionSummary(opts.sessionId) || ''; } catch (e) { /* ignore */ }
+  }
+
+  let cres;
+  if (cfg.ctxAutoCompress === false) {
+    cres = { messages: historyNoSys, stats: { beforeTokens: ctx.totalTokens(historyNoSys), budget, compressed: false } };
+  } else {
+    cres = ctx.compress({
+      messages: historyNoSys,
+      budget,
+      keepTurns: Number(cfg.ctxKeepTurns) || 8,
+      toolOutputMax: Number(cfg.ctxToolOutputMax) || 1200,
+      priorSummary
+    });
+  }
+  lastContextStats = { ...cres.stats, budget, at: Date.now() };
+
+  const convo = [systemMsg, ...cres.messages];
+
+  // 把上下文用量推给界面（面板上的「上下文」环就靠它）
+  if (opts.quiet !== true) {
+    try {
+      sender && !sender.isDestroyed() && sender.send('chat:context', lastContextStats);
+    } catch (e) { /* ignore */ }
+  }
+
+  // 机械压缩已经发生 → 顺手让模型把纪要重写成更精炼的摘要（异步，不阻塞本轮）
+  if (ctx.shouldSummarize(cres.stats) && opts.sessionId && opts.useMemory !== false) {
+    summarizeLater({ cfg, sessionId: opts.sessionId, priorSummary, stats: cres.stats });
+  }
 
   let fullText = '';
   let rounds = 0;
@@ -344,4 +385,53 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   }
 }
 
-module.exports = { runAgent, bindMcp, resolveConfirm, abortCurrent };
+// ---------------- 会话摘要（异步、后台） ----------------
+let lastContextStats = { beforeTokens: 0, afterTokens: 0, budget: 0, compressed: false, at: 0 };
+const summarizing = new Set();      // 正在重写摘要的 sessionId
+const summaryCooldown = new Map();  // sessionId -> 上次摘要时间
+
+/** 上一次请求的上下文用量（面板 / 诊断用） */
+function getContextStats() { return { ...lastContextStats }; }
+
+/**
+ * 后台把「被裁掉的纪要」交给模型重写成更精炼的摘要，存回会话。
+ *
+ * 注意是 fire-and-forget：失败、超时、没配模型都直接放弃，
+ * 绝不能影响主人这一轮的对话 —— 机械压缩已经把上下文兜住了。
+ */
+function summarizeLater({ cfg, sessionId, priorSummary, stats }) {
+  try {
+    if (!sessionId || summarizing.has(sessionId)) return;
+    // 同一会话 3 分钟内最多重写一次，别把额度烧在摘要上
+    const last = summaryCooldown.get(sessionId) || 0;
+    if (Date.now() - last < 3 * 60000) return;
+    const digest = String((stats && stats.digestText) || '').trim();
+    if (!digest) return;
+    if (!priorSummary && digest.length < 200) return;   // 太短不值得花一次请求
+
+    summarizing.add(sessionId);
+    summaryCooldown.set(sessionId, Date.now());
+
+    const llm = require('../llm');
+    const prompt = ctx.buildSummaryPrompt({ priorSummary, digestText: digest, maxChars: 800 });
+    llm.collectChat({
+      baseUrl: cfg.apiBaseUrl,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      maxTokens: 1200,
+      timeoutMs: 45000
+    }).then((r) => {
+      if (r && r.ok && r.text && r.text.trim()) {
+        store.setSessionSummary(sessionId, r.text.trim());
+        try { if (global.__XW_LOG__) global.__XW_LOG__('[上下文] 已重写会话摘要，' + r.text.trim().length + ' 字'); } catch (e) { /* ignore */ }
+      }
+    }).catch(() => { /* 摘要失败无所谓 */ })
+      .finally(() => summarizing.delete(sessionId));
+  } catch (e) {
+    try { summarizing.delete(sessionId); } catch (e2) { /* ignore */ }
+  }
+}
+
+module.exports = { runAgent, bindMcp, resolveConfirm, abortCurrent, getContextStats };

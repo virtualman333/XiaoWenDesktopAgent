@@ -283,7 +283,8 @@ function registerAll() {
   ipcMain.handle('schedule:add-preset', (_e, key) => schedule.addPreset(key));
   ipcMain.handle('schedule:update', (_e, { id, patch } = {}) => schedule.update(id, patch || {}));
   ipcMain.handle('schedule:remove', (_e, id) => schedule.remove(id));
-  ipcMain.handle('schedule:run', (_e, id) => schedule.runNow(id));
+  // 「跑一次」不阻塞界面：踢一脚就返回，进度和结果走 schedule:event 推送
+  ipcMain.handle('schedule:run', (_e, id) => schedule.kick(id));
   ipcMain.handle('schedule:status', () => schedule.status());
 
   // ---------------- 主动关注 ----------------
@@ -357,12 +358,22 @@ async function connectOne(cfg) {
   return c;
 }
 
+/** 定时任务的开始 / 结束事件：广播给所有窗口，让界面上的卡片能实时更新 */
+function scheduleEvent(payload) {
+  try {
+    const { BrowserWindow } = require('electron');
+    for (const w of BrowserWindow.getAllWindows()) {
+      try { if (!w.isDestroyed()) w.webContents.send('schedule:event', payload); } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
+}
+
 async function boot() {
   // 首次运行写入示例技能
   try { await skills.ensureSample(); } catch (e) { /* ignore */ }
   // 定时任务 / 主动关注
   try {
-    schedule.bind({ getConfig, log: jlog, deliver });
+    schedule.bind({ getConfig, log: jlog, deliver, event: scheduleEvent });
     watch.bind({ getConfig, log: jlog, deliver });
     schedule.start();
     watch.start();

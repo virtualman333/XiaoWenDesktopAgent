@@ -17,16 +17,17 @@ const MAX_LOG = 60;
 let api = {
   getConfig: () => ({}),
   log: () => {},
-  deliver: () => {}
+  deliver: () => {},
+  event: () => {}
 };
 
 let timer = null;
-const running = new Set(); // 正在执行的任务 id，防重入
 
 function bind(opts = {}) {
   if (opts.getConfig) api.getConfig = opts.getConfig;
   if (opts.log) api.log = opts.log;
   if (opts.deliver) api.deliver = opts.deliver;
+  if (opts.event) api.event = opts.event;
 }
 
 function cfg() { return api.getConfig() || {}; }
@@ -127,25 +128,146 @@ function get(id) {
 
 // ---------------- 执行 ----------------
 
-/** 真正跑一个任务：让 Agent 干活 → 把结论播报出去 */
-async function runTask(task, opts = {}) {
-  if (!task) return { ok: false, error: '任务不存在' };
-  if (running.has(task.id)) return { ok: false, error: '这个任务正在执行中' };
+/**
+ * 执行模型：**先回执，再干活**。
+ *
+ * 以前是「await 跑完整轮 Agent → 再把结果播报出去」—— 主人的体感是
+ * 「点了没反应，几十秒后突然蹦出一条」。而 Agent 跑一轮本来就慢（要调工具、
+ * 甚至要联网），把它当成同步操作是设计错误。
+ *
+ * 现在拆成两段：
+ *   1) 立刻回执：宠物进入「干活」状态 + 面板一条轻提示「收到，去办了」；
+ *   2) 后台异步执行，跑完再把结论投递出去（kind=schedule，phase=done）。
+ * 同时并发跑多个任务（限流），tick 也不再串行等待。
+ */
 
-  const c = cfg();
-  if (!c.apiKey || !c.model) {
-    log(`跳过「${task.title}」：还没配置大模型`);
-    return { ok: false, error: '还没配置大模型接口' };
+let active = 0;
+const queue = [];                 // 排队中的 {task, opts}
+const runningSince = new Map();   // taskId -> 开始时间
+const ackTimers = new Map();      // taskId -> 「还在办」回执的定时器
+const ACK_MIN_MS = 6000;          // 超过这个时长还没跑完，才补一句「收到，这就去办」
+const SLOW_HINT_MS = 45000;       // 超过这个时长再补一句「还在办」
+
+function maxConcurrency() {
+  const n = Number(cfg().schedConcurrency);
+  return Math.max(1, Math.min(4, Number.isFinite(n) && n > 0 ? n : 2));
+}
+
+function emit(payload) {
+  try { if (typeof api.event === 'function') api.event(payload); } catch (e) { /* ignore */ }
+}
+
+/**
+ * 「已经开跑了」这个信号是立刻发的 —— 但它只走事件总线（面板秒变运行中），
+ * 不走通知。真正的「收到，我去办」回执会晚 ACK_MIN_MS 再补：
+ * 跑得快的任务一句结论就够了，免得「收到」和「结果」两条横幅连着弹。
+ */
+function emitStart(task, opts = {}) {
+  emit({ type: 'start', id: task.id, title: task.title, manual: !!opts.manual });
+}
+
+/** 回执：让主人知道「还在办」，而不是干等 */
+function deliverAck(task, opts = {}) {
+  const brief = String(task.prompt || '').replace(/\s+/g, ' ').slice(0, 50);
+  try {
+    api.deliver({
+      kind: 'schedule',
+      phase: 'ack',
+      title: `⏰ ${task.title}`,
+      text: opts.manual ? `收到，这就去办。（${brief}…）` : `到点了，我去办「${task.title}」。`,
+      open: false,          // 回执绝不弹面板，只做轻提示
+      speak: false,
+      pet: cfg().watchPet !== false
+    });
+  } catch (e) { /* ignore */ }
+}
+
+/** 延迟回执：跑满 ACK_MIN_MS 还没结束才发；跑完了就取消（结论一条到位） */
+function armAck(task, opts) {
+  clearAck(task.id);
+  const timer = setTimeout(() => {
+    ackTimers.delete(task.id);
+    if (!runningSince.has(task.id)) return;   // 已经干完了：结果已经/即将投递，不再补回执
+    deliverAck(task, { ...opts, manual: !!opts.manual });
+  }, ACK_MIN_MS);
+  if (timer.unref) timer.unref();
+  ackTimers.set(task.id, timer);
+}
+
+function clearAck(taskId) {
+  const t = ackTimers.get(taskId);
+  if (t) { clearTimeout(t); ackTimers.delete(taskId); }
+}
+
+/** 干完活之后把结论投递出去 */
+function finish(task, opts, { ok, text, startedAt, queued }) {
+  const now = Date.now();
+  const d = load();
+  const t = d.tasks.find((x) => x.id === task.id);
+  if (t) {
+    t.lastRunAt = now;
+    t.runCount = (t.runCount || 0) + 1;
+    t.lastResult = String(text || '').slice(0, 800);
+    t.lastOk = ok;
+    t.lastMs = now - startedAt;
+    if (t.when && t.when.type === 'once') {
+      t.enabled = false;      // 一次性任务执行完就退休
+      t.nextAt = 0;
+    } else {
+      t.nextAt = t.enabled ? T.computeNext(t.when, now, now) : 0;
+    }
+    // adhoc（临时任务）不在库里，找不到是正常的
+  }
+  d.log.push({
+    id: task.id, title: task.title, at: now, ok,
+    text: String(text || '').slice(0, 400),
+    manual: !!opts.manual, queued: !!queued
+  });
+  save(d);
+
+  const ms = now - startedAt;
+  log(`「${task.title}」执行${ok ? '完成' : '失败'}，用时 ${Math.round(ms / 1000)}s`);
+
+  // 结论一定要给到（回执只是「我在办」，不能替掉结果）
+  if (text) {
+    try {
+      api.deliver({
+        kind: 'schedule',
+        phase: 'done',
+        title: `⏰ ${task.title}`,
+        text,
+        open: opts.manual ? true : task.wake !== false,
+        speak: task.wake !== false && cfg().watchSpeak === true,
+        pet: cfg().watchPet !== false,
+        ms
+      });
+    } catch (e) { /* 播报失败不影响任务本身 */ }
   }
 
-  running.add(task.id);
-  const started = Date.now();
+  emit({ type: 'done', id: task.id, title: task.title, ok, text, ms });
+  return { ok, text, ms };
+}
+
+/** 真正跑一轮 Agent（不含回执与落地） */
+async function work(task, opts, startedAt) {
+  const c = cfg();
   let text = '';
   let ok = false;
+  let slowHint = null;
 
   try {
-    // 延迟 require：避免和 agent → tools 形成加载环
-    const agent = require('./agent');
+    const agent = require('./agent');   // 延迟 require：避免 agent → tools 形成加载环
+    slowHint = setTimeout(() => {
+      try {
+        api.deliver({
+          kind: 'schedule', phase: 'progress',
+          title: `⏰ ${task.title}`,
+          text: '这活儿比平时费点时间，我还在办，跑完就告诉你。',
+          open: false, speak: false, pet: cfg().watchPet !== false
+        });
+      } catch (e) { /* ignore */ }
+    }, SLOW_HINT_MS);
+
     const r = await agent.runAgent({
       messages: [{
         role: 'user',
@@ -175,58 +297,85 @@ async function runTask(task, opts = {}) {
   } catch (e) {
     text = (e && e.message) || String(e);
   } finally {
-    running.delete(task.id);
+    if (slowHint) clearTimeout(slowHint);
   }
 
-  // 落地：更新任务状态 + 执行日志
-  const d = load();
-  const t = d.tasks.find((x) => x.id === task.id);
-  const now = Date.now();
-  if (t) {
-    t.lastRunAt = now;
-    t.runCount = (t.runCount || 0) + 1;
-    t.lastResult = text.slice(0, 800);
-    t.lastOk = ok;
-    if (t.when && t.when.type === 'once') {
-      // 一次性任务执行完就退休
-      t.enabled = false;
-      t.nextAt = 0;
-    } else {
-      t.nextAt = t.enabled ? T.computeNext(t.when, now, now) : 0;
-    }
-  }
-  d.log.push({ id: task.id, title: task.title, at: now, ok, text: text.slice(0, 400), manual: !!opts.manual });
-  save(d);
-
-  log(`「${task.title}」执行${ok ? '完成' : '失败'}，用时 ${Math.round((now - started) / 1000)}s`);
-
-  if (text) {
-    try {
-      api.deliver({
-        kind: 'schedule',
-        title: `⏰ ${task.title}`,
-        text,
-        // 任务标记了「唤起」才弹面板 / 朗读；否则只做轻提示
-        open: opts.manual ? true : task.wake !== false,
-        speak: task.wake !== false && c.watchSpeak === true,
-        pet: c.watchPet !== false
-      });
-    } catch (e) { /* 播报失败不影响任务本身 */ }
-  }
-
-  return { ok, text };
+  return finish(task, opts, { ok, text, startedAt });
 }
 
-/** 立即执行（设置面板 / 工具调用走这里） */
+/** 下一个排队任务（并发限流） */
+function pump() {
+  while (active < maxConcurrency() && queue.length) {
+    const next = queue.shift();
+    runNow_(next.task, next.opts, true);
+  }
+}
+
+function runNow_(task, opts, queued) {
+  active++;
+  runningSince.set(task.id, Date.now());
+  const startedAt = Date.now();
+  armAck(task, opts);
+  return work(task, opts, startedAt)
+    .catch((e) => ({ ok: false, text: (e && e.message) || String(e) }))
+    .finally(() => {
+      clearAck(task.id);
+      active--;
+      runningSince.delete(task.id);
+      pump();
+    });
+}
+
+/**
+ * 跑一个任务。**默认不 await 结果**，立刻回执后就返回；
+ * 需要结果的地方（工具调用）传 opts.awaitResult。
+ */
+function runTask(task, opts = {}) {
+  if (!task) return Promise.resolve({ ok: false, error: '任务不存在' });
+  if (runningSince.has(task.id)) {
+    return Promise.resolve({ ok: false, error: '这个任务正在执行中', running: true });
+  }
+
+  const c = cfg();
+  if (!c.apiKey || !c.model) {
+    log(`跳过「${task.title}」：还没配置大模型`);
+    return Promise.resolve({ ok: false, error: '还没配置大模型接口' });
+  }
+
+  if (!opts.noAck) emitStart(task, opts);
+
+  if (active >= maxConcurrency()) {
+    queue.push({ task, opts });
+    log(`「${task.title}」已排队（当前并发 ${active}/${maxConcurrency()}）`);
+    return Promise.resolve({ ok: true, queued: true, text: '已排队，马上开跑' });
+  }
+  return runNow_(task, opts, false);
+}
+
+/** 只踢一脚，不等结果（设置页「跑一次」/ tick 用） */
+function kick(id, opts = {}) {
+  const t = get(id);
+  if (!t) return { ok: false, error: '没有这个任务' };
+  runTask(t, { ...opts, manual: true });
+  return { ok: true, kicked: true };
+}
+
+/** 立即执行并等结果（Agent 工具调用走这里，它需要把结果回灌给模型） */
 async function runNow(id) {
   const t = get(id);
   if (!t) return { ok: false, error: '没有这个任务' };
-  return runTask(t, { manual: true });
+  return runTask(t, { manual: true, awaitResult: true });
 }
 
 /** 把某个任务的 prompt 直接当一次性任务跑一次（不落库） */
 async function runOnce(title, prompt) {
   return runTask({ id: 'adhoc-' + Date.now().toString(36), title: title || '临时任务', prompt, wake: true }, { manual: true });
+}
+
+function runningIds() { return Array.from(runningSince.keys()); }
+function runningInfo() {
+  const now = Date.now();
+  return Array.from(runningSince.entries()).map(([id, at]) => ({ id, since: at, elapsedMs: now - at }));
 }
 
 // ---------------- 调度循环 ----------------
@@ -272,6 +421,7 @@ async function tick() {
     dirty = true;
     // 先落盘再执行，避免执行期间再次 tick 造成重复触发
     save(d);
+    // 不 await：任务是异步的，先回执、再后台跑，tick 不该被单个任务卡住
     runTask(t).catch((e) => log('执行异常: ' + ((e && e.message) || e)));
   }
 
@@ -306,6 +456,8 @@ function start() {
 function stop() {
   if (timer) clearInterval(timer);
   timer = null;
+  ackTimers.forEach((t) => clearTimeout(t));
+  ackTimers.clear();
 }
 
 function status() {
@@ -320,7 +472,10 @@ function status() {
       .filter((t) => t.nextAt)
       .sort((a, b) => a.nextAt - b.nextAt)
       .slice(0, 5),
-    running: Array.from(running),
+    running: runningIds(),
+    runningInfo: runningInfo(),
+    queued: queue.length,
+    concurrency: maxConcurrency(),
     log: d.log.slice(-20).reverse()
   };
 }
@@ -466,8 +621,10 @@ module.exports = {
   remove,
   get,
   runNow,
+  kick,
   runOnce,
   runTask,
+  runningInfo,
   status,
   presetList,
   addPreset,

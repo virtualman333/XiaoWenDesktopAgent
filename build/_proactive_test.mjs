@@ -247,6 +247,57 @@ section('6. 定时任务真的跑一遍');
   eq(r2.ok, false, '没配模型时优雅失败');
 }
 
+// ================= 6b. 先反馈、再给结果（两阶段） =================
+section('6b. 异步调度 · 先反馈再给结果');
+{
+  const CFG = { apiKey: 'sk-test', model: 'test-model', apiBaseUrl: 'https://example.com/v1', schedEnabled: true, schedConcurrency: 2 };
+  const delivered = [];
+  const events = [];
+  schedule.bind({
+    getConfig: () => CFG, log: () => {},
+    deliver: (p) => delivered.push(p),
+    event: (e) => events.push(e)
+  });
+  chatReply = () => '今天晴，26 度，记得带伞。';
+
+  // 1) 自动任务跑得比回执阈值快 → 只播结果，绝不能只播「我去办」而没有结论
+  const fast = schedule.add({ title: '快到不用回执', prompt: '播天气', when: { type: 'interval', minutes: 60 } });
+  const rf = await schedule.runTask(schedule.get(fast.task.id));   // 不带 manual = 定时触发
+  eq(rf.ok, true, '定时任务执行成功');
+  eq(delivered.length, 1, '跑得快 → 只播一条（不重复打扰）', JSON.stringify(delivered.map((d) => d.phase)));
+  eq(delivered[0].phase, 'done', '播的是结论而不是回执');
+  ok(/26 度/.test(delivered[0].text), '结论内容正确', delivered[0].text);
+  ok(events.some((e) => e.type === 'start'), '事件总线立刻广播了 start（面板秒变运行中）');
+  eq(events.find((e) => e.type === 'start').manual, false, 'start 事件标了不是手动');
+
+  // 2) 手动踢一脚：不阻塞调用方，先返回再慢慢跑
+  delivered.length = 0;
+  events.length = 0;
+  const kicked = schedule.kick(fast.task.id);
+  eq(kicked.kicked, true, 'kick 立刻返回，不等结果');
+  eq(events.some((e) => e.type === 'start' && e.manual === true), true, '手动 kick 也广播了 start');
+  // 等它自己跑完
+  await new Promise((r) => setTimeout(r, 400));
+  eq(delivered.length >= 1, true, 'kick 之后结果照样会回来', String(delivered.length));
+  eq(delivered[delivered.length - 1].phase, 'done', '回来的还是结论');
+
+  // 3) 重复踢同一个任务不应该并发跑两份
+  const dup = schedule.runTask(schedule.get(fast.task.id));
+  const dup2 = await schedule.runTask(schedule.get(fast.task.id));
+  await dup;
+  ok(dup2.running === true || dup2.ok === false, '同一个任务并发只跑一份', JSON.stringify(dup2));
+
+  // 4) 排队：并发打满时返回排队而不是丢任务
+  const slowReplies = [];
+  chatReply = () => '慢慢想…';
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push(schedule.add({ title: '并发' + i, prompt: 'p' + i, when: { type: 'interval', minutes: 30 } }).task.id);
+  const rs = ids.map((id) => schedule.runTask(schedule.get(id)));
+  const settled = await Promise.all(rs);
+  ok(settled.every((r) => r.ok === true), '并发提交都接受', JSON.stringify(settled.map((r) => r.queued || false)));
+  ok(schedule.status().concurrency >= 1, '状态里能读到并发上限', String(schedule.status().concurrency));
+}
+
 // ================= 7. 主动关注纯逻辑 =================
 section('7. 主动关注 · 纯逻辑');
 {

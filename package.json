@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -21,7 +21,12 @@
     "test:packed": "node build/_packed_check.mjs",
     "release:upload": "node build/gh-release.mjs",
     "version:bump": "node build/bump-version.mjs",
-    "test:llm": "node build/_llm_test.mjs"
+    "test:llm": "node build/_llm_test.mjs",
+    "test:context": "node build/_context_test.mjs",
+    "test:hotkey": "node build/_hotkey_test.mjs",
+    "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
+    "test:ui": "node build/_run-electron.mjs build/_ui_smoke.js",
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:proactive && npm run test:orch && npm run test:pet && npm run test:tray && npm run test:wake"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -33,7 +38,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.6.1",
+      "output": "release-v1.7.0",
       "buildResources": "build"
     },
     "files": [
@@ -59,7 +64,11 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "小问助手"
+      "shortcutName": "小问助手",
+      "runAfterFinish": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "deleteAppDataOnUninstall": false
     },
     "publish": {
       "provider": "github",
