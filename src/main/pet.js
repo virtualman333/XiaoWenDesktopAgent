@@ -156,6 +156,33 @@ function togglePet() {
   return showPet();
 }
 
+/**
+ * 宠物 × Agent 联动：把小问的工作状态演出来。
+ *
+ * action 取值：
+ *   think  —— 正在思考（模型还没吐字）
+ *   work   —— 正在调用工具（opts.tool 可带工具名，宠物气泡会念出来）
+ *   done   —— 顺利答完
+ *   error  —— 失败 / 报错
+ *   listen —— 正在听主人说话（唤醒词命中、录音中）
+ *   idle   —— 收工，回到待机
+ */
+function petAct(action, opts = {}) {
+  if (!action) return false;
+  if (!petWin || petWin.isDestroyed()) return false;
+  try {
+    petWin.webContents.send('pet:act', {
+      action: String(action),
+      text: opts.text ? String(opts.text) : '',
+      tool: opts.tool ? String(opts.tool) : '',
+      ts: Date.now()
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 /** 让宠物替小问播报一句话（AI 回答结束时调用） */
 function petSay(text) {
   if (!text) return;
@@ -247,6 +274,9 @@ function registerPetIpc() {
     return true;
   });
 
+  // 任意窗口请求宠物演出 Agent 状态
+  ipcMain.handle('pet:act-out', (_e, p) => petAct(p && p.action, p || {}));
+
   ipcMain.handle('pet:hide', () => hidePet());
   ipcMain.handle('pet:show', () => showPet());
   ipcMain.handle('pet:toggle', () => togglePet());
@@ -332,6 +362,7 @@ module.exports = {
   resize,
   reposition,
   petSay,
+  petAct,
   isVisible,
   get window() { return petWin; }
 };

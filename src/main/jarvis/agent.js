@@ -250,9 +250,20 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   let rounds = 0;
   const MAX_ROUNDS = 8;
 
+  // 外部状态钩子（宠物联动 / UI 指示器等），任何异常都不允许影响主流程
+  const hooks = opts.hooks || {};
+  const fire = (name, payload) => {
+    try {
+      const fn = hooks[name];
+      if (typeof fn === 'function') fn(payload || {});
+    } catch (e) { /* ignore */ }
+  };
+
   const controller = new AbortController();
   activeAbort = controller;
   const sig = signal || controller.signal;
+
+  fire('onStart');
 
   try {
     while (rounds < MAX_ROUNDS) {
@@ -271,23 +282,30 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
         tool_calls: toolCalls
       });
 
+      const toolNames = toolCalls.map((c) => (c.function && c.function.name) || '').filter(Boolean);
+      fire('onTool', { names: toolNames, status: 'start' });
       for (const call of toolCalls) {
         const msg = await runOneTool(call, { sender, settings, sessionId: opts.sessionId });
         convo.push(msg);
       }
+      fire('onTool', { names: toolNames, status: 'end' });
       // 工具执行完后再生成时，不要重复播报已有内容
     }
 
+    fire('onDone', { text: fullText, rounds });
     return { ok: true, text: fullText, rounds, toolRounds: rounds - 1 };
   } catch (e) {
     if (e && (e.name === 'AbortError' || /aborted/i.test(String(e.message || e)))) {
+      fire('onStop');
       return { ok: false, aborted: true, error: '已停止' };
     }
     const m = String((e && e.message) || e);
     // 模型不支持 tools：降级提示
     if (e && e.status === 400 && /tool/i.test(e.raw || '')) {
+      fire('onError', { error: '不支持函数调用' });
       return { ok: false, error: '当前模型/接口不支持函数调用，请关闭「Agent 工具能力」后重试。' };
     }
+    fire('onError', { error: m });
     return { ok: false, error: m };
   } finally {
     if (activeAbort === controller) activeAbort = null;

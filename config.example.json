@@ -29,5 +29,6 @@
   "petEnabled": true,
   "petAnimal": "penguin",
   "petSize": 120,
+  "petAgentLink": true,
   "setupDone": false
 }

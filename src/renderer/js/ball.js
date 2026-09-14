@@ -144,6 +144,8 @@ async function bootWake(cfg) {
     },
     onWake: ({ word }) => {
       showToast(`唤醒成功：${word}`);
+      // 宠物竖起耳朵「我在听」（失败静默，宠物可能没开）
+      try { window.xw.petAct && window.xw.petAct('listen'); } catch (e) { /* ignore */ }
       // 打开面板并自动开始录音；期间暂停唤醒，避免把 AI 的回答当成唤醒词
       suspendWake(true, 25000);
       setStatus('listening');

@@ -1429,7 +1429,7 @@ function bindPet() {
     cfg = await window.xw.setConfig({ petOpacity: Number(op.value) / 100 });
   });
 
-  ['stPetTop', 'stPetWalk', 'stPetInteraction'].forEach((id) => {
+  ['stPetTop', 'stPetWalk', 'stPetInteraction', 'stPetAgentLink'].forEach((id) => {
     const el = $(id);
     const key = id.replace('stPet', 'pet');
     el.checked = cfg[key] !== false;
@@ -1539,7 +1539,8 @@ function collectPatch() {
     petOpacity: Number($('stPetOpacity').value) / 100,
     petTop: $('stPetTop').checked,
     petWalk: $('stPetWalk').checked,
-    petInteraction: $('stPetInteraction').checked
+    petInteraction: $('stPetInteraction').checked,
+    petAgentLink: $('stPetAgentLink').checked
   };
 
   const keyInput = $('stApiKey').value.trim();

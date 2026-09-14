@@ -339,6 +339,7 @@ const DEFAULT_CONFIG = {
   petWalk: false,        // 自动散步
   petTop: true,          // 窗口置顶
   petInteraction: true,  // 心情衰减 / 随机台词
+  petAgentLink: true,    // 宠物 × Agent 联动：小问干活时宠物同步演出
   history: [],
   maxHistory: 200,
   setupDone: false // 是否已完成首次配置引导（新机 clone 后为 false，会弹出引导）
@@ -749,6 +750,17 @@ function extractErrorText(status, statusText, raw) {
 // 当前进行中的请求（用于「停止」按钮中断）
 let activeChatAbort = null;
 
+/**
+ * 宠物 × Agent 联动的统一出口。
+ * 只在设置里打开「宠物联动」时才演出；宠物窗口没开时 pet.petAct 内部会直接返回。
+ */
+function petAct(action, opts) {
+  try {
+    if (loadConfig().petAgentLink === false) return;
+    pet.petAct(action, opts);
+  } catch (e) { /* 宠物模块不可用也不能影响对话 */ }
+}
+
 ipcMain.handle('chat:abort', () => {
   // Agent 模式下的请求也要能中断
   try { jarvis.abortAgent(); } catch (e) { /* ignore */ }
@@ -779,6 +791,9 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
   const controller = new AbortController();
   activeChatAbort = controller;
 
+  // 宠物开始「思考」
+  petAct('think');
+
   // 把 'ai' 这类界面内部用的角色名换成接口要求的 'assistant'。
   // 老版本的历史记录里存的是 'ai'，不转换会直接被服务端拒：
   //   HTTP 400 · ai is not one of ['system','assistant','user','tool','function']
@@ -806,6 +821,7 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
 
     if (!res.ok || !res.body) {
       const raw = await res.text().catch(() => '');
+      petAct('error');
       return { ok: false, error: extractErrorText(res.status, res.statusText, raw) };
     }
 
@@ -840,11 +856,14 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
         }
       }
     }
+    petAct('done');
     return { ok: true, text: full };
   } catch (e) {
     if (e && (e.name === 'AbortError' || /aborted/i.test(String(e.message || e)))) {
+      petAct('idle');
       return { ok: false, aborted: true, error: '已停止' };
     }
+    petAct('error');
     const m = String(e && e.message || e);
     const hint = /ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(m)
       ? '（域名解析失败，检查接口地址是否写错、或本机网络/DNS 是否正常）'

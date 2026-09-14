@@ -133,6 +133,13 @@ contextBridge.exposeInMainWorld('xw', {
     ipcRenderer.on('pet:say', h);
     return () => ipcRenderer.removeListener('pet:say', h);
   },
+  // 让宠物演出小问的工作状态（think / work / done / error / listen / idle）
+  petAct: (action, opts) => ipcRenderer.invoke('pet:act-out', { action, ...(opts || {}) }),
+  onPetAct: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on('pet:act', h);
+    return () => ipcRenderer.removeListener('pet:act', h);
+  },
 
   // ================= Jarvis 能力 =================
   // 开机自启

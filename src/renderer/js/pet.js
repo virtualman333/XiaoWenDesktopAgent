@@ -145,6 +145,45 @@ const LINES = {
   greet: ['主人你来啦！', '我等你好久啦～', '今天也一起加油吧！']
 };
 
+// ==================== 宠物 × Agent 联动 ====================
+// 小问在后台干活时，宠物同步演出：思考 → 调工具 → 完成 / 失败。
+// 动作只做「表演」，不阻塞、不弹权限，演出失败也不影响对话本身。
+const AGENT_ACT = {
+  think: { busy: 'busy-think', say: '让我想想…', tip: '思考中' },
+  work: { busy: 'busy-work', say: '正在忙…', tip: '干活中' },
+  listen: { busy: 'busy-listen', say: '我在听…', tip: '聆听中' },
+  done: { busy: '', say: '搞定啦！', tip: '' },
+  error: { busy: '', say: '好像出问题了…', tip: '' },
+  idle: { busy: '', say: '', tip: '' }
+};
+
+// 内置工具名 → 宠物能念出来的中文（认不出来的直接原样念）
+const TOOL_LABEL = {
+  read_file: '读文件',
+  write_file: '写文件',
+  list_dir: '翻目录',
+  run_command: '跑命令',
+  open_app: '开软件',
+  web_search: '搜网页',
+  fetch_url: '抓网页',
+  get_time: '看时间',
+  clipboard_read: '看剪贴板',
+  clipboard_write: '写剪贴板',
+  screenshot: '看屏幕',
+  notify: '发通知',
+  memory_search: '翻记忆',
+  use_skill: '用技能'
+};
+
+function toolLabel(name) {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  if (TOOL_LABEL[n]) return TOOL_LABEL[n];
+  // mcp:xxx → 去掉前缀只留后面一段
+  const short = n.includes(':') ? n.split(':').pop() : n;
+  return short || n;
+}
+
 // ==================== 状态 ====================
 let cfg = {};
 let state = {
@@ -166,6 +205,8 @@ let dragging = false;
 let moved = false;
 let dragStart = null;
 let lastInteract = Date.now();
+let busyCls = '';        // 当前持续的「忙碌」演出（think / work / listen）
+let busyResetTimer = null; // 兜底：长时间没收到收尾事件就自己回待机
 
 const $ = (id) => document.getElementById(id);
 const els = {};
@@ -181,6 +222,8 @@ async function init() {
   els.menuAnimals = $('menuAnimals');
   els.stats = $('stats');
   els.floatLayer = $('floatLayer');
+  els.badge = $('badge');
+  els.badgeTip = $('badgeTip');
 
   try { cfg = await window.xw.getConfig(); } catch (e) { cfg = {}; }
   try {
@@ -212,6 +255,11 @@ async function init() {
     window.xw.onPetSay && window.xw.onPetSay((text) => {
       if (text) say(String(text).slice(0, 60), 4200);
     });
+  } catch (e) { /* ignore */ }
+
+  // 小问干活时同步演出（思考 / 调工具 / 完成 / 失败）
+  try {
+    window.xw.onPetAct && window.xw.onPetAct((p) => agentAct(p));
   } catch (e) { /* ignore */ }
 
   // 让主进程把鼠标事件转发进来（窗口默认穿透）
@@ -258,6 +306,62 @@ function line(kind) {
   if (kind === 'happy' && a.lines.happy) return pick(a.lines.happy);
   if (kind === 'food' && a.lines.food) return pick(a.lines.food);
   return pick(LINES[kind] || a.lines.idle || LINES.click);
+}
+
+// ==================== 宠物 × Agent 联动 ====================
+/** 切换持续的「忙碌」演出（传空串回到待机） */
+function setBusy(cls) {
+  const next = cls || '';
+  if (busyCls === next) return;
+  if (busyCls) els.body.classList.remove(busyCls);
+  busyCls = next;
+  if (busyCls) els.body.classList.add(busyCls);
+  if (els.badge) els.badge.classList.toggle('show', !!busyCls);
+}
+
+/**
+ * 收到主进程的状态事件后演出一次。
+ * payload: { action, text?, tool? }
+ */
+function agentAct(payload) {
+  if (cfg.petAgentLink === false) return;
+  const p = payload || {};
+  const action = String(p.action || 'idle');
+  const meta = AGENT_ACT[action] || AGENT_ACT.idle;
+
+  clearTimeout(busyResetTimer);
+
+  // 干活时把睡觉的宠物叫醒（不然表情看不出来）
+  if (meta.busy && state.sleeping) {
+    state.sleeping = false;
+    renderAnimal();
+  }
+
+  if (action === 'done') {
+    setBusy('');
+    doAction('happy');
+    addMood(2, false);
+    addExp(3);
+  } else if (action === 'error') {
+    setBusy('');
+    doAction('shake');
+    addMood(-3, false);
+  } else {
+    setBusy(meta.busy);
+  }
+
+  let text = meta.say;
+  if (action === 'work') {
+    const names = String(p.tool || '').split(/[、,]/).map((s) => s.trim()).filter(Boolean);
+    text = names.length ? '正在' + names.map(toolLabel).join('、') + '…' : '正在忙…';
+  }
+  if (els.badgeTip && meta.tip) els.badgeTip.textContent = meta.tip;
+  if (text) say(text, action === 'done' || action === 'error' ? 2600 : 8000);
+
+  // 兜底：万一收尾事件丢了（说完话没发、窗口卡过），到点自己回待机
+  if (meta.busy) {
+    busyResetTimer = setTimeout(() => setBusy(''), action === 'listen' ? 15000 : 60000);
+  }
 }
 
 // ==================== 数值 ====================
@@ -518,6 +622,11 @@ function bindEvents() {
         state.animal = c.petAnimal;
         renderAnimal();
       }
+      // 关掉联动时立刻收工，别让宠物一直转圈
+      if (c.petAgentLink === false && busyCls) {
+        clearTimeout(busyResetTimer);
+        setBusy('');
+      }
     });
   } catch (e) { /* ignore */ }
 }
@@ -640,6 +749,9 @@ function hideMenu() {
   els.menu.classList.remove('show');
   try { window.xw.petSetMouse(true); } catch (e) { /* ignore */ }
 }
+
+// 供回归测试 import（浏览器里作为模块加载，多几个导出没有副作用）
+export { AGENT_ACT, TOOL_LABEL, toolLabel, agentAct };
 
 // ==================== 启动 ====================
 if (document.readyState === 'loading') {

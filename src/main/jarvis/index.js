@@ -11,6 +11,8 @@ const tools = require('./tools');
 const skills = require('./skills');
 const agent = require('./agent');
 const { McpManager } = require('./mcp');
+// 桌面宠物（Agent 状态联动用；宠物窗口没开时 petAct 内部会直接返回）
+const pet = require('../pet');
 
 const mcp = new McpManager();
 agent.bindMcp(mcp);
@@ -177,6 +179,14 @@ function registerAll() {
     if (!cfg.agentEnabled) {
       return { ok: false, error: 'AGENT_DISABLED' };
     }
+
+    // 宠物 × Agent 联动：把「思考 / 调工具 / 完成 / 失败」演给桌面宠物看
+    const link = cfg.petAgentLink !== false;
+    const act = (a, o) => {
+      if (!link) return;
+      try { pet.petAct(a, o); } catch (e) { /* ignore */ }
+    };
+
     return agent.runAgent({
       messages,
       cfg,
@@ -186,7 +196,15 @@ function registerAll() {
         useMcp: cfg.agentUseMcp !== false,
         useSkills: cfg.agentUseSkills !== false,
         useMemory: cfg.agentUseMemory !== false,
-        sessionId
+        sessionId,
+        hooks: {
+          onStart: () => act('think'),
+          onTool: (p) => act(p && p.status === 'start' ? 'work' : 'think',
+            { tool: ((p && p.names) || []).join('、') }),
+          onDone: () => act('done'),
+          onStop: () => act('idle'),
+          onError: () => act('error')
+        }
       }
     });
   });
