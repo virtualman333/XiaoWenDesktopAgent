@@ -87,3 +87,4 @@ jobs:
             release*/*.exe.sha256.txt
             release*/*.blockmap
             release*/*.yml
+            !release*/builder-debug.yml
