@@ -157,6 +157,8 @@
         <button class="st-nav-item" data-tab="voice">语音</button>
         <button class="st-nav-item" data-tab="capture">截图与更新</button>
         <button class="st-nav-item" data-tab="pet">🐧 桌面宠物</button>
+        <button class="st-nav-item" data-tab="schedule">⏰ 定时任务</button>
+        <button class="st-nav-item" data-tab="watch">🔔 主动关注</button>
         <button class="st-nav-item" data-tab="advanced">显示与数据</button>
       </nav>
 
@@ -689,9 +691,155 @@
 
           <div class="pet-actions">
             <button class="btn-ghost" id="stPetToggle">显示 / 隐藏</button>
+            <button class="btn-ghost" id="stPetRescue">📍 叫回主屏</button>
             <button class="btn-ghost" id="stPetFeed">🍖 喂一口</button>
             <button class="btn-ghost" id="stPetReset">重置成长数据</button>
           </div>
+          <div class="hint" id="stPetDiag">宠物窗口状态：—</div>
+        </section>
+
+        <!-- ---------- 定时任务 ---------- -->
+        <section class="st-section" data-tab="schedule">
+          <h3>定时任务</h3>
+          <div class="hint">
+            到点自动跑一件事，再把结果主动汇报给你。也可以直接对小问说
+            「每天早上 8 点给我播天气」「30 分钟后提醒我喝水」，它会自己排。
+          </div>
+          <div class="field row">
+            <label><b>启用定时任务</b></label>
+            <label class="switch"><input type="checkbox" id="schEnabled" /><span></span></label>
+          </div>
+
+          <h3>新建任务</h3>
+          <div class="field">
+            <label>任务名</label>
+            <input type="text" id="schTitle" placeholder="例如：每日早报" />
+          </div>
+          <div class="field">
+            <label>什么时候</label>
+            <select id="schFreq">
+              <option value="daily">每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+              <option value="interval">每隔一段时间</option>
+              <option value="once">只执行一次</option>
+            </select>
+          </div>
+          <div class="field" id="schTimeRow">
+            <label>时间</label>
+            <input type="time" id="schTime" value="08:30" />
+          </div>
+          <div class="field" id="schDaysRow" style="display:none">
+            <label>星期几（可多选）</label>
+            <div class="weekday-picker" id="schDays"></div>
+          </div>
+          <div class="field" id="schDayRow" style="display:none">
+            <label>每月几号</label>
+            <input type="number" id="schDay" min="1" max="31" value="1" />
+          </div>
+          <div class="field" id="schEveryRow" style="display:none">
+            <label>间隔（分钟）</label>
+            <input type="number" id="schEvery" min="1" max="720" value="30" />
+          </div>
+          <div class="field" id="schDateRow" style="display:none">
+            <label>执行时间</label>
+            <input type="datetime-local" id="schDate" />
+          </div>
+          <div class="field">
+            <label>要做什么</label>
+            <textarea id="schPrompt" rows="3" placeholder="例如：给我今天的天气、3 条重要新闻，以及一句提醒"></textarea>
+          </div>
+          <div class="field row">
+            <label>到点唤起我<span class="hint-inline">弹面板 + 宠物播报</span></label>
+            <label class="switch"><input type="checkbox" id="schWake" checked /><span></span></label>
+          </div>
+          <div class="cap-actions">
+            <button class="btn-primary" id="schAdd">添加任务</button>
+            <button class="btn-ghost" id="schPreset">加一个常用模板</button>
+          </div>
+
+          <h3>任务列表</h3>
+          <div class="sched-list" id="schList"></div>
+        </section>
+
+        <!-- ---------- 主动关注 ---------- -->
+        <section class="st-section" data-tab="watch">
+          <h3>主动关注</h3>
+          <div class="hint">
+            小问会自己盯着下面这些信源，有情况主动来找你（宠物气泡 + 系统通知，
+            需要时弹出面板）。静默时段内只记录、不打扰。首次运行只建立基线，不会补播历史消息。
+          </div>
+          <div class="field row">
+            <label><b>启用主动关注</b></label>
+            <label class="switch"><input type="checkbox" id="wEnabled" /><span></span></label>
+          </div>
+
+          <h3>🔔 地震速报</h3>
+          <div class="field row">
+            <label>开启地震速报</label>
+            <label class="switch"><input type="checkbox" id="wQuake" /><span></span></label>
+          </div>
+          <div class="field">
+            <label>最小震级 <span class="val" id="wMagVal">5.0</span></label>
+            <input type="range" id="wMag" min="3" max="8" step="0.5" value="5" />
+          </div>
+          <div class="field">
+            <label>关注范围</label>
+            <select id="wRegion">
+              <option value="cn">中国及周边</option>
+              <option value="global">全球</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>检查间隔（分钟）</label>
+            <input type="number" id="wQuakeIv" min="1" max="720" value="5" />
+          </div>
+
+          <h3>🔥 热搜新上榜</h3>
+          <div class="field row">
+            <label>百度热搜</label>
+            <label class="switch"><input type="checkbox" id="wHot" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>微博热搜<span class="hint-inline">接口偶尔不稳定</span></label>
+            <label class="switch"><input type="checkbox" id="wWeibo" /><span></span></label>
+          </div>
+          <div class="field">
+            <label>只盯前 <span class="val" id="wTopVal">5</span> 名</label>
+            <input type="range" id="wTop" min="1" max="10" step="1" value="5" />
+          </div>
+          <div class="field">
+            <label>检查间隔（分钟）</label>
+            <input type="number" id="wHotIv" min="1" max="720" value="30" />
+          </div>
+          <div class="field">
+            <label>只关心这些关键词</label>
+            <input type="text" id="wKeywords" placeholder="留空 = 所有新上榜，多个用逗号分隔" />
+          </div>
+
+          <h3>打扰方式</h3>
+          <div class="field">
+            <label>静默时段</label>
+            <input type="text" id="wMute" placeholder="23:00-07:00" />
+            <div class="hint">这个时段只记录不播报，留空表示全天都可以打扰</div>
+          </div>
+          <div class="field row">
+            <label>宠物播报</label>
+            <label class="switch"><input type="checkbox" id="wPet" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>语音念出来</label>
+            <label class="switch"><input type="checkbox" id="wSpeak" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>自动弹出对话面板</label>
+            <label class="switch"><input type="checkbox" id="wOpen" /><span></span></label>
+          </div>
+          <div class="cap-actions">
+            <button class="btn-ghost" id="wCheckQuake">立即检查地震</button>
+            <button class="btn-ghost" id="wCheckHot">立即检查热搜</button>
+          </div>
+          <div class="hint" id="wStatus">状态：—</div>
         </section>
 
         <!-- ---------- 显示与数据 ---------- -->

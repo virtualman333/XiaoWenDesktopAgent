@@ -12,6 +12,8 @@ const skills = require('./skills');
 const agent = require('./agent');
 const { McpManager } = require('./mcp');
 const orchestrator = require('./orchestrator');
+const schedule = require('./schedule');
+const watch = require('./watch');
 // 桌面宠物（Agent 状态联动用；宠物窗口没开时 petAct 内部会直接返回）
 const pet = require('../pet');
 
@@ -35,6 +37,18 @@ let registered = false;
 // 让主进程能读到最新的 config（含 TTS / Agent 设置）
 let getConfig = () => ({});
 function bindConfig(fn) { getConfig = fn; }
+
+// 主动播报出口：由 main.js 注入（宠物气泡 / 托盘 / 面板 / 朗读都归它管）
+let deliver = () => {};
+function bindProactive(fn) { if (typeof fn === 'function') deliver = fn; }
+
+/** 统一的日志出口，写进启动日志，排查「定时任务怎么没触发」时有据可查 */
+function jlog(msg) {
+  try {
+    if (global.__XW_LOG__) global.__XW_LOG__(msg);
+    else console.log(msg);
+  } catch (e) { /* ignore */ }
+}
 
 function registerAll() {
   if (registered) return;
@@ -228,8 +242,8 @@ function registerAll() {
         useMemory: cfg.agentUseMemory !== false,
         sessionId,
         // 小问在对话中也能临时派个活给子代理
-        extraTools: [orchestrator.DELEGATE_TOOL],
-        intercept: (name, args) => handleDelegate(name, args, { cfg, sender: event.sender, sessionId }),
+        extraTools: [orchestrator.DELEGATE_TOOL, schedule.TOOL],
+        intercept: (name, args) => handleVirtual(name, args, { cfg, sender: event.sender, sessionId }),
         hooks: {
           onStart: () => act('think'),
           onTool: (p) => act(p && p.status === 'start' ? 'work' : 'think',
@@ -262,6 +276,20 @@ function registerAll() {
   });
   ipcMain.handle('orch:abort', () => { abortAgent(); return true; });
 
+  // ---------------- 定时任务 ----------------
+  ipcMain.handle('schedule:list', () => schedule.list());
+  ipcMain.handle('schedule:presets', () => schedule.presetList());
+  ipcMain.handle('schedule:add', (_e, input) => schedule.add(input || {}));
+  ipcMain.handle('schedule:add-preset', (_e, key) => schedule.addPreset(key));
+  ipcMain.handle('schedule:update', (_e, { id, patch } = {}) => schedule.update(id, patch || {}));
+  ipcMain.handle('schedule:remove', (_e, id) => schedule.remove(id));
+  ipcMain.handle('schedule:run', (_e, id) => schedule.runNow(id));
+  ipcMain.handle('schedule:status', () => schedule.status());
+
+  // ---------------- 主动关注 ----------------
+  ipcMain.handle('watch:status', () => watch.status());
+  ipcMain.handle('watch:check', (_e, source) => watch.checkNow(source));
+
   // ---------------- 总览 ----------------
   ipcMain.handle('jarvis:status', async () => ({
     autostart: autostart.status().enabled,
@@ -269,7 +297,9 @@ function registerAll() {
     toolCount: tools.DEFINITIONS.length,
     mcp: mcp.status(),
     skills: (await skills.listSkills()).length,
-    memories: store.getMemories().length
+    memories: store.getMemories().length,
+    schedules: schedule.status(),
+    watch: watch.status()
   }));
 }
 
@@ -287,6 +317,20 @@ function lastUserText(messages) {
     if (c) return c;
   }
   return '';
+}
+
+/** 主对话里的虚拟工具统一入口：小问派活 / 排定时任务 */
+async function handleVirtual(name, args, ctx) {
+  if (name === 'delegate_task') return handleDelegate(name, args, ctx);
+  if (name === 'schedule_task') {
+    try {
+      const r = await schedule.handleTool(args || {});
+      return { content: r.content || '（没有返回）' };
+    } catch (e) {
+      return { content: `定时任务操作失败：${(e && e.message) || e}` };
+    }
+  }
+  return null;
 }
 
 /** 主对话中「小问主动派活」：delegate_task 工具落到这里 */
@@ -316,6 +360,13 @@ async function connectOne(cfg) {
 async function boot() {
   // 首次运行写入示例技能
   try { await skills.ensureSample(); } catch (e) { /* ignore */ }
+  // 定时任务 / 主动关注
+  try {
+    schedule.bind({ getConfig, log: jlog, deliver });
+    watch.bind({ getConfig, log: jlog, deliver });
+    schedule.start();
+    watch.start();
+  } catch (e) { jlog('[定时] 启动失败: ' + ((e && e.message) || e)); }
   // 自动重连已启用的 MCP 服务器
   const list = store.getMcpServers().filter((s) => s.enabled);
   for (const cfg of list) {
@@ -324,7 +375,9 @@ async function boot() {
 }
 
 function cleanup() {
+  try { schedule.stop(); } catch (e) { /* ignore */ }
+  try { watch.stop(); } catch (e) { /* ignore */ }
   mcp.stopAll();
 }
 
-module.exports = { registerAll, bindConfig, boot, cleanup, mcp, abortAgent };
+module.exports = { registerAll, bindConfig, bindProactive, boot, cleanup, mcp, abortAgent, schedule, watch };

@@ -147,6 +147,7 @@ async function initChat() {
   bindConfirmEvents();
   bindOrch();
   bindUpdater();
+  bindProactive();
   renderSessionList();
 
   // 截图结果（快捷键 / 工具调用）自动带到输入框
@@ -850,6 +851,8 @@ function initSettings() {
   bindVoice();
   bindPet();
   bindCapture();
+  bindSchedule();
+  bindWatch();
   bindAdvanced();
   fillAll();
 }
@@ -875,6 +878,8 @@ function fillAll() {
   fillSkills();
   fillVoice();
   fillCapture();
+  fillSchedule();
+  fillWatch();
   refreshGpuStatus();
 }
 
@@ -1529,9 +1534,26 @@ function bindPet() {
     });
   });
 
+  // 统一的显示 / 隐藏：走 petEnabled 配置，保证「配置 = 实际状态」，重启也一致
   $('stPetToggle').addEventListener('click', async () => {
-    await window.xw.petToggle();
-    setToast('已切换宠物显示');
+    const next = cfg.petEnabled === false;
+    cfg = await window.xw.setConfig({ petEnabled: next });
+    on.checked = next;
+    setToast(next ? '宠物已出现' : '宠物已隐藏');
+    refreshPetDiag();
+  });
+
+  $('stPetRescue').addEventListener('click', async () => {
+    try {
+      await window.xw.setConfig({ petEnabled: true });
+      cfg = await window.xw.getConfig();
+      on.checked = true;
+      await window.xw.petRescue();
+      setToast('宠物已叫回主屏右下角');
+    } catch (e) {
+      setToast('叫回失败：' + ((e && e.message) || e));
+    }
+    refreshPetDiag();
   });
 
   $('stPetFeed').addEventListener('click', async () => {
@@ -1558,6 +1580,242 @@ function bindPet() {
     });
     setToast('成长数据已重置');
   });
+
+  refreshPetDiag();
+}
+
+/** 把宠物窗口的真实状态显示出来，便于判断「到底是隐藏了还是被顶到屏幕外」 */
+async function refreshPetDiag() {
+  const el = $('stPetDiag');
+  if (!el || !window.xw.petDiag) return;
+  try {
+    const d = await window.xw.petDiag();
+    if (!d || !d.exists) {
+      el.textContent = '宠物窗口状态：未创建' + (d && d.enabled === false ? '（设置里是关闭的）' : '');
+      return;
+    }
+    el.textContent = `宠物窗口状态：${d.visible ? '可见' : '已隐藏'} · 位置 ${d.pos.join(', ')} · 尺寸 ${d.size.join('×')}`
+      + (d.size[1] !== d.expectedHeight ? `（应为 ${d.expectedHeight}，可点「叫回主屏」修正）` : '');
+  } catch (e) {
+    el.textContent = '宠物窗口状态：读取失败 ' + ((e && e.message) || e);
+  }
+}
+
+// ---------- 定时任务 ----------
+let schCache = [];
+
+function buildWeekdayPicker() {
+  const box = $('schDays');
+  if (!box || box.childElementCount) return;
+  const names = ['日', '一', '二', '三', '四', '五', '六'];
+  box.innerHTML = names.map((n, i) =>
+    `<label class="wd"><input type="checkbox" value="${i}" /><span>${n}</span></label>`).join('');
+}
+
+function syncSchRows() {
+  const f = $('schFreq').value;
+  $('schTimeRow').style.display = (f === 'daily' || f === 'weekly' || f === 'monthly') ? '' : 'none';
+  $('schDaysRow').style.display = f === 'weekly' ? '' : 'none';
+  $('schDayRow').style.display = f === 'monthly' ? '' : 'none';
+  $('schEveryRow').style.display = f === 'interval' ? '' : 'none';
+  $('schDateRow').style.display = f === 'once' ? '' : 'none';
+}
+
+/** 表单 → when 对象（交给主进程 normalizeWhen 再兜一层） */
+function schWhenFromForm() {
+  const f = $('schFreq').value;
+  const time = $('schTime').value || '08:30';
+  if (f === 'daily') return { type: 'daily', time };
+  if (f === 'weekly') {
+    const days = Array.from(document.querySelectorAll('#schDays input:checked')).map((x) => Number(x.value));
+    return { type: 'weekly', time, days: days.length ? days : [new Date().getDay()] };
+  }
+  if (f === 'monthly') return { type: 'monthly', time, day: Number($('schDay').value) || 1 };
+  if (f === 'interval') return { type: 'interval', minutes: Number($('schEvery').value) || 30 };
+  if (f === 'once') {
+    const v = $('schDate').value;
+    if (!v) return null;
+    return { type: 'once', at: v.replace('T', ' ') };
+  }
+  return null;
+}
+
+function bindSchedule() {
+  buildWeekdayPicker();
+  $('schFreq').addEventListener('change', syncSchRows);
+  syncSchRows();
+
+  $('schEnabled').addEventListener('change', async () => {
+    cfg = await window.xw.setConfig({ schedEnabled: $('schEnabled').checked });
+    setToast($('schEnabled').checked ? '定时任务已开启' : '定时任务已暂停');
+  });
+
+  $('schAdd').addEventListener('click', async () => {
+    const title = $('schTitle').value.trim();
+    const prompt = $('schPrompt').value.trim();
+    if (!prompt) { setToast('请先写「要做什么」'); return; }
+    const when = schWhenFromForm();
+    if (!when) { setToast('请选好执行时间'); return; }
+    const r = await window.xw.scheduleAdd({ title, prompt, when, wake: $('schWake').checked });
+    if (!r || r.ok === false) { setToast('添加失败：' + ((r && r.error) || '未知原因')); return; }
+    $('schTitle').value = '';
+    $('schPrompt').value = '';
+    setToast(`已添加「${r.task.title}」，${r.task.whenText}`);
+    fillSchedule();
+  });
+
+  $('schPreset').addEventListener('click', async () => {
+    const presets = await window.xw.schedulePresets();
+    if (!presets || !presets.length) return;
+    const names = presets.map((p, i) => `${i + 1}. ${p.title}（${p.whenText}）`).join('\n');
+    const pick = prompt('想加哪个模板？输入序号：\n' + names, '1');
+    const idx = Number(pick) - 1;
+    if (!(idx >= 0 && idx < presets.length)) return;
+    const r = await window.xw.scheduleAddPreset(presets[idx].key);
+    setToast(r && r.ok ? `已添加「${presets[idx].title}」` : ('添加失败：' + ((r && r.error) || '')));
+    fillSchedule();
+  });
+}
+
+async function fillSchedule() {
+  const box = $('schList');
+  if (!box) return;
+  if ($('schEnabled')) $('schEnabled').checked = cfg.schedEnabled !== false;
+  let list = [];
+  try { list = await window.xw.scheduleList(); } catch (e) { list = []; }
+  schCache = list;
+
+  if (!list.length) {
+    box.innerHTML = '<div class="hint">还没有任务。点上面「加一个常用模板」就能立刻有「每日早报 / 久坐提醒 / 收盘复盘」。</div>';
+    return;
+  }
+
+  box.innerHTML = list.map((t) => `
+    <div class="sched-item${t.enabled === false ? ' off' : ''}">
+      <div class="sched-main">
+        <div class="sched-title">${escapeHtml(t.title)}${t.source === 'ai' ? '<span class="tag-ai">小问自排</span>' : ''}</div>
+        <div class="sched-meta">${escapeHtml(t.whenText)} · ${escapeHtml(t.etaText)}${t.runCount ? ` · 已执行 ${t.runCount} 次` : ''}</div>
+        <div class="sched-prompt">${escapeHtml(String(t.prompt || '').slice(0, 90))}</div>
+      </div>
+      <div class="sched-ops">
+        <button class="btn-mini" data-act="run" data-id="${t.id}">跑一次</button>
+        <button class="btn-mini" data-act="toggle" data-id="${t.id}">${t.enabled === false ? '启用' : '暂停'}</button>
+        <button class="btn-mini danger" data-act="del" data-id="${t.id}">删除</button>
+      </div>
+    </div>`).join('');
+
+  box.querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const act = btn.dataset.act;
+      const item = schCache.find((x) => x.id === id);
+      if (act === 'run') {
+        setToast('正在执行，结果会主动播报给你…');
+        const r = await window.xw.scheduleRun(id);
+        setToast(r && r.ok ? '执行完成' : `执行失败：${(r && (r.error || r.text)) || '未知原因'}`);
+      } else if (act === 'toggle') {
+        await window.xw.scheduleUpdate(id, { enabled: item ? item.enabled === false : true });
+      } else if (act === 'del') {
+        if (!confirm(`删除定时任务「${item ? item.title : id}」？`)) return;
+        await window.xw.scheduleRemove(id);
+      }
+      fillSchedule();
+    });
+  });
+}
+
+// ---------- 主动关注 ----------
+function bindWatch() {
+  $('wMag').addEventListener('input', () => { $('wMagVal').textContent = Number($('wMag').value).toFixed(1); });
+  $('wTop').addEventListener('input', () => { $('wTopVal').textContent = $('wTop').value; });
+
+  const keys = [
+    ['wEnabled', 'watchEnabled'], ['wQuake', 'watchQuake'], ['wHot', 'watchHot'],
+    ['wWeibo', 'watchWeibo'], ['wPet', 'watchPet'], ['wSpeak', 'watchSpeak'],
+    ['wOpen', 'watchOpenPanel']
+  ];
+  keys.forEach(([id, key]) => {
+    $(id).addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: $(id).checked });
+      fillWatch();
+    });
+  });
+
+  const numeric = [
+    ['wMag', 'watchQuakeMinMag', (v) => Number(v)],
+    ['wQuakeIv', 'watchQuakeInterval', (v) => Number(v) || 5],
+    ['wHotIv', 'watchHotInterval', (v) => Number(v) || 30],
+    ['wTop', 'watchHotTop', (v) => Number(v) || 5]
+  ];
+  numeric.forEach(([id, key, cast]) => {
+    $(id).addEventListener('change', async () => { cfg = await window.xw.setConfig({ [key]: cast($(id).value) }); });
+  });
+
+  $('wRegion').addEventListener('change', async () => { cfg = await window.xw.setConfig({ watchQuakeRegion: $('wRegion').value }); });
+  $('wKeywords').addEventListener('change', async () => { cfg = await window.xw.setConfig({ watchKeywords: $('wKeywords').value.trim() }); });
+  $('wMute').addEventListener('change', async () => { cfg = await window.xw.setConfig({ watchMute: $('wMute').value.trim() }); });
+
+  $('wCheckQuake').addEventListener('click', async () => {
+    setToast('正在检查地震…');
+    const r = await window.xw.watchCheck('quake');
+    setToast(r && r.ok ? `检查完成${r.count ? `，新消息 ${r.count} 条` : '（没有新消息）'}` : '检查失败，看日志');
+    fillWatch();
+  });
+  $('wCheckHot').addEventListener('click', async () => {
+    setToast('正在检查热搜…');
+    const r = await window.xw.watchCheck('hot');
+    setToast(r && r.ok ? `检查完成${r.count ? `，新上榜 ${r.count} 条` : '（没有新上榜）'}` : '检查失败，看日志');
+    fillWatch();
+  });
+}
+
+function fillWatch() {
+  const set = (id, v) => { const el = $(id); if (el) el.checked = v === true; };
+  set('wEnabled', cfg.watchEnabled !== false);
+  set('wQuake', cfg.watchQuake !== false);
+  set('wHot', cfg.watchHot !== false);
+  set('wWeibo', cfg.watchWeibo === true);
+  set('wPet', cfg.watchPet !== false);
+  set('wSpeak', cfg.watchSpeak === true);
+  set('wOpen', cfg.watchOpenPanel === true);
+  $('wMag').value = Number(cfg.watchQuakeMinMag) || 5;
+  $('wMagVal').textContent = Number($('wMag').value).toFixed(1);
+  $('wQuakeIv').value = Number(cfg.watchQuakeInterval) || 5;
+  $('wHotIv').value = Number(cfg.watchHotInterval) || 30;
+  $('wTop').value = Number(cfg.watchHotTop) || 5;
+  $('wTopVal').textContent = $('wTop').value;
+  $('wRegion').value = cfg.watchQuakeRegion === 'global' ? 'global' : 'cn';
+  $('wKeywords').value = cfg.watchKeywords || '';
+  $('wMute').value = cfg.watchMute == null ? '23:00-07:00' : cfg.watchMute;
+  refreshWatchStatus();
+}
+
+async function refreshWatchStatus() {
+  const el = $('wStatus');
+  if (!el || !window.xw.watchStatus) return;
+  try {
+    const s = await window.xw.watchStatus();
+    const fmt = (ts) => (ts ? new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '尚未检查');
+    el.textContent = `状态：地震${s.quake.on ? '已开启' : '已关闭'}（上次检查 ${fmt(s.quake.lastPoll)}）`
+      + ` · 热搜${s.hot.on ? '已开启' : '已关闭'}（上次检查 ${fmt(s.hot.lastPoll)}）`
+      + (s.quiet ? ` · 当前处于静默时段（${s.quietRange}）` : '');
+  } catch (e) {
+    el.textContent = '状态：读取失败';
+  }
+}
+
+// ---------- 主进程主动播报（定时任务 / 地震 / 热搜） ----------
+function bindProactive() {
+  try {
+    window.xw.onProactive((p) => {
+      if (!p || !p.text) return;
+      try { addMessageBubble('assistant', `**${p.title || '小问提醒'}**\n\n${p.text}`, { animate: true }); } catch (e) { /* ignore */ }
+      scrollToBottom();
+      setStatus(p.title || '小问提醒');
+      if (p.speak) { try { speakText(p.text); } catch (e) { /* ignore */ } }
+      // 面板是后来才打开的：靠会话历史补齐，这里只保证当前显示不丢
+    });
+  } catch (e) { /* ignore */ }
 }
 
 // ---------- 高级 ----------
@@ -1827,7 +2085,24 @@ function collectPatch() {
     petTop: $('stPetTop').checked,
     petWalk: $('stPetWalk').checked,
     petInteraction: $('stPetInteraction').checked,
-    petAgentLink: $('stPetAgentLink').checked
+    petAgentLink: $('stPetAgentLink').checked,
+    // ---- 定时任务 ----
+    schedEnabled: $('schEnabled').checked,
+    // ---- 主动关注 ----
+    watchEnabled: $('wEnabled').checked,
+    watchQuake: $('wQuake').checked,
+    watchQuakeMinMag: Number($('wMag').value) || 5,
+    watchQuakeRegion: $('wRegion').value,
+    watchQuakeInterval: Number($('wQuakeIv').value) || 5,
+    watchHot: $('wHot').checked,
+    watchHotInterval: Number($('wHotIv').value) || 30,
+    watchHotTop: Number($('wTop').value) || 5,
+    watchWeibo: $('wWeibo').checked,
+    watchKeywords: $('wKeywords').value.trim(),
+    watchMute: $('wMute').value.trim(),
+    watchPet: $('wPet').checked,
+    watchSpeak: $('wSpeak').checked,
+    watchOpenPanel: $('wOpen').checked
   };
 
   const keyInput = $('stApiKey').value.trim();

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage, shell, dialog, Notification } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,7 @@ const os = require('os');
 // Jarvis 扩展能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / 语音合成）
 const jarvis = require('./jarvis');
 const autostart = require('./jarvis/autostart');
+const jstore = require('./jarvis/store');
 // 桌面宠物（QQ 企鹅式互动宠物）
 const pet = require('./pet');
 // 截图（全屏 / 框选）与自动更新
@@ -363,6 +364,23 @@ const DEFAULT_CONFIG = {
   orchMaxWorkers: 2,             // 同时跑几个子代理
   orchRetry: 1,                  // 单个子任务失败最多重试几次
   orchAutoDelegate: true,        // 判断为「常任务」时自动走编排，不再逐步请示
+  // ---- 定时任务 ----
+  schedEnabled: true,            // 到点自动执行并播报
+  // ---- 主动关注（地震 / 热点）----
+  watchEnabled: true,            // 主动关注总开关
+  watchQuake: true,              // 地震速报
+  watchQuakeMinMag: 5,           // 只看这个震级以上
+  watchQuakeRegion: 'cn',        // cn=中国及周边 / global=全球
+  watchQuakeInterval: 5,         // 地震轮询间隔（分钟）
+  watchHot: true,                // 热搜新上榜提醒
+  watchHotInterval: 30,          // 热搜轮询间隔（分钟）
+  watchHotTop: 5,                // 只盯前 N 名
+  watchWeibo: false,             // 微博热搜（默认关，接口偶尔抽风）
+  watchKeywords: '',             // 关键词，逗号分隔；留空=所有新上榜
+  watchMute: '23:00-07:00',      // 静默时段，只记录不播报
+  watchPet: true,                // 让宠物播报
+  watchSpeak: false,             // 用语音念出来
+  watchOpenPanel: false,         // 自动弹出对话面板
   history: [],
   maxHistory: 200,
   setupDone: false // 是否已完成首次配置引导（新机 clone 后为 false，会弹出引导）
@@ -603,18 +621,20 @@ function createTray() {
     },
     { type: 'separator' },
     {
-      label: '桌面宠物（开 / 关）',
-      click: () => {
-        const c = loadConfig();
-        const on = !(c.petEnabled !== false);
-        config = { ...c, petEnabled: on };
-        saveConfig(config);
-        pet.applyConfig(config);
-        [ballWin, panelWin, settingsWin].forEach((w) => {
-          if (w && !w.isDestroyed()) w.webContents.send('config:update', sanitizeConfig(config));
-        });
-      }
+      label: '🐧 显示桌面宠物',
+      type: 'checkbox',
+      checked: loadConfig().petEnabled !== false,
+      click: (item) => setPetEnabled(item.checked)
     },
+    {
+      label: '把宠物叫回主屏',
+      click: () => { setPetEnabled(true); pet.rescue(); }
+    },
+    {
+      label: '重新载入宠物',
+      click: () => pet.reloadPet()
+    },
+    { type: 'separator' },
     {
       label: '设置',
       click: () => createSettingsWindow()
@@ -676,6 +696,73 @@ function registerHotkeys() {
 
   // 截图快捷键（放在 unregisterAll 之后，否则会被清掉）
   try { capture.registerShortcuts(); } catch (e) { console.error('[capture] hotkey:', e && e.message); }
+}
+
+/**
+ * 主动播报出口：定时任务的结果、地震速报、热搜新上榜都从这里送到主人面前。
+ *
+ * 「唤起」是分级的，避免打扰：
+ *   轻提示  → 托盘通知 + 宠物气泡（默认）
+ *   唤起    → 再弹出对话面板，消息落在会话里
+ *   朗读    → 面板用 TTS 念出来（watchSpeak）
+ */
+function onProactive(payload) {
+  const p = { ...(payload || {}) };
+  const text = String(p.text || '').trim();
+  if (!text) return;
+  const title = String(p.title || '小问提醒');
+  const kind = String(p.kind || 'notice');
+  const content = `**${title}**\n\n${text}`;
+
+  // 1) 会话留痕：面板下次打开还能翻到（也进历史）
+  try {
+    const s = jstore.getActiveSession();
+    if (s && s.id) jstore.appendMessage(s.id, { role: 'assistant', content });
+    const cfg2 = loadConfig();
+    cfg2.history = cfg2.history || [];
+    cfg2.history.push({ role: 'assistant', content, ts: Date.now(), proactive: true });
+    if (cfg2.history.length > (cfg2.maxHistory || 200)) {
+      cfg2.history = cfg2.history.slice(-cfg2.maxHistory);
+    }
+    config = cfg2;
+    saveConfig(cfg2);
+  } catch (e) { /* ignore */ }
+
+  // 2) 面板（要「唤起」就顺带显示出来）
+  let win = (panelWin && !panelWin.isDestroyed()) ? panelWin : null;
+  if (p.open !== false) {
+    try { win = createPanelWindow(); win.show(); } catch (e) { /* ignore */ }
+  }
+  if (win && !win.isDestroyed()) {
+    const send = () => {
+      try {
+        win.webContents.send('proactive:msg', {
+          kind, title, text, speak: !!p.speak, url: p.url || '', ts: Date.now()
+        });
+      } catch (e) { /* ignore */ }
+    };
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send);
+    else send();
+  }
+
+  // 3) 桌面宠物：先说再说（petAct 的固定台词会覆盖 petSay，所以顺序不能反）
+  try {
+    if (p.pet !== false) {
+      pet.petAct(p.urgent ? 'work' : 'done', { text: title });
+      pet.petSay(text.replace(/\n+/g, ' ').slice(0, 40));
+    }
+  } catch (e) { /* ignore */ }
+
+  // 4) 系统通知（Windows 上就是右下角横幅）
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title, body: text.slice(0, 180), silent: false }).show();
+    } else if (tray && !tray.isDestroyed()) {
+      tray.displayBalloon({ icon: getTrayIcon(), title, content: text.slice(0, 180) });
+    }
+  } catch (e) { /* ignore */ }
+
+  logLine('proactive', `[${kind}] ${title} :: ${text.replace(/\n+/g, ' ').slice(0, 100)}`);
 }
 
 /** 截图完成：把结果送到对话面板（顺手把面板打开） */
@@ -808,6 +895,31 @@ function petAct(action, opts) {
     if (loadConfig().petAgentLink === false) return;
     pet.petAct(action, opts);
   } catch (e) { /* 宠物模块不可用也不能影响对话 */ }
+}
+
+/**
+ * 显示 / 隐藏桌面宠物的**唯一**入口。
+ *
+ * 以前托盘、悬浮球右键、设置面板各用各的开关：有的只改配置，有的只调
+ * pet.togglePet() 而不落盘，于是出现过「配置里是开着的、窗口却是隐藏的」，
+ * 用户重启也恢复不了。现在统一走这里：改配置 + 落盘 + 广播，状态永远一致。
+ */
+function setPetEnabled(on) {
+  const next = !!on;
+  const c = loadConfig();
+  if ((c.petEnabled !== false) === next) {
+    // 状态没变也要保证窗口真的在（可能被别处 hide 掉了）
+    if (next) pet.applyConfig(c);
+    return next;
+  }
+  config = { ...c, petEnabled: next };
+  saveConfig(config);
+  pet.applyConfig(config);
+  const safe = sanitizeConfig(config);
+  [ballWin, panelWin, settingsWin].forEach((w) => {
+    if (w && !w.isDestroyed()) w.webContents.send('config:update', safe);
+  });
+  return next;
 }
 
 ipcMain.handle('chat:abort', () => {
@@ -1086,12 +1198,14 @@ ipcMain.handle('ball:set-opacity', (_e, val) => {
 
 ipcMain.handle('ball:show-menu', () => {
   if (!ballWin || ballWin.isDestroyed()) return;
+  const petOn = loadConfig().petEnabled !== false;
   const menu = Menu.buildFromTemplate([
     { label: '打开对话面板', click: () => createPanelWindow() },
     { label: '语音问答', click: () => triggerVoiceAsk() },
     { type: 'separator' },
     { label: '设置', click: () => createSettingsWindow() },
-    { label: '🐧 桌面宠物（开 / 关）', click: () => pet.togglePet() },
+    { label: '🐧 显示桌面宠物', type: 'checkbox', checked: petOn, click: () => setPetEnabled(!petOn) },
+    { label: '把宠物叫回主屏', click: () => { setPetEnabled(true); pet.rescue(); } },
     { label: '隐藏悬浮球', click: () => ballWin.hide() },
     { type: 'separator' },
     { label: '退出', click: () => { app.isQuiting = true; app.quit(); } }
@@ -1636,7 +1750,11 @@ function bootstrapApp() {
 
     // ---- Jarvis 能力（工具 / MCP / Skills / 记忆 / 人格 / 开机自启 / TTS）----
     try {
+      // 定时任务 / 主动关注的日志也写进启动日志
+      global.__XW_LOG__ = (m) => logLine('jarvis', m);
       jarvis.bindConfig(() => loadConfig());
+      // 定时任务结果 / 地震 / 热搜的主动播报出口
+      jarvis.bindProactive(onProactive);
       jarvis.registerAll();
       // 开机自启以本地标记为准，避免系统项被清理后失效
       autostart.syncOnBoot();
@@ -1667,10 +1785,15 @@ function bootstrapApp() {
       logLine('updater', '更新模块加载失败: ' + (e && e.message));
     }
 
-    // 看门狗：确认悬浮球窗口真的建出来了。
+    // 看门狗：确认悬浮球 / 宠物窗口真的建出来了，并且一直老实待在屏幕上。
     // 曾经出现过「主进程活着但窗口不可见」的情况 —— 用户双击新实例时
     // 会拿到单实例锁并静默退出，表现为「怎么点都打不开」。这里做一次自检。
-    setTimeout(() => {
+    // 宠物窗口单独盯：透明窗口偶发 ready-to-show 不触发，现象就是「宠物没显示」；
+    // 它还可能运行中自己长高、被顶到屏幕外，所以启动查一次之后每 60s 再复查。
+    let lastPetSnap = '';
+    let petTicks = 0;
+    const petWatchdog = () => {
+      petTicks++;
       const ballOk = ballWin && !ballWin.isDestroyed();
       const visible = ballOk ? ballWin.isVisible() : false;
       if (!ballOk || !visible) {
@@ -1682,10 +1805,26 @@ function bootstrapApp() {
           ballWin.show();
           logLine('watchdog', '已强制显示悬浮球窗口');
         }
-      } else {
-        logLine('watchdog', '悬浮球正常');
       }
-    }, 6000);
+
+      // ---- 宠物 ----
+      try {
+        const r = pet.selfCheck();
+        // 前几轮一律记（用户反馈「宠物没显示」时，这几行就是证据），
+        // 之后只在「动手修了」或「尺寸/可见性变了」时记，免得刷屏
+        const snap = r.diag ? `${r.diag.size.join('x')} vis=${r.diag.visible}` : 'none';
+        if (r.fixed) {
+          logLine('watchdog', `宠物自检：${r.fixed} | ${JSON.stringify(r.diag || {})}`);
+        } else if (!r.ok || snap !== lastPetSnap || petTicks <= 5) {
+          logLine('watchdog', `宠物状态 ${JSON.stringify(r.diag || {})}`);
+        }
+        lastPetSnap = snap;
+      } catch (e) {
+        logLine('watchdog', '宠物自检失败: ' + ((e && e.message) || e));
+      }
+    };
+    setTimeout(petWatchdog, 6000);
+    setInterval(petWatchdog, 60000);
 
     screen.on('display-metrics-changed', () => {
       // 分辨率变化时把球拉回可见区域

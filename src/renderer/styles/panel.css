@@ -1076,3 +1076,45 @@ body { border-radius: 0; }
   max-width: 160px; max-height: 120px; border-radius: 8px;
   border: 1px solid rgba(255,255,255,.35); display: block;
 }
+
+/* ---------- 定时任务 ---------- */
+.sched-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.sched-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 11px; border-radius: 10px;
+  background: var(--bg-soft, #f6f7f9); border: 1px solid var(--border, #e5e7eb);
+}
+.sched-item.off { opacity: .55; }
+.sched-main { flex: 1; min-width: 0; }
+.sched-title { font-size: 13px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
+.sched-meta { font-size: 11px; color: var(--text-2, #6b7280); margin-top: 3px; }
+.sched-prompt {
+  font-size: 11px; color: var(--text-3, #9ca3af); margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.sched-ops { display: flex; flex-direction: column; gap: 5px; flex: none; }
+.btn-mini {
+  border: 1px solid var(--border, #e5e7eb); background: var(--bg, #fff);
+  color: var(--text-2, #6b7280); border-radius: 7px; padding: 4px 8px;
+  font-size: 11px; cursor: pointer; font-family: inherit; white-space: nowrap;
+}
+.btn-mini:hover { border-color: var(--brand); color: var(--brand); }
+.btn-mini.danger:hover { border-color: #ef4444; color: #ef4444; }
+.tag-ai {
+  font-size: 10px; font-weight: 400; color: var(--brand);
+  background: var(--brand-soft, #eef3ff); border-radius: 5px; padding: 1px 5px;
+}
+
+/* 星期多选 */
+.weekday-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+.weekday-picker .wd {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--border, #e5e7eb); background: var(--bg, #fff);
+  font-size: 12px; color: var(--text-2, #6b7280); cursor: pointer; position: relative;
+}
+.weekday-picker .wd input { position: absolute; opacity: 0; pointer-events: none; }
+.weekday-picker .wd:has(input:checked) {
+  border-color: var(--brand); color: var(--brand); background: var(--brand-soft, #eef3ff); font-weight: 600;
+}

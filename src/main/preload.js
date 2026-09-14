@@ -153,6 +153,10 @@ contextBridge.exposeInMainWorld('xw', {
   petSetOpacity: (v) => ipcRenderer.invoke('pet:set-opacity', v),
   petSetTop: (v) => ipcRenderer.invoke('pet:set-top', v),
   petResize: () => ipcRenderer.invoke('pet:resize'),
+  // 找不到宠物时的救援：叫回主屏 / 重新载入 / 看一眼诊断信息
+  petRescue: () => ipcRenderer.invoke('pet:rescue'),
+  petReload: () => ipcRenderer.invoke('pet:reload'),
+  petDiag: () => ipcRenderer.invoke('pet:diag'),
   // 让宠物替小问播报（面板 / 任意窗口调用，主进程转发给宠物窗口）
   petSay: (text) => ipcRenderer.invoke('pet:say-out', text),
   onPetSay: (cb) => {
@@ -262,5 +266,26 @@ contextBridge.exposeInMainWorld('xw', {
     return () => ipcRenderer.removeListener('agent:confirm', h);
   },
 
-  jarvisStatus: () => ipcRenderer.invoke('jarvis:status')
+  jarvisStatus: () => ipcRenderer.invoke('jarvis:status'),
+
+  // ================= 定时任务 =================
+  scheduleList: () => ipcRenderer.invoke('schedule:list'),
+  schedulePresets: () => ipcRenderer.invoke('schedule:presets'),
+  scheduleAdd: (input) => ipcRenderer.invoke('schedule:add', input),
+  scheduleAddPreset: (key) => ipcRenderer.invoke('schedule:add-preset', key),
+  scheduleUpdate: (id, patch) => ipcRenderer.invoke('schedule:update', { id, patch }),
+  scheduleRemove: (id) => ipcRenderer.invoke('schedule:remove', id),
+  scheduleRun: (id) => ipcRenderer.invoke('schedule:run', id),
+  scheduleStatus: () => ipcRenderer.invoke('schedule:status'),
+
+  // ================= 主动关注 =================
+  watchStatus: () => ipcRenderer.invoke('watch:status'),
+  watchCheck: (source) => ipcRenderer.invoke('watch:check', source),
+
+  // 主进程主动播报（定时任务结果 / 地震 / 热搜）
+  onProactive: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('proactive:msg', h);
+    return () => ipcRenderer.removeListener('proactive:msg', h);
+  }
 });
