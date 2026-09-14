@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>小问截图</title>
+  <link rel="stylesheet" href="./styles/capture.css" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+  <div id="mask">
+    <div id="shadeTop" class="shade"></div>
+    <div id="shadeBottom" class="shade"></div>
+    <div id="shadeLeft" class="shade"></div>
+    <div id="shadeRight" class="shade"></div>
+  </div>
+
+  <div id="sel" class="hidden">
+    <div class="handle" data-h="nw"></div>
+    <div class="handle" data-h="ne"></div>
+    <div class="handle" data-h="sw"></div>
+    <div class="handle" data-h="se"></div>
+    <div id="sizeTip">0 × 0</div>
+    <div id="toolbar">
+      <button id="btnOk" title="完成（Enter）">✓ 完成</button>
+      <button id="btnFull" title="截取整个屏幕">全屏</button>
+      <button id="btnCancel" title="取消（Esc）">✕</button>
+    </div>
+  </div>
+
+  <div id="hint">拖框选择区域 · Esc 取消 · Enter 完成 · 双击截全屏</div>
+
+  <script src="./js/capture.js"></script>
+</body>
+</html>

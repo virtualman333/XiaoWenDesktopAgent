@@ -100,6 +100,33 @@ contextBridge.exposeInMainWorld('xw', {
     return () => ipcRenderer.removeListener('wake:sync', handler);
   },
 
+  // ---- 截图 ----
+  captureInit: () => ipcRenderer.invoke('capture:__init'),
+  captureDone: (rect) => ipcRenderer.send('capture:__done', rect),
+  captureCancel: () => ipcRenderer.send('capture:__done', null),
+  captureFull: (opts) => ipcRenderer.invoke('capture:full', opts || {}),
+  captureRegion: (opts) => ipcRenderer.invoke('capture:region', opts || {}),
+  captureDir: () => ipcRenderer.invoke('capture:dir'),
+  captureOpenDir: () => ipcRenderer.invoke('capture:open-dir'),
+  captureRead: (p) => ipcRenderer.invoke('capture:read', p),
+  onCapture: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('capture:done', h);
+    return () => ipcRenderer.removeListener('capture:done', h);
+  },
+
+  // ---- 自动更新 ----
+  updaterState: () => ipcRenderer.invoke('updater:state'),
+  updaterCheck: () => ipcRenderer.invoke('updater:check'),
+  updaterDownload: () => ipcRenderer.invoke('updater:download'),
+  updaterInstall: () => ipcRenderer.invoke('updater:install'),
+  updaterOpenReleases: () => ipcRenderer.invoke('updater:open-releases'),
+  onUpdaterEvent: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('updater:event', h);
+    return () => ipcRenderer.removeListener('updater:event', h);
+  },
+
   // ---- 其他 ----
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   openUserData: () => ipcRenderer.invoke('open:userdata'),
@@ -200,6 +227,30 @@ contextBridge.exposeInMainWorld('xw', {
   // Agent
   agentRun: (payload) => ipcRenderer.invoke('agent:run', payload),
   agentConfirmReply: (id, approved) => ipcRenderer.invoke('agent:confirm-reply', { id, approved }),
+
+  // 子代理编排（小问派活 / 监督）
+  orchRun: (goal) => ipcRenderer.invoke('orch:run', { goal }),
+  orchAbort: () => ipcRenderer.invoke('orch:abort'),
+  onOrchPlan: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('orch:plan', h);
+    return () => ipcRenderer.removeListener('orch:plan', h);
+  },
+  onOrchTask: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('orch:task', h);
+    return () => ipcRenderer.removeListener('orch:task', h);
+  },
+  onOrchAsk: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('orch:ask', h);
+    return () => ipcRenderer.removeListener('orch:ask', h);
+  },
+  onOrchDone: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('orch:done', h);
+    return () => ipcRenderer.removeListener('orch:done', h);
+  },
   onAgentTool: (cb) => {
     const h = (_e, p) => cb(p);
     ipcRenderer.on('agent:tool', h);

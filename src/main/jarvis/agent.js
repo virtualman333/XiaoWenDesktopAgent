@@ -67,7 +67,7 @@ function toolNameOf(name) {
 }
 
 // ---------------- 单次流式请求 ----------------
-async function chatOnce({ baseUrl, apiKey, model, messages, toolDefs, sender, signal, temperature }) {
+async function chatOnce({ baseUrl, apiKey, model, messages, toolDefs, sender, signal, temperature, quiet }) {
   const body = {
     model,
     messages,
@@ -118,7 +118,10 @@ async function chatOnce({ baseUrl, apiKey, model, messages, toolDefs, sender, si
       const delta = choice.delta || {};
       if (delta.content) {
         text += delta.content;
-        try { sender && !sender.isDestroyed() && sender.send('chat:delta', delta.content); } catch (e) { /* ignore */ }
+        // quiet：子代理 / 主管内部的中间调用，不要把碎片文本刷到主人的面板上
+        if (!quiet) {
+          try { sender && !sender.isDestroyed() && sender.send('chat:delta', delta.content); } catch (e) { /* ignore */ }
+        }
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {
@@ -148,17 +151,36 @@ async function chatOnce({ baseUrl, apiKey, model, messages, toolDefs, sender, si
 }
 
 // ---------------- 工具执行 ----------------
-async function runOneTool(call, { sender, settings, sessionId }) {
+async function runOneTool(call, { sender, settings, sessionId, intercept, workerId }) {
   const name = call.function.name;
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch (e) { args = {}; }
+
+  // 上层接管的虚拟工具（例如子代理向主管请示）：返回 null 表示继续走正常执行
+  if (typeof intercept === 'function') {
+    try {
+      const hijacked = await intercept(name, args, call);
+      if (hijacked !== null && hijacked !== undefined) {
+        const out = String((hijacked && hijacked.content) || '');
+        try {
+          sender && !sender.isDestroyed() && sender.send('agent:tool', {
+            id: call.id, name, args, status: 'result', ok: true,
+            output: out.slice(0, 3000), virtual: true, workerId: workerId || null
+          });
+        } catch (e) { /* ignore */ }
+        return { role: 'tool', tool_call_id: call.id, name, content: out };
+      }
+    } catch (e) {
+      return { role: 'tool', tool_call_id: call.id, name, content: `请示失败：${(e && e.message) || e}` };
+    }
+  }
 
   const isDanger = settings.dangerTools.includes(name);
   const needConfirm = settings.confirmMode === 'all'
     || (settings.confirmMode === 'danger' && isDanger);
 
   const emit = (payload) => {
-    try { sender && !sender.isDestroyed() && sender.send('agent:tool', payload); } catch (e) { /* ignore */ }
+    try { sender && !sender.isDestroyed() && sender.send('agent:tool', { ...payload, workerId: workerId || null }); } catch (e) { /* ignore */ }
   };
   emit({ id: call.id, name, args, status: 'start', danger: isDanger });
 
@@ -233,6 +255,8 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
     '3. 工具失败时换一种方式重试，最多两次。',
     '4. 最后用自然语言向主人汇报结果，不要罗列原始工具输出。'
   );
+  // 子代理 / 编排场景追加的角色指令
+  if (opts.systemExtra) parts.push(String(opts.systemExtra));
   const systemMsg = { role: 'system', content: parts.join('\n\n') };
 
   // 工具清单
@@ -242,13 +266,17 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
     if (opts.useSkills !== false) toolDefs.push(SKILL_TOOL);
     if (opts.useMcp !== false && mcpManager) toolDefs = toolDefs.concat(mcpManager.toolDefinitions());
   }
+  if (Array.isArray(opts.extraTools) && opts.extraTools.length) toolDefs = toolDefs.concat(opts.extraTools);
+  if (Array.isArray(opts.dropTools) && opts.dropTools.length) {
+    toolDefs = toolDefs.filter((t) => !opts.dropTools.includes(t.function.name));
+  }
 
   const history = sanitizeMessages(messages);
   const convo = [systemMsg, ...history.filter((m) => m.role !== 'system')];
 
   let fullText = '';
   let rounds = 0;
-  const MAX_ROUNDS = 8;
+  const MAX_ROUNDS = opts.maxRounds || 8;
 
   // 外部状态钩子（宠物联动 / UI 指示器等），任何异常都不允许影响主流程
   const hooks = opts.hooks || {};
@@ -270,7 +298,7 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
       rounds++;
       const { text, toolCalls } = await chatOnce({
         baseUrl, apiKey, model, messages: convo, toolDefs, sender, signal: sig,
-        temperature: cfg.temperature
+        temperature: cfg.temperature, quiet: opts.quiet === true
       });
       if (text) fullText += text;
 
@@ -285,7 +313,10 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
       const toolNames = toolCalls.map((c) => (c.function && c.function.name) || '').filter(Boolean);
       fire('onTool', { names: toolNames, status: 'start' });
       for (const call of toolCalls) {
-        const msg = await runOneTool(call, { sender, settings, sessionId: opts.sessionId });
+        const msg = await runOneTool(call, {
+          sender, settings, sessionId: opts.sessionId,
+          intercept: opts.intercept, workerId: opts.workerId || null
+        });
         convo.push(msg);
       }
       fire('onTool', { names: toolNames, status: 'end' });

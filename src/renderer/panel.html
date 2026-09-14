@@ -100,10 +100,27 @@
       </div>
     </main>
 
+    <!-- 子代理任务看板：小问派了什么活、谁在干、卡在哪问了什么 -->
+    <div class="orch-board" id="orchBoard" style="display:none">
+      <div class="orch-head">
+        <span class="orch-title">子代理任务</span>
+        <span class="orch-progress" id="orchProgress"></span>
+        <button class="orch-close" id="orchClose" title="收起">✕</button>
+      </div>
+      <div class="orch-list" id="orchList"></div>
+    </div>
+
     <!-- 输入区 -->
     <footer class="composer">
+      <div class="attach-bar" id="attachBar" style="display:none"></div>
       <div class="composer-inner">
         <textarea id="input" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button class="icon-btn" id="btnShot" title="截图提问（Alt+Shift+A）">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+            <circle cx="12" cy="13" r="4"/>
+          </svg>
+        </button>
         <button class="send-btn" id="btnSend" title="发送">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"/>
@@ -138,6 +155,7 @@
         <button class="st-nav-item" data-tab="mcp">MCP 服务器</button>
         <button class="st-nav-item" data-tab="skills">Skills</button>
         <button class="st-nav-item" data-tab="voice">语音</button>
+        <button class="st-nav-item" data-tab="capture">截图与更新</button>
         <button class="st-nav-item" data-tab="pet">🐧 桌面宠物</button>
         <button class="st-nav-item" data-tab="advanced">显示与数据</button>
       </nav>
@@ -309,6 +327,36 @@
 
           <h3>工具清单</h3>
           <div class="tool-list" id="toolList"></div>
+
+          <h3>子代理编排（常任务自动分派）</h3>
+          <div class="hint">
+            开启后，遇到「多步骤 / 批量 / 要跑一会儿」的常任务，小问会自己拆成若干子任务派给子代理，
+            派完立刻告诉你，之后只做监督和收尾汇报，不再一步步问你。子代理拿不准会回头请示小问，由小问直接拍板。
+          </div>
+          <div class="field row">
+            <label><b>启用子代理编排</b></label>
+            <label class="switch"><input type="checkbox" id="orchEnabled" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>自动判断常任务并分派<span class="hint-inline">关闭则只有你明确说「分给子代理」才拆</span></label>
+            <label class="switch"><input type="checkbox" id="orchAutoDelegate" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>小问复核每个子任务结果<span class="hint-inline">多花一点 token，换来更稳的监督</span></label>
+            <label class="switch"><input type="checkbox" id="orchReview" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>一次最多拆几个子任务</label>
+            <input type="number" id="orchMaxTasks" min="1" max="10" step="1" class="num-mini" />
+          </div>
+          <div class="field row">
+            <label>同时最多跑几个子代理</label>
+            <input type="number" id="orchMaxWorkers" min="1" max="4" step="1" class="num-mini" />
+          </div>
+          <div class="field row">
+            <label>单个任务失败最多重试几次</label>
+            <input type="number" id="orchRetry" min="0" max="3" step="1" class="num-mini" />
+          </div>
         </section>
 
         <!-- ---------- MCP ---------- -->
@@ -524,6 +572,74 @@
         </section>
 
         <!-- ---------- 桌面宠物 ---------- -->
+        <!-- ---------- 截图与更新 ---------- -->
+        <section class="st-section" data-tab="capture">
+          <h3>截图</h3>
+          <div class="hint">
+            按快捷键框选一块屏幕：截图会存盘、复制到剪贴板，并自动带到对话框里，你可以直接问小问「这是啥 / 哪里报错了」。
+          </div>
+          <div class="field row">
+            <label><b>启用截图快捷键</b></label>
+            <label class="switch"><input type="checkbox" id="capEnabled" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>框选截图快捷键</label>
+            <input type="text" id="capRegionKey" placeholder="Alt+Shift+A" />
+          </div>
+          <div class="field row">
+            <label>整屏截图快捷键</label>
+            <input type="text" id="capFullKey" placeholder="Alt+Shift+S" />
+          </div>
+          <div class="field">
+            <label>截完之后</label>
+            <select id="capAfter">
+              <option value="ask">存盘 + 复制 + 带到对话框（推荐）</option>
+              <option value="save">只存盘</option>
+              <option value="clipboard">只复制到剪贴板</option>
+              <option value="none">存盘，不复制</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>保存目录</label>
+            <input type="text" id="capDir" placeholder="留空用「图片 / 小问截图」" />
+          </div>
+          <div class="cap-actions">
+            <button class="btn-ghost" id="capNow">立即框选截图</button>
+            <button class="btn-ghost" id="capOpenDir">打开保存目录</button>
+          </div>
+
+          <h3>自动更新</h3>
+          <div class="hint">
+            每次启动静默检查一次 GitHub Releases，有新版本后台下好，下完问你要不要重启安装，不打断你手上的事。
+          </div>
+          <div class="field row">
+            <label><b>启动时检查更新</b></label>
+            <label class="switch"><input type="checkbox" id="upEnabled" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>后台自动下载</label>
+            <label class="switch"><input type="checkbox" id="upSilent" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>退出时自动应用更新</label>
+            <label class="switch"><input type="checkbox" id="upOnQuit" /><span></span></label>
+          </div>
+          <div class="field row">
+            <label>接收预发布版本</label>
+            <label class="switch"><input type="checkbox" id="upPre" /><span></span></label>
+          </div>
+          <div class="up-box">
+            <div class="up-line" id="upState">当前版本 —</div>
+            <div class="up-bar"><i id="upBar"></i></div>
+            <div class="up-actions">
+              <button class="btn-ghost" id="upCheck">检查更新</button>
+              <button class="btn-ghost" id="upDownload">下载</button>
+              <button class="btn-primary" id="upInstall" style="display:none">立即安装并重启</button>
+              <button class="btn-ghost" id="upReleases">发布页</button>
+            </div>
+          </div>
+        </section>
+
         <section class="st-section" data-tab="pet">
           <h3>桌面宠物</h3>
           <div class="field row">

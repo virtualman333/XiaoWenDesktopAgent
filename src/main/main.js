@@ -9,6 +9,9 @@ const jarvis = require('./jarvis');
 const autostart = require('./jarvis/autostart');
 // 桌面宠物（QQ 企鹅式互动宠物）
 const pet = require('./pet');
+// 截图（全屏 / 框选）与自动更新
+const capture = require('./capture');
+const updater = require('./updater');
 
 const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5199';
@@ -340,6 +343,24 @@ const DEFAULT_CONFIG = {
   petTop: true,          // 窗口置顶
   petInteraction: true,  // 心情衰减 / 随机台词
   petAgentLink: true,    // 宠物 × Agent 联动：小问干活时宠物同步演出
+  // ---- 截图 ----
+  captureEnabled: true,          // 开启截图快捷键
+  captureRegionHotkey: 'Alt+Shift+A', // 框选截图
+  captureFullHotkey: 'Alt+Shift+S',   // 整屏截图
+  captureAfter: 'ask',           // ask=存盘+复制+打开面板附图 / save=只存盘 / clipboard=只复制 / none=只存盘不复制
+  captureDir: '',                // 留空则用「图片/小问截图」
+  // ---- 自动更新 ----
+  autoUpdate: true,              // 启动时静默检查
+  autoUpdateSilent: true,        // 有更新就后台下载，下完再问
+  autoUpdatePrerelease: false,   // 是否接收预发布版本
+  autoUpdateInstallOnQuit: true, // 退出时自动应用已下载的更新
+  autoUpdateNotify: true,        // 下载完成后弹窗提醒
+  // ---- 子代理编排（常任务自动分配）----
+  orchEnabled: true,             // 开启后复杂任务自动拆分给子代理
+  orchMaxTasks: 6,               // 一次最多拆几个子任务
+  orchMaxWorkers: 2,             // 同时跑几个子代理
+  orchRetry: 1,                  // 单个子任务失败最多重试几次
+  orchAutoDelegate: true,        // 判断为「常任务」时自动走编排，不再逐步请示
   history: [],
   maxHistory: 200,
   setupDone: false // 是否已完成首次配置引导（新机 clone 后为 false，会弹出引导）
@@ -650,6 +671,32 @@ function registerHotkeys() {
   try {
     globalShortcut.register('CommandOrControl+Shift+Space', () => createPanelWindow());
   } catch (_) {}
+
+  // 截图快捷键（放在 unregisterAll 之后，否则会被清掉）
+  try { capture.registerShortcuts(); } catch (e) { console.error('[capture] hotkey:', e && e.message); }
+}
+
+/** 截图完成：把结果送到对话面板（顺手把面板打开） */
+function onCaptureNotify(_kind, payload) {
+  try {
+    const p = { ...(payload || {}) };
+    // 大图不直接走 IPC，让面板自己按路径读，避免一次性传几 MB 字符串
+    if (p.dataUrl && p.dataUrl.length > 3 * 1024 * 1024) {
+      delete p.dataUrl;
+      p.tooLarge = true;
+    }
+    const win = createPanelWindow();
+    const send = () => {
+      try { if (win && !win.isDestroyed()) win.webContents.send('capture:done', p); } catch (e) { /* ignore */ }
+    };
+    if (win && !win.isDestroyed() && win.webContents.isLoading()) {
+      win.webContents.once('did-finish-load', send);
+    } else {
+      send();
+    }
+  } catch (e) {
+    console.error('[capture] notify:', e && e.message);
+  }
 }
 
 function triggerVoiceAsk() {
@@ -1573,6 +1620,11 @@ function bootstrapApp() {
 
     createBallWindow();
     createTray();
+    // 截图配置要先绑定：registerHotkeys 里注册截图快捷键时会读它
+    try {
+      capture.bindConfig(() => loadConfig());
+      capture.bindNotify(onCaptureNotify);
+    } catch (e) { logLine('capture', '初始化失败: ' + (e && e.message)); }
     registerHotkeys();
 
     // ---- 新机首次启动：还没配过大模型 Key，直接把面板弹出来做引导 ----
@@ -1607,6 +1659,27 @@ function bootstrapApp() {
       logLine('jarvis', '模块已加载');
     } catch (e) {
       logLine('jarvis', '模块加载失败: ' + (e && e.stack || e));
+    }
+
+    // ---- 截图 ----
+    try {
+      capture.bindConfig(() => loadConfig());
+      capture.bindNotify(onCaptureNotify);
+      capture.register();
+      logLine('capture', '截图模块已加载');
+    } catch (e) {
+      logLine('capture', '截图模块加载失败: ' + (e && e.message));
+    }
+
+    // ---- 自动更新 ----
+    try {
+      updater.bindConfig(() => loadConfig());
+      updater.register();
+      // 晚一点再查：先把窗口和宠物都拉起来，别让更新检查拖慢启动
+      setTimeout(() => updater.checkOnBoot(), 8000);
+      logLine('updater', updater.isAvailable() ? '更新模块已加载' : '未安装 electron-updater，跳过');
+    } catch (e) {
+      logLine('updater', '更新模块加载失败: ' + (e && e.message));
     }
 
     // 看门狗：确认悬浮球窗口真的建出来了。

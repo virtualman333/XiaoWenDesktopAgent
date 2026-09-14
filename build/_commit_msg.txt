@@ -1,0 +1,33 @@
+新增子代理编排 / 截图问答 / 自动更新：v1.5.0
+
+子代理编排（小问当主管）
+- 新增 src/main/jarvis/orchestrator.js：
+  plan（小问判断是否拆、拆成几个）→ 派活并立刻告诉主人 → 子代理执行
+  → 每个结果小问复核，不过就改派重试 → 汇总汇报
+- 子代理带 ask_supervisor 工具，拿不准请示小问；小问优先决策（不反问主人），
+  决策记录同步到任务看板；单任务最多请示 3 次
+- 子代理静默输出（quiet）、没有 delegate_task（防套娃）、有自己的角色指令
+- agent.runAgent 新增 opts：intercept（工具接管）/ extraTools / dropTools /
+  systemExtra / quiet / maxRounds / workerId
+- jarvis/index.js：agent:run 里先判断要不要编排，新增 orch:run / orch:abort；
+  普通对话里小问也能用 delegate_task 临时派活
+- 面板新增任务看板（任务状态 / 摘要 / 子代理问了什么、小问怎么决定的）
+- 新增 npm run test:orch（build/_orch_test.mjs，59 项全过）
+
+截图
+- 新增 src/main/capture.js：desktopCapturer 抓屏，支持整屏 / 框选、多屏、缩放，
+  存盘到「图片/小问截图」+ 复制剪贴板 + 带到对话框（大图走路径回读）
+- 新增截图框选层 capture.html/js/css：拖框、移动、四角手柄、双击全屏、Esc 取消
+- 快捷键 Alt+Shift+A 框选 / Alt+Shift+S 整屏（可配）
+- 内置 screenshot 工具改用 capture 模块，失败回退 PowerShell / screencapture
+- 面板：输入框附件条 + 截图按钮，发送时转成多模态 image_url
+
+自动更新
+- 新增 src/main/updater.js：electron-updater 封装，状态机广播 updater:event，
+  启动 8 秒后静默检查、后台下载、下完弹窗询问、可手动检查 / 下载 / 安装
+- package.json 加 publish（GitHub Releases）+ generateUpdatesFilesForAllChannels
+- 未打包 / 未装组件时全部降级为空操作
+
+其他
+- 宠物工具名汉化表换成项目真实工具名（并兼容通用命名）
+- config.example.json / CHANGELOG / README 同步

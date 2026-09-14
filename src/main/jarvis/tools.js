@@ -147,8 +147,28 @@ function decodeGbk(buf) {
   }
 }
 
-async function screenshot() {
-  const settings = store.getToolSettings();
+/**
+ * 截图：优先用 Electron 的 desktopCapturer（支持多屏、缩放、区域框选），
+ * 失败再退回系统命令（PowerShell / screencapture / import）。
+ */
+async function screenshot({ mode, display } = {}) {
+  try {
+    const capture = require('../capture');
+    const displayId = display ? capture.displayIdByIndex(display) : undefined;
+    const r = mode === 'region'
+      ? await capture.captureRegion({ displayId })
+      : await capture.captureFull({ displayId, silent: true });
+    if (r && r.ok) return { ok: true, file: r.path, width: r.width, height: r.height };
+    // 用户主动取消（Esc）不算失败，但要如实告诉模型
+    if (r && r.error && /取消/.test(r.error)) return { ok: false, error: r.error };
+    if (r && r.error) console.warn('[screenshot] 主方案失败，回退系统命令：', r.error);
+  } catch (e) {
+    console.warn('[screenshot] 主方案异常，回退系统命令：', e && e.message);
+  }
+  return screenshotFallback();
+}
+
+async function screenshotFallback() {
   const dir = path.join(app.getPath('userData'), 'jarvis', 'shots');
   try { await fsp.mkdir(dir, { recursive: true }); } catch (e) { /* ignore */ }
   const file = path.join(dir, 'shot-' + Date.now() + '.png');
@@ -329,8 +349,15 @@ const DEFINITIONS = [
     type: 'function',
     function: {
       name: 'screenshot',
-      description: '截取当前屏幕并保存为 PNG，返回文件路径。',
-      parameters: { type: 'object', properties: {}, required: [] }
+      description: '截取屏幕画面并保存为 PNG（同时复制到剪贴板）。mode=full 直接截光标所在的整块屏幕；mode=region 会弹框选窗口请主人选区域。想了解屏幕上有什么、帮主人看界面/报错时用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['full', 'region'], description: 'full=整屏（默认），region=弹框让主人选区域' },
+          display: { type: 'number', description: '第几块屏幕，从 1 开始；留空截光标所在屏幕' }
+        },
+        required: []
+      }
     }
   },
   {
@@ -557,8 +584,10 @@ async function executeInner(name, args) {
       catch (e) { return { ok: false, error: e && e.message }; }
     }
     case 'screenshot': {
-      const r = await screenshot();
-      return r.ok ? { ok: true, output: `截图已保存：${r.file}`, file: r.file } : r;
+      const r = await screenshot({ mode: args.mode, display: args.display });
+      if (!r.ok) return r;
+      try { require('electron').clipboard.writeImage(require('electron').nativeImage.createFromPath(r.file)); } catch (e) { /* ignore */ }
+      return { ok: true, output: `截图已保存：${r.file}（${r.width || '?'}×${r.height || '?'}，已复制到剪贴板）`, file: r.file };
     }
     case 'clipboard_read': {
       let text = '';

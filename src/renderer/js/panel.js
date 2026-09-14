@@ -48,8 +48,20 @@ const els = {
   voiceCancel: $('voiceCancel'),
   drawer: $('sessionDrawer'),
   drawerMask: $('drawerMask'),
-  sessionList: $('sessionList')
+  sessionList: $('sessionList'),
+  // 截图附件 + 子代理任务看板
+  btnShot: $('btnShot'),
+  attachBar: $('attachBar'),
+  orchBoard: $('orchBoard'),
+  orchList: $('orchList'),
+  orchProgress: $('orchProgress'),
+  orchClose: $('orchClose')
 };
+
+// 待发送的截图：[{ path, dataUrl }]
+let pendingShots = [];
+// 子代理任务看板：id -> { title, status, summary, asks }
+const orchTasks = new Map();
 
 // 页面用途：设置窗口会带 #settings 打开。
 function detectPage() {
@@ -133,7 +145,12 @@ async function initChat() {
 
   bindAsrEvents();
   bindConfirmEvents();
+  bindOrch();
+  bindUpdater();
   renderSessionList();
+
+  // 截图结果（快捷键 / 工具调用）自动带到输入框
+  try { window.xw.onCapture && window.xw.onCapture((p) => attachShot(p)); } catch (e) { /* ignore */ }
 }
 
 /** 载入（或迁移）当前会话 */
@@ -242,6 +259,15 @@ function bindEvents() {
   els.btnClose.addEventListener('click', () => window.xw.closePanel());
   els.voiceCancel.addEventListener('click', cancelVoice);
   els.btnSessions.addEventListener('click', () => toggleDrawer());
+  if (els.btnShot) {
+    els.btnShot.addEventListener('click', async () => {
+      const r = await window.xw.captureRegion();
+      if (r && r.ok) setToast('已截图，问点什么吧');
+    });
+  }
+  if (els.orchClose) {
+    els.orchClose.addEventListener('click', () => { orchTasks.clear(); orchRender(); });
+  }
   els.drawerMask.addEventListener('click', () => toggleDrawer(false));
   $('btnNewSession').addEventListener('click', async () => {
     await window.xw.sessionCreate('新对话');
@@ -299,16 +325,40 @@ async function send(textOverride) {
   autoResize();
   updateSendBtn(true);
 
+  // 截图附件：随这条消息一起发出去（多模态模型才看得懂，纯文本模型会自动忽略）
+  const shots = pendingShots.slice();
+  pendingShots = [];
+  renderAttach();
+
   lastUserText = text;
-  addMessageBubble('user', text);
+  const userNode = addMessageBubble('user', text);
+  if (userNode && shots.length) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-shots';
+    shots.forEach((s) => {
+      if (!s.dataUrl) return;
+      const im = document.createElement('img');
+      im.className = 'msg-shot';
+      im.src = s.dataUrl;
+      im.alt = '截图';
+      wrap.appendChild(im);
+    });
+    if (wrap.children.length) userNode.appendChild(wrap);
+  }
   messages.push({ role: 'user', content: text });
-  persist({ role: 'user', content: text });
+  persist({ role: 'user', content: text + (shots.length ? `\n[附 ${shots.length} 张截图]` : '') });
 
   const maxTurns = cfg.contextTurns ?? 10;
   const recent = maxTurns > 0 ? messages.slice(-maxTurns * 2) : messages.slice(-1);
   const payload = recent
     .filter((m) => m.content)
     .map((m) => ({ role: normalizeRole(m.role), content: m.content }));
+
+  // 最后一条用户消息换成「文本 + 图片」的多模态格式
+  const imgs = shots.filter((s) => s.dataUrl).map((s) => ({ type: 'image_url', image_url: { url: s.dataUrl } }));
+  if (imgs.length && payload.length) {
+    payload[payload.length - 1] = { role: 'user', content: [{ type: 'text', text }, ...imgs] };
+  }
 
   currentAiNode = addMessageBubble('ai', '', { thinking: true });
 
@@ -799,6 +849,7 @@ function initSettings() {
   bindSkills();
   bindVoice();
   bindPet();
+  bindCapture();
   bindAdvanced();
   fillAll();
 }
@@ -823,6 +874,7 @@ function fillAll() {
   fillMcp();
   fillSkills();
   fillVoice();
+  fillCapture();
   refreshGpuStatus();
 }
 
@@ -996,6 +1048,35 @@ function bindAgent() {
     const arr = $('agPaths').value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     await window.xw.toolsSettingsSet({ allowPaths: arr });
   });
+
+  // ---- 子代理编排 ----
+  const orchToggles = {
+    orchEnabled: 'orchEnabled',
+    orchAutoDelegate: 'orchAutoDelegate',
+    orchReview: 'orchReview'
+  };
+  Object.entries(orchToggles).forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: el.checked });
+      setToast('已保存');
+    });
+  });
+  const orchNums = {
+    orchMaxTasks: 'orchMaxTasks',
+    orchMaxWorkers: 'orchMaxWorkers',
+    orchRetry: 'orchRetry'
+  };
+  Object.entries(orchNums).forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      const n = Number(el.value);
+      cfg = await window.xw.setConfig({ [key]: isNaN(n) ? undefined : n });
+      setToast('已保存');
+    });
+  });
 }
 
 async function fillAgent() {
@@ -1009,6 +1090,16 @@ async function fillAgent() {
   $('agConfirm').value = s.confirmMode || 'danger';
   $('agTimeout').value = Math.round((s.shellTimeoutMs || 30000) / 1000);
   $('agPaths').value = (s.allowPaths || []).join('\n');
+
+  // 子代理编排
+  const chk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  const num = (id, v) => { const el = $(id); if (el) el.value = v; };
+  chk('orchEnabled', cfg.orchEnabled !== false);
+  chk('orchAutoDelegate', cfg.orchAutoDelegate !== false);
+  chk('orchReview', cfg.orchReview !== false);
+  num('orchMaxTasks', Number(cfg.orchMaxTasks) || 6);
+  num('orchMaxWorkers', Number(cfg.orchMaxWorkers) || 2);
+  num('orchRetry', Number(cfg.orchRetry) === undefined ? 1 : Number(cfg.orchRetry));
 
   const tools = await window.xw.toolsList();
   const box = $('toolList');
@@ -1504,6 +1595,202 @@ async function refreshGpuStatus() {
     $('stGpuStatus').textContent = '无法获取状态：' + e.message;
     $('stGpuStatus').className = 'gpu-status warn';
   }
+}
+
+// ================== 截图（附件 / 快捷键结果） ==================
+function renderAttach() {
+  if (!els.attachBar) return;
+  els.attachBar.innerHTML = '';
+  if (!pendingShots.length) { els.attachBar.style.display = 'none'; return; }
+  els.attachBar.style.display = 'flex';
+  pendingShots.forEach((shot, i) => {
+    const d = document.createElement('div');
+    d.className = 'attach-item';
+    d.innerHTML = '<img alt="截图" /><button class="attach-del" title="移除">✕</button>';
+    d.querySelector('img').src = shot.dataUrl || '';
+    d.querySelector('.attach-del').onclick = () => { pendingShots.splice(i, 1); renderAttach(); };
+    els.attachBar.appendChild(d);
+  });
+}
+
+async function attachShot(payload) {
+  if (!payload || payload.ok === false) return;
+  let dataUrl = payload.dataUrl;
+  // 大图主进程不直接传，按路径读回来
+  if (!dataUrl && payload.path) {
+    try {
+      const r = await window.xw.captureRead(payload.path);
+      if (r && r.ok) dataUrl = r.dataUrl;
+    } catch (e) { /* ignore */ }
+  }
+  pendingShots.push({ path: payload.path || '', dataUrl: dataUrl || '' });
+  renderAttach();
+  if (!els.input.value.trim()) els.input.value = '看看这张图';
+  els.input.focus();
+  setStatus('截图已带上，想问什么直接说');
+}
+
+// ================== 子代理任务看板 ==================
+function orchRender() {
+  if (!els.orchBoard || !els.orchList) return;
+  const list = Array.from(orchTasks.values());
+  if (!list.length) { els.orchBoard.style.display = 'none'; return; }
+  els.orchBoard.style.display = 'block';
+
+  const done = list.filter((t) => t.status === 'done').length;
+  const failed = list.filter((t) => t.status === 'failed').length;
+  els.orchProgress.textContent = `完成 ${done}/${list.length}${failed ? ` · 失败 ${failed}` : ''}`;
+
+  els.orchList.innerHTML = '';
+  list.forEach((t) => {
+    const mark = t.status === 'done' ? '✅' : t.status === 'failed' ? '❌' : t.status === 'running' ? '⏳' : '⏸';
+    const div = document.createElement('div');
+    div.className = 'orch-item st-' + (t.status || 'pending');
+    let html = `<span class="oi-mark">${mark}</span><span><span class="oi-title">${escapeHtml(t.title || '子任务')}</span>`;
+    if (t.summary) html += `<span class="orch-sum">${escapeHtml(String(t.summary).slice(0, 140))}</span>`;
+    (t.asks || []).forEach((a) => {
+      html += `<span class="orch-ask">问：${escapeHtml(a.question || '')}<br>小问：${escapeHtml(a.answer || '')}</span>`;
+    });
+    html += '</span>';
+    div.innerHTML = html;
+    els.orchList.appendChild(div);
+  });
+}
+
+function bindOrch() {
+  try {
+    window.xw.onOrchPlan && window.xw.onOrchPlan((p) => {
+      orchTasks.clear();
+      (p && p.tasks ? p.tasks : []).forEach((t) => {
+        orchTasks.set(t.id, { id: t.id, title: t.title, status: t.status || 'pending', summary: '', asks: [] });
+      });
+      orchRender();
+      setStatus(`已派 ${orchTasks.size} 个子任务给子代理`);
+    });
+
+    window.xw.onOrchTask && window.xw.onOrchTask((p) => {
+      if (!p || !p.id) return;
+      const cur = orchTasks.get(p.id) || { id: p.id, title: p.title, status: 'pending', summary: '', asks: [] };
+      if (p.title) cur.title = p.title;
+      if (p.status) cur.status = p.status;
+      if (p.summary) cur.summary = p.summary;
+      orchTasks.set(p.id, cur);
+      orchRender();
+    });
+
+    window.xw.onOrchAsk && window.xw.onOrchAsk((p) => {
+      if (!p || p.status !== 'answered') return;
+      const cur = orchTasks.get(p.taskId);
+      if (!cur) return;
+      cur.asks = (cur.asks || []).concat([{ question: p.question, answer: p.answer }]).slice(-3);
+      orchTasks.set(p.taskId, cur);
+      orchRender();
+    });
+
+    window.xw.onOrchDone && window.xw.onOrchDone((p) => {
+      if (p && Array.isArray(p.tasks)) {
+        p.tasks.forEach((t) => orchTasks.set(t.id, Object.assign(orchTasks.get(t.id) || {}, t)));
+      }
+      orchRender();
+      setStatus(p && p.ok ? '子代理全部收工' : '有任务没跑通');
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// ================== 自动更新状态条 ==================
+function bindUpdater() {
+  try { window.xw.onUpdaterEvent && window.xw.onUpdaterEvent((s) => renderUpdater(s)); } catch (e) { /* ignore */ }
+  try {
+    window.xw.updaterState && window.xw.updaterState().then(renderUpdater).catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+
+function renderUpdater(s) {
+  const line = $('upState');
+  if (!s || !line) return;
+  let txt = s.message || '';
+  if (s.state === 'idle') txt = txt || '已经是最新版本';
+  if (s.state === 'available' && s.version) txt = `发现新版本 v${s.version}`;
+  if (s.state === 'unpackaged') txt = txt || '开发模式不检查更新';
+  line.textContent = [s.currentVersion ? `当前 v${s.currentVersion}` : '', txt].filter(Boolean).join(' · ');
+  const bar = $('upBar');
+  if (bar) bar.style.width = (s.state === 'downloaded' ? 100 : (s.percent || 0)) + '%';
+  const inst = $('upInstall');
+  if (inst) inst.style.display = s.state === 'downloaded' ? '' : 'none';
+  const dl = $('upDownload');
+  if (dl) dl.style.display = s.state === 'available' ? '' : 'none';
+}
+
+// ================== 截图与更新设置 ==================
+function bindCapture() {
+  const toggles = {
+    capEnabled: 'captureEnabled',
+    upEnabled: 'autoUpdate',
+    upSilent: 'autoUpdateSilent',
+    upOnQuit: 'autoUpdateInstallOnQuit',
+    upPre: 'autoUpdatePrerelease'
+  };
+  Object.entries(toggles).forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: el.checked });
+      setToast('已保存');
+    });
+  });
+
+  const texts = { capRegionKey: 'captureRegionHotkey', capFullKey: 'captureFullHotkey', capDir: 'captureDir' };
+  Object.entries(texts).forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ [key]: el.value.trim() });
+      setToast('已保存');
+    });
+  });
+
+  const after = $('capAfter');
+  if (after) {
+    after.addEventListener('change', async () => {
+      cfg = await window.xw.setConfig({ captureAfter: after.value });
+      setToast('已保存');
+    });
+  }
+
+  const now = $('capNow');
+  if (now) now.addEventListener('click', async () => {
+    const r = await window.xw.captureRegion();
+    if (r && r.ok) setToast('已截图：' + (r.path || ''));
+  });
+  const dir = $('capOpenDir');
+  if (dir) dir.addEventListener('click', () => window.xw.captureOpenDir());
+
+  const check = $('upCheck');
+  if (check) check.addEventListener('click', async () => {
+    check.disabled = true;
+    try { renderUpdater(await window.xw.updaterCheck()); } finally { check.disabled = false; }
+  });
+  const down = $('upDownload');
+  if (down) down.addEventListener('click', async () => renderUpdater(await window.xw.updaterDownload()));
+  const inst = $('upInstall');
+  if (inst) inst.addEventListener('click', () => window.xw.updaterInstall());
+  const rel = $('upReleases');
+  if (rel) rel.addEventListener('click', () => window.xw.updaterOpenReleases());
+}
+
+function fillCapture() {
+  const set = (id, v) => { const el = $(id); if (el) el.value = v; };
+  const setChk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setChk('capEnabled', cfg.captureEnabled !== false);
+  set('capRegionKey', cfg.captureRegionHotkey || 'Alt+Shift+A');
+  set('capFullKey', cfg.captureFullHotkey || 'Alt+Shift+S');
+  set('capAfter', cfg.captureAfter || 'ask');
+  set('capDir', cfg.captureDir || '');
+  setChk('upEnabled', cfg.autoUpdate !== false);
+  setChk('upSilent', cfg.autoUpdateSilent !== false);
+  setChk('upOnQuit', cfg.autoUpdateInstallOnQuit !== false);
+  setChk('upPre', cfg.autoUpdatePrerelease === true);
+  bindUpdater();
 }
 
 // ---------- 保存 ----------

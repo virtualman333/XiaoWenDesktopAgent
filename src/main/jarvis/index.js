@@ -11,14 +11,24 @@ const tools = require('./tools');
 const skills = require('./skills');
 const agent = require('./agent');
 const { McpManager } = require('./mcp');
+const orchestrator = require('./orchestrator');
 // 桌面宠物（Agent 状态联动用；宠物窗口没开时 petAct 内部会直接返回）
 const pet = require('../pet');
 
 const mcp = new McpManager();
 agent.bindMcp(mcp);
 
+// 当前正在跑的编排器（中断时要一并停下）
+let activeOrch = null;
+
 // 供主进程中断正在进行的 Agent 请求
-const abortAgent = () => agent.abortCurrent();
+const abortAgent = () => {
+  agent.abortCurrent();
+  if (activeOrch) {
+    try { activeOrch.abort(); } catch (e) { /* ignore */ }
+    activeOrch = null;
+  }
+};
 
 let registered = false;
 
@@ -174,7 +184,7 @@ function registerAll() {
   });
 
   // ---------------- Agent ----------------
-  ipcMain.handle('agent:run', async (event, { messages, sessionId } = {}) => {
+  ipcMain.handle('agent:run', async (event, { messages, sessionId, delegate } = {}) => {
     const cfg = getConfig() || {};
     if (!cfg.agentEnabled) {
       return { ok: false, error: 'AGENT_DISABLED' };
@@ -187,6 +197,26 @@ function registerAll() {
       try { pet.petAct(a, o); } catch (e) { /* ignore */ }
     };
 
+    // ---- 常任务自动分派给子代理 ----
+    // 小问先判断要不要拆：拆了就派活 + 监督 + 汇总，没拆就自己干。
+    const goal = lastUserText(messages);
+    const orchOn = cfg.orchEnabled !== false && cfg.orchAutoDelegate !== false;
+    if (orchOn && goal && (delegate === true || (delegate !== false && orchestrator.looksLikeBigJob(goal)))) {
+      const orch = new orchestrator.Orchestrator({ cfg, sender: event.sender, sessionId });
+      activeOrch = orch;
+      try {
+        const r = await orch.run(goal);
+        if (r && r.delegated) {
+          return { ok: r.ok !== false, text: r.text, orchestrated: true, tasks: r.tasks };
+        }
+        // 不用拆 → 下面照常单步执行
+      } catch (e) {
+        console.error('[orch] 编排失败，回退单步:', e && e.message);
+      } finally {
+        if (activeOrch === orch) activeOrch = null;
+      }
+    }
+
     return agent.runAgent({
       messages,
       cfg,
@@ -197,6 +227,9 @@ function registerAll() {
         useSkills: cfg.agentUseSkills !== false,
         useMemory: cfg.agentUseMemory !== false,
         sessionId,
+        // 小问在对话中也能临时派个活给子代理
+        extraTools: [orchestrator.DELEGATE_TOOL],
+        intercept: (name, args) => handleDelegate(name, args, { cfg, sender: event.sender, sessionId }),
         hooks: {
           onStart: () => act('think'),
           onTool: (p) => act(p && p.status === 'start' ? 'work' : 'think',
@@ -210,6 +243,25 @@ function registerAll() {
   });
   ipcMain.handle('agent:confirm-reply', (_e, { id, approved }) => agent.resolveConfirm(id, approved));
 
+  // ---------------- 子代理编排 ----------------
+  // 主人明确要求「分给子代理去做」时走这里，不必靠关键词触发
+  ipcMain.handle('orch:run', async (event, { goal, sessionId } = {}) => {
+    const cfg = getConfig() || {};
+    if (!cfg.agentEnabled) return { ok: false, error: 'AGENT_DISABLED' };
+    if (!String(goal || '').trim()) return { ok: false, error: '没有任务内容' };
+    const orch = new orchestrator.Orchestrator({ cfg, sender: event.sender, sessionId });
+    activeOrch = orch;
+    try {
+      const r = await orch.run(String(goal));
+      return { ok: r.ok !== false, delegated: !!r.delegated, text: r.text, tasks: r.tasks };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    } finally {
+      if (activeOrch === orch) activeOrch = null;
+    }
+  });
+  ipcMain.handle('orch:abort', () => { abortAgent(); return true; });
+
   // ---------------- 总览 ----------------
   ipcMain.handle('jarvis:status', async () => ({
     autostart: autostart.status().enabled,
@@ -219,6 +271,40 @@ function registerAll() {
     skills: (await skills.listSkills()).length,
     memories: store.getMemories().length
   }));
+}
+
+/** 取最后一条用户消息：编排只关心主人最后交代的这件事 */
+function lastUserText(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (!m || m.role !== 'user') continue;
+    let c = m.content;
+    if (Array.isArray(c)) {
+      c = c.map((x) => (x && (x.text || x.image_url)) || '').filter(Boolean).join(' ');
+    }
+    c = String(c == null ? '' : c).trim();
+    if (c) return c;
+  }
+  return '';
+}
+
+/** 主对话中「小问主动派活」：delegate_task 工具落到这里 */
+async function handleDelegate(name, args, { cfg, sender, sessionId }) {
+  if (name !== 'delegate_task') return null;
+  try {
+    const r = await orchestrator.delegateOnce({
+      title: (args && args.title) || '子任务',
+      instruction: (args && args.instruction) || '',
+      context: (args && args.context) || '',
+      cfg,
+      sender,
+      sessionId
+    });
+    return { content: r.output || '（子代理没有返回内容）' };
+  } catch (e) {
+    return { content: `派活失败：${(e && e.message) || e}` };
+  }
 }
 
 async function connectOne(cfg) {

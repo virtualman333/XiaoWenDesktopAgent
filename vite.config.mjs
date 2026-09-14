@@ -11,7 +11,8 @@ export default defineConfig({
       input: {
         panel: resolve(__dirname, 'src/renderer/panel.html'),
         ball: resolve(__dirname, 'src/renderer/ball.html'),
-        pet: resolve(__dirname, 'src/renderer/pet.html')
+        pet: resolve(__dirname, 'src/renderer/pet.html'),
+        capture: resolve(__dirname, 'src/renderer/capture.html')
       }
     }
   },

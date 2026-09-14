@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -14,7 +14,8 @@
     "test:wake": "node build/_wake_test.mjs",
     "test:pet": "node build/_pet_link_test.mjs",
     "dist": "npm run build:renderer && electron-builder --win nsis",
-    "dist:dir": "npm run build:renderer && electron-builder --win dir"
+    "dist:dir": "npm run build:renderer && electron-builder --win dir",
+    "test:orch": "node build/_orch_test.mjs"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -26,7 +27,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.4.0",
+      "output": "release-v1.5.0",
       "buildResources": "build"
     },
     "files": [
@@ -44,7 +45,8 @@
         }
       ],
       "icon": "build/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "generateUpdatesFilesForAllChannels": true
     },
     "nsis": {
       "oneClick": false,
@@ -52,9 +54,15 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "小问助手"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "virtualman333",
+      "repo": "XiaoWenDesktopAgent"
     }
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "ws": "^8.18.0"
   }
 }

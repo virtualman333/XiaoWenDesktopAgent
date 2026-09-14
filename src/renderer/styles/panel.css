@@ -1004,3 +1004,75 @@ body { border-radius: 0; }
 .pet-chip-ico { font-size: 26px; line-height: 1; }
 .pet-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .pet-actions .btn-ghost { flex: 1; min-width: 96px; }
+
+/* ---------- 截图附件条 ---------- */
+.attach-bar {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; margin-bottom: 6px;
+  background: var(--bg-soft, #f6f7f9); border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+}
+.attach-item { position: relative; width: 62px; height: 62px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border, #e5e7eb); background: #fff; }
+.attach-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-del {
+  position: absolute; right: 2px; top: 2px; width: 16px; height: 16px;
+  border: none; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff;
+  font-size: 11px; line-height: 16px; cursor: pointer; padding: 0;
+}
+.attach-del:hover { background: rgba(220,38,38,.85); }
+
+/* ---------- 子代理任务看板 ---------- */
+.orch-board {
+  border-top: 1px solid var(--border, #e5e7eb);
+  background: var(--bg-soft, #f6f7f9);
+  padding: 8px 12px 10px;
+  max-height: 210px; overflow-y: auto;
+}
+.orch-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.orch-title { font-size: 12px; font-weight: 600; color: var(--text-2, #6b7280); }
+.orch-progress { font-size: 11px; color: var(--text-3, #9ca3af); flex: 1; }
+.orch-close { border: none; background: transparent; color: var(--text-3, #9ca3af); cursor: pointer; font-size: 12px; }
+.orch-close:hover { color: var(--text); }
+.orch-list { display: flex; flex-direction: column; gap: 5px; }
+.orch-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 12px; line-height: 1.5; color: var(--text-2, #6b7280);
+  background: var(--bg, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px; padding: 6px 9px;
+}
+.orch-item .oi-mark { flex: none; }
+.orch-item .oi-title { color: var(--text); font-weight: 500; }
+.orch-item.st-running { border-color: #93c5fd; }
+.orch-item.st-done { border-color: #86efac; }
+.orch-item.st-failed { border-color: #fca5a5; }
+.orch-sum { display: block; color: var(--text-3, #9ca3af); font-size: 11px; margin-top: 2px; word-break: break-word; }
+.orch-ask {
+  display: block; margin-top: 3px; padding-left: 8px;
+  border-left: 2px solid #fcd34d; color: var(--text-3, #9ca3af); font-size: 11px;
+  word-break: break-word;
+}
+
+/* ---------- 截图与更新设置 ---------- */
+.field input[type="number"] {
+  width: 88px; padding: 7px 9px; border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px; background: var(--bg, #fff); color: var(--text);
+  font-size: 13px; font-family: inherit; outline: none;
+}
+.field input[type="number"]:focus { border-color: var(--brand); }
+.cap-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+.cap-actions .btn-ghost { flex: 1; min-width: 110px; }
+.up-box {
+  margin-top: 12px; padding: 12px; border-radius: 10px;
+  background: var(--bg-soft, #f6f7f9); border: 1px solid var(--border, #e5e7eb);
+}
+.up-line { font-size: 12px; color: var(--text-2, #6b7280); margin-bottom: 8px; word-break: break-all; }
+.up-bar { height: 4px; border-radius: 2px; background: #e5e7eb; overflow: hidden; margin-bottom: 10px; }
+.up-bar i { display: block; height: 100%; width: 0; background: var(--brand); transition: width .25s; }
+.up-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.up-actions .btn-ghost, .up-actions .btn-primary { flex: 1; min-width: 88px; }
+
+.msg-shots { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-shot {
+  max-width: 160px; max-height: 120px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.35); display: block;
+}

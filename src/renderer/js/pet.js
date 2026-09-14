@@ -159,6 +159,27 @@ const AGENT_ACT = {
 
 // 内置工具名 → 宠物能念出来的中文（认不出来的直接原样念）
 const TOOL_LABEL = {
+  get_datetime: '看时间',
+  system_info: '查机器状态',
+  shell_exec: '跑命令',
+  file_list: '翻目录',
+  file_read: '读文件',
+  file_write: '写文件',
+  file_delete: '删文件',
+  app_open: '开软件',
+  process_list: '看进程',
+  process_kill: '结束进程',
+  screenshot: '看屏幕',
+  clipboard_read: '看剪贴板',
+  clipboard_write: '写剪贴板',
+  notify: '发通知',
+  memory_add: '记笔记',
+  memory_search: '翻记忆',
+  http_request: '访问网络',
+  load_skill: '用技能',
+  ask_supervisor: '请示小问',
+  delegate_task: '派活给子代理',
+  // 兼容别的工具集 / MCP 常见命名（同义名字也能翻出来）
   read_file: '读文件',
   write_file: '写文件',
   list_dir: '翻目录',
@@ -167,11 +188,6 @@ const TOOL_LABEL = {
   web_search: '搜网页',
   fetch_url: '抓网页',
   get_time: '看时间',
-  clipboard_read: '看剪贴板',
-  clipboard_write: '写剪贴板',
-  screenshot: '看屏幕',
-  notify: '发通知',
-  memory_search: '翻记忆',
   use_skill: '用技能'
 };
 
