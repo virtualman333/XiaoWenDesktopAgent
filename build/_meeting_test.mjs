@@ -818,16 +818,24 @@ section('11. 界面接线：搜纪要走主进程那份实现，界面不另写�
     }
   };
   walk(path.join(ROOT, 'src', 'renderer'));
-  const renderer = rendererFiles.map((f) => fs.readFileSync(f, 'utf-8')).join('\n').replace(/\s+/g, '');
+
+  const strip = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+  const rendererCode = rendererFiles.map((f) => strip(fs.readFileSync(f, 'utf-8'))).join('\n');
+  ok(rendererCode.length > 2000, '剥完注释的界面源码不是空的（剥没了下面会在空集上假绿）');
+  // 反向对照：这个判定方式确实认得出现有的调用点，否则「找不到」全是假报告
+  ok(rendererCode.includes('window.xw.meetingSearch('), '反向对照：能认出已知的调用点');
 
   const meetingApis = (preload.match(/^\s{2}(meeting[A-Z]\w*)\s*:\s*\(/gm) || []).map((s) => s.trim().split(':')[0]);
   ok(meetingApis.length >= 8, '从 preload 里解析出的会议 API 太少 —— 解析失灵时下面会在空集上假绿', meetingApis.join(','));
-  // 已知未接线（有意保留，要给界面用就把它从这份名单里删掉）：
-  //   meetingGet          取一份纪要的完整记录（含转写），界面目前只用索引行
-  //   meetingSnapshotText 取当前正在记录的这一段的转写
-  const ALLOWED_DEAD = ['meetingGet', 'meetingSnapshotText'];
-  const dead = meetingApis.filter((n) => !ALLOWED_DEAD.includes(n) && !renderer.includes(n));
-  eq(dead.join(','), '', '★ 会议 API 实现了却没有任何界面调用方 —— meetingSearch / meetingFolder 都这样躺过（写了没人用）');
+  // ★ 没有豁免名单。此前这里挂着 ALLOWED_DEAD = ['meetingGet', 'meetingSnapshotText']：
+  //   两个能力主进程都实现了，界面上却一直没有入口 —— 想知道「刚才那个会记了什么」得离开本窗口去翻文件，
+  //   录制中「记到哪了」也看不到。豁免名单一旦存在就会一直存在（本仓的棘轮教训），本轮接线后清空它。
+  //   判据同时收紧：从「文件里出现过这个名字」改成「必须有真实调用点 window.xw.<name>(」——
+  //   前者在注释里提一句就能满足，等于没锁。
+  const orphan = meetingApis.filter((n) => !rendererCode.includes(`window.xw.${n}(`));
+  eq(orphan.join(','), '', '★ 会议 API 实现了却没有任何界面调用点（meetingGet / meetingSnapshotText 都这样躺过几轮）');
 
   const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'panel.html'), 'utf-8');
   const panel = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'js', 'panel.js'), 'utf-8');
@@ -852,6 +860,95 @@ section('11. 界面接线：搜纪要走主进程那份实现，界面不另写�
   ok(body.includes('window.xw.meetingSearch('), '★ 列表渲染调的是主进程的检索实现 —— 界面里不许再写一套关键词匹配');
   ok(body.includes('mtKeyword'), '★ 关键词从状态里读：列表每 5 秒刷新一次，刷新时不能把正在搜的关键词清掉');
   ok(panel.includes('mtSearchHint'), '搜索时的条数与空结果提示都走列表入口');
+
+  // ---- 本轮新接的两条路：meetingGet（看全文）/ meetingSnapshotText（看当前转写） ----
+  ok(html.includes('id="mtDetail"'), '纪要面板有全文容器');
+  ok(html.includes('id="mtSnapshot"') && html.includes('id="mtSnapshotBox"'), '状态区有「看当前转写」入口与预览框');
+
+  const detailBody = fnBody(panel, 'async function toggleMeetingDetail');
+  ok(detailBody.length > 300, '抠到了全文展开函数体');
+  ok(detailBody.includes('window.xw.meetingGet('), '★ 全文走主进程的 meetingGet，界面不自己去读纪要文件');
+  ok(/rec\.transcript/.test(detailBody), '★ 全文里要显示转写正文（只显示要点等于还是没看到内容）');
+  ok(/rec\.summary/.test(detailBody), '摘要从记录里取，界面不重新解析 Markdown');
+  ok(/!\s*rec/.test(detailBody), '读不到记录时要有显式分支（索引在、文件被外面删掉的情形）');
+
+  // 全文容器必须留在列表**外面**：列表每 5 秒随状态一起重建，
+  // 展开态写在行内的话刚点开就被冲掉、转写读到一半还会跳回顶部。
+  // 断言落在「列表渲染不构建全文的 DOM」上 —— `mt-detail-*` 这几个类只在展开函数里用；
+  // 列表渲染只写 mtList（下面一条是它的正向对照，否则「不含」可能只是因为函数体抠错了）。
+  ok(body.includes("$('mtList')"), '反向对照：确实抠到了写列表的那段函数体');
+  ok(
+    !body.includes('addMtDetailSection(') && !body.includes('mt-detail-text'),
+    '★ 列表渲染不构建全文的 DOM（摘要分段与转写渲染只在展开函数里，否则每 5 秒重建一次、刚展开就被冲掉）'
+  );
+  ok(html.indexOf('id="mtDetail"') < html.indexOf('id="mtList"'), '全文容器是列表的兄弟节点，排在它前面');
+  ok(body.includes('markMeetingDetailButtons('), '列表重建后要把展开态补回来');
+  ok(body.includes('toggleMeetingDetail('), '★ 列表行上的「看」按钮接到了展开函数（按钮不加等于入口又没了）');
+  ok(panel.includes('mtDetailId'), '展开态存在模块级变量里，而不是随机体一起被重建');
+
+  const snapBody = fnBody(panel, 'async function refreshMeetingSnapshot');
+  ok(snapBody.length > 200, '抠到了转写预览的刷新函数体');
+  ok(snapBody.includes('window.xw.meetingSnapshotText('), '★ 预览走主进程的 meetingSnapshotText，界面不自己拼这一段');
+  ok(
+    panel.includes("$('mtSnapshot').addEventListener('click'"),
+    '「看当前转写」按钮有事件绑定（按钮画出来但没人接，等于没入口）'
+  );
+  const statusBody = fnBody(panel, 'async function refreshMeetingStatus');
+  ok(statusBody.includes('refreshMeetingSnapshot('), '状态轮询要顺带刷新预览（否则框开着永远停在那一段）');
+  const toggleSnap = fnBody(panel, 'async function toggleMeetingSnapshot');
+  ok(!toggleSnap.includes('setInterval'), '预览的刷新跟着已有的状态轮询走，不另起一个定时器');
+
+  // ---- meeting:get / meeting:snapshot-text：界面依赖它们，就真调一遍 ----
+  const getH = ipcHandlers.get('meeting:get');
+  ok(typeof getH === 'function', '★ 主进程注册了 meeting:get（「看」按钮的前提）');
+  const getRec = {
+    id: '20260917-1200-900',
+    app: '腾讯会议',
+    title: '排期同步',
+    startedAt: Date.now() - 600000,
+    endedAt: Date.now(),
+    durationMs: 600000,
+    segments: [{ at: Date.now(), text: '先做登录改版', source: 'loopback' }],
+    transcript: '[14:35] 先做登录改版',
+    summary: minutes.parseSummary(['## 主题', '排期同步', '', '## 要点', '- 登录改版优先', '', '## 待办', '- [ ] 整理排期表 —— 小王'].join('\n')),
+    stats: { segCount: 1, chars: 9, source: '系统声音' },
+    savedAt: Date.now()
+  };
+  minutes.save(getRec);
+  const full = await getH({}, getRec.id);
+  eq(full.transcript, '[14:35] 先做登录改版', 'meeting:get 取回的记录带全文转写');
+  eq((full.summary.todos || []).length, 1, 'meeting:get 取回的记录带待办');
+  eq(await getH({}, '20260917-1200-不存在'), null, '取不到时返回 null —— 界面必须显式处理，不能当空壳渲染');
+  minutes.remove('20260917-1200-900');
+
+  const snapH = ipcHandlers.get('meeting:snapshot-text');
+  ok(typeof snapH === 'function', '★ 主进程注册了 meeting:snapshot-text');
+  const idleSnap = await snapH({});
+  eq(idleSnap.ok, false, '没在记录时如实报失败（不拿空字符串假装成功）');
+  ok(!!idleSnap.error, '失败要给原因，界面照着显示');
+
+  // 开一场真的，录制中拉一次快照
+  {
+    const cfg2 = { meetingEnabled: true, meetingCaptureMic: true, asrApiKey: 'sk-test-key' };
+    meeting.bind({ getConfig: () => cfg2, log: () => {}, deliver: () => {}, isAsrBusy: () => false });
+    recorderScript = {
+      onStart: (ack) => {
+        ack({ ok: true, sources: ['系统声音'] });
+        const chunk = ipcListeners.get('minutes:chunk');
+        for (const t of ['甲：先过排期', '乙：登录改版优先']) chunk({}, { text: t, at: Date.now(), source: 'loopback' });
+      },
+      onStop: (ack) => ack({ ok: true })
+    };
+    const started = await meeting.startRecording('manual', { app: '腾讯会议' });
+    eq(started.ok, true, '起了一场真实录制（快照才有内容可拉）');
+    const mid = await snapH({});
+    eq(mid.ok, true, '录制中 meeting:snapshot-text 可用');
+    ok(String(mid.text).includes('登录改版'), '快照里就是这一段已经识别出来的转写', mid.text);
+    ok(mid.chars > 0, '带上本段累计字数，界面要显示');
+    await meeting.stopRecording('manual', { flushMs: 0 });
+    const after = await snapH({});
+    eq(after.ok, false, '停录之后快照如实说「没有在记录」，而不是留着上一段的内容');
+  }
 }
 
 // ================= 汇总 =================

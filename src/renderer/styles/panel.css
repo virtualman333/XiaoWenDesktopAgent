@@ -1328,6 +1328,34 @@ body { border-radius: 0; }
 }
 .mt-item-acts button:hover { border-color: var(--brand, #3b82f6); color: var(--brand, #3b82f6); }
 .mt-item-acts button.danger:hover { border-color: #ef4444; color: #ef4444; }
+
+/* 纪要全文（要点 / 待办 / 转写）：放在列表外面，所以加边框自成一块 */
+.mt-detail {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 10px;
+  padding: 10px 12px; margin-top: 8px; background: var(--bg-2, rgba(0, 0, 0, .02));
+}
+.mt-detail-head { font-size: 12.5px; font-weight: 600; color: var(--text-1, #111827); }
+.mt-detail-meta { font-size: 11px; color: var(--text-3, #9ca3af); margin-top: 3px; }
+.mt-detail-label {
+  font-size: 11.5px; font-weight: 600; color: var(--text-2, #6b7280);
+  margin: 9px 0 3px;
+}
+.mt-detail-list { margin: 0; padding-left: 18px; }
+.mt-detail-list li { font-size: 11.5px; color: var(--text-2, #6b7280); line-height: 1.75; }
+.mt-detail-text {
+  font-size: 11.5px; color: var(--text-2, #6b7280); line-height: 1.75;
+  background: var(--bg, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
+  padding: 8px 10px; margin: 0; max-height: 260px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word; font-family: inherit;
+}
+
+/* 录制中的转写预览：按需拉取，展开前不占高度 */
+.mt-snapshot {
+  font-size: 11.5px; color: var(--text-2, #6b7280); line-height: 1.75;
+  background: var(--bg, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
+  padding: 8px 10px; margin: 8px 0 0; max-height: 220px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word; font-family: inherit;
+}
 /* 录制中的实时条：贴在输入框上方，一眼能看到在记什么 */
 .mt-live {
   display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #b45309;

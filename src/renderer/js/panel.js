@@ -2660,6 +2660,10 @@ function bindMeeting() {
     refreshMeetingStatus();
   });
   $('mtFolder').addEventListener('click', () => window.xw.meetingFolder());
+  // 看当前转写：录制中「记到哪了」此前只有输入框上方那条一行摘要（还是截断到 40 字的），
+  // 想知道实际转写内容只能等结束生成纪要。主进程的 meeting:snapshot-text 一直是有的
+  // （取这一段到目前为止的完整转写），界面上没有入口 —— 这里只接线。
+  $('mtSnapshot').addEventListener('click', toggleMeetingSnapshot);
   // 搜纪要：主进程侧的 minutes.search() 一直是有的（先给 AI 的 search_minutes 工具用），
   // 界面上却一直没有入口 —— 攒到几十份之后，找「上周那场」只能一个个点开，
   // 或者干脆去文件夹里翻（列表只列最近 15 份，超出只提示「打开纪要文件夹」）。
@@ -2742,6 +2746,8 @@ async function refreshMeetingStatus() {
       + (d && d.reasons && d.reasons.length ? `<br><span style="opacity:.7">理由：${d.reasons[0]}</span>` : '');
     updateMtLive(s);
     renderMeetingList();
+    // 预览框开着时跟着这次轮询一起刷新；关着的话这个函数自己会早退，不发请求。
+    refreshMeetingSnapshot();
   } catch (e) {
     el.textContent = '状态：读取失败';
   }
@@ -2766,6 +2772,156 @@ let mtListCache = [];
 /** 纪要列表当前的搜索关键词（空 = 按时间倒序列出最近若干份） */
 let mtKeyword = '';
 let mtSearchTimer = null;
+/**
+ * 当前展开全文的那份纪要 id（空 = 没展开）。
+ *
+ * 展开态存在这里、**不放在列表行里**：列表每 5 秒随状态刷新一起重建，
+ * 写在行内的话刚点开就被冲掉；转写很长，重建成「回到顶部」还会让人丢阅读位置。
+ */
+let mtDetailId = '';
+/** 录制中转写预览是否展开 */
+let mtSnapshotOpen = false;
+
+/** 拉取当前这一段的完整转写（meeting:snapshot-text）。只在预览框展开时拉。 */
+async function refreshMeetingSnapshot() {
+  const box = $('mtSnapshotBox');
+  if (!box || box.hidden) return;
+  if (!window.xw.meetingSnapshotText) return;
+  let r = null;
+  try {
+    r = await window.xw.meetingSnapshotText();
+  } catch (e) {
+    r = null;
+  }
+  if (!r || !r.ok) {
+    box.textContent = `读取失败：${(r && r.error) || '未知原因'}`;
+    return;
+  }
+  const text = String(r.text || '').replace(/[ \t]+$/gm, '').trim();
+  // 「还没内容」与「读不出来」要说成两句不同的话 —— 否则刚开录时会像出了故障。
+  box.textContent = text
+    ? `${text}\n\n（本段累计 ${r.chars || 0} 字，随记录实时增长）`
+    : '这一段还没有可用内容（刚开录，或者目前只有噪音 / 静音）。';
+}
+
+/** 展开 / 收起「当前转写」预览 */
+async function toggleMeetingSnapshot() {
+  const box = $('mtSnapshotBox');
+  if (!box) return;
+  mtSnapshotOpen = !mtSnapshotOpen;
+  box.hidden = !mtSnapshotOpen;
+  if (!mtSnapshotOpen) {
+    box.textContent = '';
+    return;
+  }
+  await refreshMeetingSnapshot();
+  box.scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * 展开 / 收起一份纪要的全文（含转写）。
+ *
+ * `meetingGet` 一直在 preload 里挂着，界面只用索引行（标题 / 时长 / 字数 / 话题），
+ * 想看要点与待办只能「打开」丢给系统默认程序，或者去文件夹里翻 .json ——
+ * 而用户真正的问题「刚才那个会记了什么、我答应干什么」就卡在这一步。
+ */
+async function toggleMeetingDetail(id) {
+  const box = $('mtDetail');
+  if (!box || !id) return;
+  if (mtDetailId === id) {
+    mtDetailId = '';
+    box.hidden = true;
+    box.textContent = '';
+    markMeetingDetailButtons();
+    return;
+  }
+  if (!window.xw.meetingGet) return;
+  let rec = null;
+  try {
+    rec = await window.xw.meetingGet(id);
+  } catch (e) {
+    rec = null;
+  }
+  mtDetailId = id;
+  box.hidden = false;
+  box.textContent = '';
+  if (!rec) {
+    // 索引行在、文件读不到（被外面删掉或移走了）：如实说，别显示一个空壳。
+    box.textContent = '这份纪要的正文读不出来了 —— 文件可能已被移走或删除，索引里还留着这一行。';
+    markMeetingDetailButtons();
+    return;
+  }
+
+  const head = document.createElement('div');
+  head.className = 'mt-detail-head';
+  head.textContent = rec.title || rec.app || rec.id;
+  box.appendChild(head);
+
+  const meta = document.createElement('div');
+  meta.className = 'mt-detail-meta';
+  const s = rec.summary || {};
+  meta.textContent = [
+    rec.startedAt ? new Date(rec.startedAt).toLocaleString('zh-CN', { hour12: false }) : '',
+    mtFmtDur(rec.durationMs || 0),
+    `${(rec.stats && rec.stats.chars) || 0} 字`,
+    (s.todos || []).length ? `${s.todos.length} 项待办` : ''
+  ].filter(Boolean).join(' · ');
+  box.appendChild(meta);
+
+  // 摘要按「主题 / 要点 / 结论 / 待办 / 风险与疑问」逐段列；缺哪段就不显示哪段。
+  if (s.topic) addMtDetailSection(box, '主题', [s.topic]);
+  addMtDetailSection(box, '要点', s.points);
+  addMtDetailSection(box, '结论', s.decisions);
+  if (Array.isArray(s.todos) && s.todos.length) {
+    addMtDetailSection(box, '待办', s.todos.map((t) => `☐ ${t}`));
+  }
+  addMtDetailSection(box, '风险与疑问', s.risks);
+  if (!s.topic && !(s.points || []).length) {
+    // 摘要没生成出来时给原文，不要让用户以为「这份纪要没内容」
+    addMtDetailSection(box, '摘要', [s.raw || '（这次没有生成摘要）']);
+  }
+
+  const ta = document.createElement('div');
+  ta.className = 'mt-detail-label';
+  ta.textContent = '全文转写';
+  box.appendChild(ta);
+  const pre = document.createElement('pre');
+  pre.className = 'mt-detail-text';
+  pre.textContent = String(rec.transcript || '').trim() || '（这份纪要没有转写内容）';
+  box.appendChild(pre);
+
+  box.scrollIntoView({ block: 'nearest' });
+  markMeetingDetailButtons();
+}
+
+/** 往详情里加一段小标题 + 条目 */
+function addMtDetailSection(box, label, items) {
+  const list = (Array.isArray(items) ? items : []).map((x) => String(x)).filter((x) => x.trim());
+  if (!list.length) return;
+  const t = document.createElement('div');
+  t.className = 'mt-detail-label';
+  t.textContent = label;
+  box.appendChild(t);
+  const ul = document.createElement('ul');
+  ul.className = 'mt-detail-list';
+  for (const it of list) {
+    const li = document.createElement('li');
+    li.textContent = it;
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
+}
+
+/** 列表每次重建后，把「看」按钮的展开态补回来（状态在 mtDetailId 里，不在 DOM 里） */
+function markMeetingDetailButtons() {
+  const box = $('mtList');
+  if (!box) return;
+  for (const b of box.querySelectorAll('button[data-mt-detail]')) {
+    const on = !!mtDetailId && b.getAttribute('data-mt-detail') === mtDetailId;
+    b.textContent = on ? '收起' : '看';
+    b.title = on ? '收起这份纪要的要点与转写' : '看要点、待办与全文转写';
+  }
+}
 
 async function renderMeetingList() {
   const box = $('mtList');
@@ -2820,6 +2976,12 @@ async function renderMeetingList() {
 
     const acts = document.createElement('div');
     acts.className = 'mt-item-acts';
+    // 「看」= 在主进程里取这份纪要的完整记录（含要点 / 待办 / 全文转写），
+    // 不离开本窗口就能回答「刚才那个会记了什么、我答应干什么」。
+    const bView = document.createElement('button');
+    bView.setAttribute('data-mt-detail', r.id);
+    bView.textContent = '看';
+    bView.onclick = () => toggleMeetingDetail(r.id);
     const bOpen = document.createElement('button');
     bOpen.textContent = '打开';
     bOpen.title = '用系统默认程序打开 Markdown 纪要';
@@ -2829,11 +2991,13 @@ async function renderMeetingList() {
     bDel.className = 'danger';
     bDel.onclick = async () => {
       if (!confirm(`删除这份纪要？\n${r.title || r.id}`)) return;
+      if (mtDetailId === r.id) { mtDetailId = ''; const d = $('mtDetail'); if (d) { d.hidden = true; d.textContent = ''; } }
       await window.xw.meetingRemove(r.id);
       setToast('已删除');
       renderMeetingList();
       refreshMeetingStatus();
     };
+    acts.appendChild(bView);
     acts.appendChild(bOpen);
     acts.appendChild(bDel);
 
@@ -2849,6 +3013,8 @@ async function renderMeetingList() {
       : `还有 ${rows.length - 15} 份，用上面的搜索框按关键词找，或点「打开纪要文件夹」看全部`;
     box.appendChild(more);
   }
+  // 列表重建后把展开态补回来（状态在 mtDetailId 里，DOM 是每 5 秒新建的）
+  markMeetingDetailButtons();
 }
 
 /** 会议事件（检测到 / 开录 / 出纪要 / 丢弃）都会走到这里 */

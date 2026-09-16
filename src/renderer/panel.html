@@ -1055,8 +1055,11 @@
             <button class="btn-ghost" id="mtStart">开始记录</button>
             <button class="btn-ghost" id="mtStop">结束并生成纪要</button>
             <button class="btn-ghost" id="mtFolder">打开纪要文件夹</button>
+            <button class="btn-ghost" id="mtSnapshot" title="拉取这一段到目前为止的完整转写">看当前转写</button>
           </div>
           <div class="hint" id="mtDetectResult"></div>
+          <!-- 录制中的转写预览：按需拉取（meeting:snapshot-text），不点开就不占地方 -->
+          <pre class="mt-snapshot" id="mtSnapshotBox" hidden></pre>
 
           <h3>📝 最近的纪要</h3>
           <div class="field row">
@@ -1064,6 +1067,9 @@
             <button class="btn-ghost" id="mtSearchClear">全部</button>
           </div>
           <div class="hint" id="mtSearchHint"></div>
+          <!-- 纪要全文（含转写）：刻意**不**放在列表行里面 —— 列表每 5 秒随状态一起重建，
+               写在行内的话刚展开就会被冲掉、转写读到一半还会跳回顶部。 -->
+          <div class="mt-detail" id="mtDetail" hidden></div>
           <div class="mt-list" id="mtList"><div class="hint">还没有记录过会议</div></div>
         </section>
 
