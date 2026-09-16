@@ -279,6 +279,239 @@ section('问法 · 退化输入');
   ok(padded.question.endsWith('v'.repeat(20) + '\n```'), '尾部空白已裁掉，围栏紧贴内容');
 }
 
+// ---------------- 可配置规则 ----------------
+// 内置 5 类覆盖的是通用开发者场景；公司内部日志前缀、内部域名这些只能由主人自己配。
+// 下面这一组锁三件事：配置真的生效、配置写错不会崩、以及**安全边界不可配置**。
+
+const CORP_LOG = '[corp] 内部服务超时 trace_id=abc123 重试3次';
+const INTRANET_URL = 'https://intranet.corp.example.com/wiki/page/1234';
+const A_SECRET = 'api_key = "abcdef1234567890"';
+const AN_ERROR = 'TypeError: boom\n  at x (a.js:1)';
+
+section('可配置规则 · 自定义类型');
+{
+  const rules = clip.compileRules({
+    customKinds: [
+      {
+        id: 'corp-log',
+        label: '公司日志',
+        pattern: '^\\[corp\\]',
+        flags: 'm',
+        title: '这段公司日志要我看看吗？',
+        ask: '帮我分析这段公司日志。'
+      }
+    ]
+  });
+  eq(rules.warnings.length, 0, '合法配置不产生警告');
+
+  const r = clip.classifyClipboard(CORP_LOG, rules);
+  eq(r.worth, true, '自定义类型能命中');
+  eq(r.kind, 'corp-log', 'kind 用配置里的 id');
+  eq(r.title, '这段公司日志要我看看吗？', '标题用配置里的');
+
+  // 自定义优先于内置：同一段文本内置也会判成 error
+  const both = clip.classifyClipboard('[corp] 2026-09-16 ERROR 内部服务超时 trace_id=abc123', rules);
+  eq(both.kind, 'corp-log', '自定义类型优先于内置的 error');
+
+  // 不命中时退回内置判定
+  eq(clip.classifyClipboard(AN_ERROR, rules).kind, 'error', '不命中自定义时仍走内置');
+
+  // 不传规则时行为与加配置之前完全一致
+  eq(clip.classifyClipboard(CORP_LOG).worth, false, '不传规则时自定义类型不生效');
+  eq(clip.classifyClipboard(AN_ERROR).kind, 'error', '不传规则时内置判定不变');
+}
+
+section('可配置规则 · 关闭内置类型');
+{
+  eq(clip.classifyClipboard(INTRANET_URL).kind, 'url', '默认认链接');
+
+  const off = clip.compileRules({ disableKinds: ['url'] });
+  eq(clip.classifyClipboard(INTRANET_URL, off).worth, false, '关掉 url 后链接不再提示');
+  eq(clip.classifyClipboard(AN_ERROR, off).kind, 'error', '只关 url，不影响 error');
+
+  const bad = clip.compileRules({ disableKinds: ['url', 'nonexistent'] });
+  eq(bad.warnings.length, 1, '未知类型产生一条警告');
+  eq(bad.disableKinds.join(','), 'url', '合法的那个照常生效');
+  eq(clip.classifyClipboard(INTRANET_URL, bad).worth, false, '混合配置下 url 仍被关掉');
+}
+
+section('可配置规则 · 凭证识别不可配置（安全边界）');
+{
+  // 这是本组最重要的断言：配置只能决定「认什么」，不能决定「什么绝对不能提示」。
+  const r = clip.compileRules({ disableKinds: ['secret'] });
+  ok(r.warnings.length > 0, 'disableKinds 里的 secret 被拒绝并给出警告');
+  eq(r.disableKinds.length, 0, '没有任何内置类型被关掉');
+  const hit = clip.classifyClipboard(A_SECRET, r);
+  eq(hit.kind, 'secret', '凭证仍然被识别');
+  eq(hit.worth, false, '凭证仍然不提示');
+  eq(hit.preview, '', '凭证仍然不给预览');
+
+  // 黑名单与自定义类型也不能让凭证变得可见
+  const r2 = clip.compileRules({
+    ignorePatterns: ['abcdef'],
+    customKinds: [{ id: 'pretend', pattern: 'api_key' }]
+  });
+  eq(clip.classifyClipboard(A_SECRET, r2).kind, 'secret', '凭证判定先于 ignorePatterns 与 customKinds');
+
+  // 自定义类型不能占用内置 id（secret / ignore / 5 类）
+  for (const id of ['secret', 'ignore', 'error', 'url']) {
+    const bad = clip.compileRules({ customKinds: [{ id, pattern: 'x' }] });
+    ok(bad.warnings.length > 0 && bad.custom.length === 0, `customKinds 用内置 id「${id}」被拒绝`);
+  }
+}
+
+section('可配置规则 · 永不提示黑名单');
+{
+  const both = {
+    ignorePatterns: ['trace_id='],
+    customKinds: [{ id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]' }]
+  };
+  // 先确认不配黑名单时自定义类型确实会命中
+  const noIgnore = clip.compileRules({ customKinds: [{ id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]' }] });
+  eq(clip.classifyClipboard(CORP_LOG, noIgnore).kind, 'corp-log', '确认自定义类型本可命中');
+
+  eq(clip.classifyClipboard(CORP_LOG, clip.compileRules(both)).worth, false, '黑名单命中即静默（压过自定义类型）');
+  eq(clip.classifyClipboard(AN_ERROR, clip.compileRules(both)).kind, 'error', '黑名单不影响其它内容');
+}
+
+section('可配置规则 · g/y 标志必须去掉');
+{
+  const rules = clip.compileRules({
+    customKinds: [{ id: 'grule', label: 'G', pattern: 'corp', flags: 'gi' }]
+  });
+  eq(rules.custom.length, 1, '带 g 标志的规则仍可用');
+  eq(rules.custom[0].re.flags.includes('g'), false, '编译结果不含 g（test 会交替命中）');
+  // 带 g 的正则有 lastIndex 状态，连续 test() 会一次命中一次不命中 —— 三次都必须命中
+  const kinds = [0, 1, 2].map(() => clip.classifyClipboard(CORP_LOG, rules).kind);
+  eq(kinds.join(','), 'grule,grule,grule', '连续判定结果稳定');
+}
+
+section('可配置规则 · 写岔了也不能崩');
+{
+  const CASES = [
+    ['正则编译不过', { customKinds: [{ id: 'bad', pattern: '[' }] }],
+    ['正则为空', { customKinds: [{ id: 'bad', pattern: '   ' }] }],
+    ['正则超长', { customKinds: [{ id: 'bad', pattern: 'x'.repeat(201) }] }],
+    ['flags 非法', { customKinds: [{ id: 'bad', pattern: 'x', flags: 'q' }] }],
+    ['缺 id', { customKinds: [{ pattern: 'x' }] }],
+    // 这里的 pattern 要挑不会误命中探针文本的（首版用了 'x'，而 AN_ERROR 里有「at x」，
+    // 于是规则正常命中、被误判成「规则写错时内置判定失常」——是用例本身的问题）
+    ['重复 id', { customKinds: [{ id: 'a', pattern: 'zq1' }, { id: 'a', pattern: 'zq2' }] }],
+    ['不是对象', { customKinds: [42] }],
+    ['ignore 里混入数字', { ignorePatterns: [123] }],
+    ['整个配置不是对象', 'not-an-object'],
+    ['配置是数组', [1, 2]]
+  ];
+  for (const [name, raw] of CASES) {
+    let rules = null;
+    let threw = null;
+    try {
+      rules = clip.compileRules(raw);
+    } catch (e) {
+      threw = e;
+    }
+    ok(!threw, `compileRules 不抛异常：${name}`, threw && threw.message);
+    ok(rules && Array.isArray(rules.warnings), `返回结构完整：${name}`);
+
+    let r = null;
+    let threw2 = null;
+    try {
+      r = clip.classifyClipboard(AN_ERROR, rules);
+    } catch (e) {
+      threw2 = e;
+    }
+    ok(!threw2 && r && r.kind === 'error', `规则写错时内置判定照常：${name}`, threw2 && threw2.message);
+  }
+
+  for (const [name, raw] of [['undefined', undefined], ['null', null], ['空对象', {}]]) {
+    const r = clip.compileRules(raw);
+    eq(r.warnings.length, 0, `缺省配置无警告：${name}`);
+    eq(r.disableKinds.length, 0, `缺省配置无禁用：${name}`);
+    eq(r.custom.length, 0, `缺省配置无自定义：${name}`);
+  }
+
+  const many = clip.compileRules({
+    customKinds: Array.from({ length: 25 }, (_, i) => ({ id: 'k' + i, pattern: 'p' + i }))
+  });
+  eq(many.custom.length, 20, '自定义类型条数截到上限 20');
+  ok(many.warnings.some((w) => w.includes('上限')), '超上限会给出警告');
+}
+
+section('可配置规则 · 自定义类型的问法');
+{
+  const rules = clip.compileRules({
+    customKinds: [{ id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]', ask: '帮我分析这段公司日志。' }]
+  });
+
+  const one = clip.buildClipQuestion('corp-log', '[corp] 内部服务超时', rules);
+  ok(one.question.startsWith('帮我分析这段公司日志。'), '用配置里的问法');
+  ok(one.question.includes('[corp] 内部服务超时'), '内容带上了');
+  ok(!one.question.includes('```'), '单行不加围栏');
+  ok(one.hint.includes('公司日志'), '提示里带类型名');
+
+  const multi = clip.buildClipQuestion('corp-log', '[corp] a\n[corp] b', rules);
+  ok(multi.question.includes('```'), '多行加围栏');
+
+  // 没配 ask 时用兜底问法（带 label），不能退回中性说法
+  const r2 = clip.compileRules({ customKinds: [{ id: 'x1', label: '内部域名', pattern: 'a' }] });
+  const q = clip.buildClipQuestion('x1', 'https://a.internal/x', r2);
+  ok(q.question.includes('内部域名'), '兜底问法带类型名');
+  eq(q.hint.includes(clip.NEUTRAL_HINT), false, '自定义类型不走中性兜底');
+
+  // 内置类型仍然用自己的模板（没被自定义逻辑带偏）
+  eq(clip.buildClipQuestion('error', AN_ERROR, rules).hint, clip.ASK_TEMPLATES.error.hint, '内置类型模板不变');
+  eq(clip.buildClipQuestion('url', INTRANET_URL).question.includes('```'), false, '内置链接仍不加围栏');
+}
+
+section('可配置规则 · 热替换与容错');
+{
+  let text = INTRANET_URL;
+  const seen = [];
+  const w = clip.createClipSense({ readClip: () => text, onSuggest: (h) => seen.push(h.kind), cooldownMs: 0 });
+
+  ok(w.checkNow() !== null, '默认规则下链接命中');
+  eq(w.checkNow(), null, '同一段内容不重复提示');
+
+  w.setRules(clip.compileRules({ disableKinds: ['url'] }));
+  eq(w.checkNow(), null, '换规则后不会把刚看过的内容再弹一次');
+
+  text = 'https://other.example.com/page/99';
+  eq(w.checkNow(), null, '换规则后新链接不再命中');
+  eq(seen.join(','), 'url', '全程只提示了一次');
+
+  w.setRules(clip.compileRules({}));
+  text = 'https://third.example.com/page/1';
+  ok(w.checkNow() !== null, '换回默认规则后新链接恢复命中');
+  eq(seen.join(','), 'url,url', '共提示两次');
+
+  // 规则对象本身炸掉时，轮询器不能跟着停摆（主进程的定时器崩了就是整只宠物停摆）
+  const boom = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('规则对象炸了');
+      }
+    }
+  );
+  const hits = [];
+  const w2 = clip.createClipSense({ readClip: () => text, rules: boom, onSuggest: (h) => hits.push(h.kind), cooldownMs: 0 });
+  let threw = null;
+  let out = 'sentinel';
+  try {
+    out = w2.checkNow();
+  } catch (e) {
+    threw = e;
+  }
+  ok(!threw, '规则对象抛异常时不外泄', threw && threw.message);
+  eq(out, null, '异常那一轮返回 null');
+  eq(hits.length, 0, '异常那一轮没有误触发提示');
+
+  w2.setRules(clip.compileRules({}));
+  w2.forget();
+  ok(w2.checkNow() !== null, '换回正常规则后轮询器照常工作');
+  eq(hits.length, 1, '恢复正常后只提示一次');
+}
+
 // ---------------- 汇总 ----------------
 console.log('\n' + '='.repeat(46));
 if (fails.length) {

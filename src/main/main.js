@@ -340,6 +340,11 @@ const DEFAULT_CONFIG = {
   // 默认关闭，同上：常驻读剪贴板是隐私敏感行为，交给用户自己决定。
   // 开启后也只会「提示」，不会自动把内容发出去；疑似凭证一律不提示。
   clipSenseEnabled: false,
+  // 剪贴板感知的识别规则（改了立即生效，不必重启）。
+  // disableKinds 只能关内置类型（error/json/url/code/longtext）；
+  // customKinds 用来补自己的世界：公司日志前缀、内部域名、自家框架的栈帧格式。
+  // 详见 src/main/clip-sense.js 顶部「可配置规则」一节。
+  clipSenseRules: { disableKinds: [], ignorePatterns: [], customKinds: [] },
   wakeWords: ['小问', '小文', '小闻', '小吻'], // 同音字默认一起收录，ASR 常把「问」写成「文/闻」
   wakeSensitivity: 60,            // 0~100，越高越灵敏（也越容易被环境噪声触发）
   wakeSound: true,                // 命中时播放一声提示音
@@ -1077,6 +1082,9 @@ function onProactive(payload) {
 //   3. 只提示、不代发。内容填进输入框，发不发仍由主人按 Enter 决定。
 
 let clipWatcher = null;
+// 当前生效的识别规则（compileRules 的产物）。只在这里编译一次，
+// 提示路径与轮询路径共用同一份 —— 两处各编译一份必然漂移。
+let clipRules = clipSense.compileRules(null);
 
 function onClipSuggest(hit, text) {
   try { pet.petAct('work', { text: hit.title }); } catch (e) { /* ignore */ }
@@ -1096,7 +1104,7 @@ function onClipSuggest(hit, text) {
           win.show();
           // 问法在主进程这一侧生成（clip-sense.buildClipQuestion 是唯一来源），
           // 渲染进程只管填 —— 模板不复制到面板里，否则两份写法必然漂移
-          const ask = clipSense.buildClipQuestion(hit.kind, text);
+          const ask = clipSense.buildClipQuestion(hit.kind, text, clipRules);
           const send = () => {
             try {
               win.webContents.send('clip:ask', { kind: hit.kind, text, question: ask.question, hint: ask.hint });
@@ -1116,13 +1124,25 @@ function onClipSuggest(hit, text) {
 /** 让轮询器的实际运行状态跟配置对齐（启动时、设置改动时都走这里） */
 function syncClipSense(reason) {
   try {
-    const on = !!loadConfig().clipSenseEnabled;
+    const cfg = loadConfig();
+    const on = !!cfg.clipSenseEnabled;
+    // 规则编译与开关分开处理：**即使当前是关着的**也先编译一遍，
+    // 这样配置写错能立刻在日志里看到，而不是等到主人开开关时才发现「怎么没反应」。
+    const rules = clipSense.compileRules(cfg.clipSenseRules);
+    if (rules.warnings.length) {
+      for (const w of rules.warnings) logLine('clip', `规则配置有问题：${w}`);
+    }
+    clipRules = rules;
     if (on) {
       if (!clipWatcher) {
         clipWatcher = clipSense.createClipSense({
           readClip: () => clipboard.readText() || '',
-          onSuggest: onClipSuggest
+          onSuggest: onClipSuggest,
+          rules
         });
+      } else {
+        // 换规则不重建轮询器：重建会丢掉冷却与「上次看过什么」的去重状态
+        clipWatcher.setRules(rules);
       }
       if (!clipWatcher.isRunning()) {
         clipWatcher.start();
@@ -1518,8 +1538,8 @@ ipcMain.handle('config:set', (_e, patch) => {
     try { meeting.reload(); } catch (e) { /* ignore */ }
   }
 
-  // 剪贴板感知：开关一变就得跟上（开着才轮询，关掉立刻停）
-  if ('clipSenseEnabled' in patch) syncClipSense('设置变更');
+  // 剪贴板感知：开关一变就得跟上（开着才轮询，关掉立刻停）；规则改了热替换，不必重启
+  if ('clipSenseEnabled' in patch || 'clipSenseRules' in patch) syncClipSense('设置变更');
 
   // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
   try {
