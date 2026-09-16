@@ -158,6 +158,8 @@ async function initChat() {
 
   // 截图结果（快捷键 / 工具调用）自动带到输入框
   try { window.xw.onCapture && window.xw.onCapture((p) => attachShot(p)); } catch (e) { /* ignore */ }
+  // 剪贴板感知：主进程认出一段「值得问」的内容，把它带进输入框（只带，不代发）
+  try { window.xw.onClipAsk && window.xw.onClipAsk((p) => attachClip(p)); } catch (e) { /* ignore */ }
 }
 
 /** 载入（或迁移）当前会话 */
@@ -3041,6 +3043,25 @@ async function attachShot(payload) {
   if (!els.input.value.trim()) els.input.value = '看看这张图';
   els.input.focus();
   setStatus('截图已带上，想问什么直接说');
+}
+
+/**
+ * 剪贴板感知带进来的一段内容（报错 / 代码 / 链接）。
+ * 只填进输入框，不代发 —— 发不发由主人按 Enter 决定。
+ * 输入框已有草稿时不覆盖：宁可让他再粘一次，也不能把他正在写的东西冲掉。
+ */
+function attachClip(payload) {
+  const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
+  if (!text) return;
+  if (els.input.value.trim()) {
+    setStatus('输入框里已有草稿，剪贴板那段没覆盖，可以 Ctrl+V 自己粘');
+    return;
+  }
+  els.input.value = text;
+  if (typeof autoResize === 'function') autoResize();
+  els.input.focus();
+  try { els.input.setSelectionRange(text.length, text.length); } catch (e) { /* ignore */ }
+  setStatus('剪贴板那段已带过来，想问什么直接说');
 }
 
 // ================== 子代理任务看板 ==================

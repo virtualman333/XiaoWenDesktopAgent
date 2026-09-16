@@ -350,6 +350,13 @@ contextBridge.exposeInMainWorld('xw', {
   meetingDetectNow: () => ipcRenderer.invoke('meeting:detect-now'),
   meetingSnapshotText: () => ipcRenderer.invoke('meeting:snapshot-text'),
 
+  // 剪贴板感知：主进程认出一段「值得问」的复制内容后，把正文交给面板
+  onClipAsk: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('clip:ask', h);
+    return () => ipcRenderer.removeListener('clip:ask', h);
+  },
+
   // 会议状态变化（检测到 / 开始记录 / 已生成纪要 / 丢弃）
   onMeetingEvent: (cb) => {
     const h = (_e, p) => cb(p);

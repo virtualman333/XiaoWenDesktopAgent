@@ -16,6 +16,8 @@ const updater = require('./updater');
 const meeting = require('./meeting');
 // 桌面入口规则：悬浮球 ⇄ 宠物 谁上场（纯函数，可单测）
 const entry = require('./entry');
+// 剪贴板感知：认出「值得问」的复制内容，主动开口（纯函数 + 轮询器，可单测）
+const clipSense = require('./clip-sense');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -334,6 +336,10 @@ const DEFAULT_CONFIG = {
   // ---- 语音唤醒（说出唤醒词即可免按键唤起）----
   // 两级检测：本地 VAD 常驻监听（零成本）→ 听到人声才开一次 2~3 秒的短识别做关键词确认
   wakeEnabled: false,             // 默认关闭：常驻开麦，交给用户自己决定
+  // ---- 剪贴板感知（复制报错 / 代码 / 链接时主动问一句）----
+  // 默认关闭，同上：常驻读剪贴板是隐私敏感行为，交给用户自己决定。
+  // 开启后也只会「提示」，不会自动把内容发出去；疑似凭证一律不提示。
+  clipSenseEnabled: false,
   wakeWords: ['小问', '小文', '小闻', '小吻'], // 同音字默认一起收录，ASR 常把「问」写成「文/闻」
   wakeSensitivity: 60,            // 0~100，越高越灵敏（也越容易被环境噪声触发）
   wakeSound: true,                // 命中时播放一声提示音
@@ -1059,6 +1065,73 @@ function onProactive(payload) {
   logLine('proactive', `[${kind}] ${title} :: ${text.replace(/\n+/g, ' ').slice(0, 100)}`);
 }
 
+// ---------------- 剪贴板感知 ----------------
+//
+// 复制一段报错 / 代码 / 链接之后，主人多半接着就是想问小问；与其让他再按一次
+// 快捷键、再粘一次，不如桌面入口自己先开口。走的是「轻提示」分级，不打断：
+// 宠物动一下 + 托盘气泡，另加一条可点击的系统通知，点一下才把面板叫出来。
+//
+// 三条边界：
+//   1. 默认关闭（clipSenseEnabled）—— 常驻读剪贴板属隐私敏感行为，同 wakeEnabled；
+//   2. 疑似凭证一律不提示（在 clip-sense.js 里拦）—— 提示就等于把密钥印在横幅上；
+//   3. 只提示、不代发。内容填进输入框，发不发仍由主人按 Enter 决定。
+
+let clipWatcher = null;
+
+function onClipSuggest(hit, text) {
+  try { pet.petAct('work', { text: hit.title }); } catch (e) { /* ignore */ }
+  try {
+    if (tray && !tray.isDestroyed()) {
+      tray.displayBalloon({ icon: getTrayIcon(), title: hit.title, content: hit.preview, noSound: true });
+    }
+  } catch (e) { /* ignore */ }
+
+  // 系统通知可点击：点一下直接开面板，内容已经带进去了
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({ title: hit.title, body: hit.preview, silent: true });
+      n.on('click', () => {
+        try {
+          const win = createPanelWindow();
+          win.show();
+          const send = () => {
+            try { win.webContents.send('clip:ask', { kind: hit.kind, text }); } catch (e) { /* ignore */ }
+          };
+          if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send);
+          else send();
+        } catch (e) { logLine('clip', '打开面板失败: ' + ((e && e.message) || e)); }
+      });
+      n.show();
+    }
+  } catch (e) { /* ignore */ }
+
+  logLine('clip', `[${hit.kind}] ${hit.preview.slice(0, 60)}`);
+}
+
+/** 让轮询器的实际运行状态跟配置对齐（启动时、设置改动时都走这里） */
+function syncClipSense(reason) {
+  try {
+    const on = !!loadConfig().clipSenseEnabled;
+    if (on) {
+      if (!clipWatcher) {
+        clipWatcher = clipSense.createClipSense({
+          readClip: () => clipboard.readText() || '',
+          onSuggest: onClipSuggest
+        });
+      }
+      if (!clipWatcher.isRunning()) {
+        clipWatcher.start();
+        logLine('clip', `剪贴板感知已开启（${reason}）`);
+      }
+    } else if (clipWatcher && clipWatcher.isRunning()) {
+      clipWatcher.stop();
+      logLine('clip', `剪贴板感知已关闭（${reason}）`);
+    }
+  } catch (e) {
+    logLine('clip', '切换失败: ' + ((e && e.message) || e));
+  }
+}
+
 /** 截图完成：把结果送到对话面板（顺手把面板打开） */
 function onCaptureNotify(_kind, payload) {
   try {
@@ -1439,6 +1512,9 @@ ipcMain.handle('config:set', (_e, patch) => {
   if (Object.keys(patch).some((k) => k.startsWith('meeting'))) {
     try { meeting.reload(); } catch (e) { /* ignore */ }
   }
+
+  // 剪贴板感知：开关一变就得跟上（开着才轮询，关掉立刻停）
+  if ('clipSenseEnabled' in patch) syncClipSense('设置变更');
 
   // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
   try {
@@ -2185,6 +2261,8 @@ function bootstrapApp() {
       capture.bindNotify(onCaptureNotify);
     } catch (e) { logLine('capture', '初始化失败: ' + (e && e.message)); }
     registerHotkeys();
+    // 剪贴板感知（默认关，配置为开才真正起轮询）
+    syncClipSense('启动');
 
     // ---- 新机首次启动：还没配过大模型 Key，直接把面板弹出来做引导 ----
     // 以前 clone 下来不配 Key 打开就是一片空白，用户根本不知道要干什么。
