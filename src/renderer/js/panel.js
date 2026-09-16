@@ -3047,7 +3047,9 @@ async function attachShot(payload) {
 
 /**
  * 剪贴板感知带进来的一段内容（报错 / 代码 / 链接）。
- * 只填进输入框，不代发 —— 发不发由主人按 Enter 决定。
+ * 填的是**主进程按内容类型写好的问句 + 内容**（question 字段，模板在
+ * clip-sense.js 里，渲染进程不重复一份），主人可以改，但按回车就发 ——
+ * 仍然不代发：发不发由他决定。
  * 输入框已有草稿时不覆盖：宁可让他再粘一次，也不能把他正在写的东西冲掉。
  */
 function attachClip(payload) {
@@ -3057,11 +3059,12 @@ function attachClip(payload) {
     setStatus('输入框里已有草稿，剪贴板那段没覆盖，可以 Ctrl+V 自己粘');
     return;
   }
-  els.input.value = text;
+  const q = payload && typeof payload.question === 'string' && payload.question.trim() ? payload.question : text;
+  els.input.value = q;
   if (typeof autoResize === 'function') autoResize();
   els.input.focus();
-  try { els.input.setSelectionRange(text.length, text.length); } catch (e) { /* ignore */ }
-  setStatus('剪贴板那段已带过来，想问什么直接说');
+  try { els.input.setSelectionRange(q.length, q.length); } catch (e) { /* ignore */ }
+  setStatus((payload && payload.hint) || '剪贴板那段已带过来，想问什么直接说');
 }
 
 // ================== 子代理任务看板 ==================

@@ -99,6 +99,53 @@ function classifyClipboard(text) {
 }
 
 /**
+ * 每类内容预置的问法。
+ *
+ * 为什么需要它：内容被带进输入框时是**裸文本**，主人还得多打一句「帮我看看这段报错」
+ * 才能按下回车 —— 而「复制这段」这个动作本身就已经表达了意图。这里把意图补全，
+ * 问句**仍由主人按下回车才发出**（本模块从不代发，见文件头第 3 条）。
+ */
+const ASK_TEMPLATES = {
+  error: { lead: '帮我看看这段报错，是什么原因、怎么改？', hint: '已按报错写好问法，可直接回车（也能改）' },
+  code: { lead: '帮我看看这段代码，有没有问题？', hint: '已按代码写好问法，可直接回车（也能改）' },
+  json: { lead: '帮我看看这段 JSON 有没有问题？', hint: '已按 JSON 写好问法，可直接回车（也能改）' },
+  url: { lead: '帮我看看这个链接讲的是什么，有值得注意的吗？', hint: '已按链接写好问法，可直接回车（也能改）' },
+  longtext: { lead: '帮我看看这段内容，提炼下要点。', hint: '已按长文写好问法，可直接回车（也能改）' }
+};
+
+/** 认不出类型时，问法与提示都退回中性说法 */
+const NEUTRAL_HINT = '剪贴板那段已带过来，想问什么直接说';
+
+/**
+ * 把内容包成代码围栏。
+ * 围栏必须**比内容里最长的连续反引号还长**：粘来的代码自己带 ``` 时，等长围栏会被
+ * 提前闭合，后面的内容就跑到代码块外面去了（模型看到的是半截结构）。
+ */
+function fence(text) {
+  const runs = String(text).match(/`+/g) || [];
+  const bar = '`'.repeat(Math.max(3, ...runs.map((r) => r.length + 1)));
+  return `${bar}\n${text}\n${bar}`;
+}
+
+/**
+ * 按内容类型生成一句「已经写好的提问」，供面板预填。
+ * 纯函数，不碰全局状态。
+ *
+ * @param {string} kind classifyClipboard 给出的类型
+ * @param {string} text 剪贴板原文
+ * @returns {{question: string, hint: string}} question 为空串表示没有可用内容
+ */
+function buildClipQuestion(kind, text) {
+  const raw = String(text == null ? '' : text).trim();
+  if (!raw) return { question: '', hint: '' };
+  const t = ASK_TEMPLATES[kind];
+  if (!t) return { question: raw, hint: NEUTRAL_HINT };
+  // 链接不加围栏：加了反而没法直接点，也没有多行结构需要保
+  const body = kind === 'url' ? raw : fence(raw);
+  return { question: `${t.lead}\n\n${body}`, hint: t.hint };
+}
+
+/**
  * 剪贴板轮询器。
  *
  * 两个刻意的行为：
@@ -176,4 +223,15 @@ function createClipSense(opts = {}) {
   };
 }
 
-module.exports = { classifyClipboard, createClipSense, MAX_PREVIEW, MIN_LENGTH, LONG_TEXT, DEFAULT_INTERVAL, DEFAULT_COOLDOWN };
+module.exports = {
+  classifyClipboard,
+  buildClipQuestion,
+  createClipSense,
+  MAX_PREVIEW,
+  MIN_LENGTH,
+  LONG_TEXT,
+  DEFAULT_INTERVAL,
+  DEFAULT_COOLDOWN,
+  ASK_TEMPLATES,
+  NEUTRAL_HINT
+};

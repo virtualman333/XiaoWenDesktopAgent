@@ -202,6 +202,83 @@ section('轮询器 · forget');
   eq(hits.length, 2, 'forget 后同一内容可再次提示（主人手动问过一次的场景）');
 }
 
+// ---------------- 预置问法 ----------------
+// 内容被带进输入框时若是裸文本，主人还得自己打一句「帮我看看这段报错」——
+// 而「复制这段」本身就表达了意图。这里锁住：问法按类型给、内容一字不改。
+section('问法 · 按类型预置，且内容原样保留');
+{
+  const ERR = 'TypeError: Cannot read properties of undefined (reading "id")\n    at render (panel.js:42:11)\n    at tick (index.js:9:3)';
+  const CODE = 'const a = 1;\nfunction f() {\n  return a + 1;\n}\nexport default f;';
+  const JSON_TXT = '{\n  "a": 1,\n  "b": [2, 3]\n}';
+  const URLS = 'https://github.com/virtualman333/vui';
+  const LONG = 'x'.repeat(260);
+
+  const cases = [
+    ['error', ERR],
+    ['code', CODE],
+    ['json', JSON_TXT],
+    ['url', URLS],
+    ['longtext', LONG]
+  ];
+
+  for (const [kind, src] of cases) {
+    const r = clip.buildClipQuestion(kind, src);
+    ok(!!r.question, `${kind}：能生成问法`);
+    ok(r.question.includes(src), `${kind}：内容原样保留（不截断、不转义）`);
+    eq(r.question, r.question.trim(), `${kind}：问法首尾无多余空白`);
+    ok(r.question.length > src.length, `${kind}：问法在内容之外还带了意图说明`);
+    ok(r.hint && r.hint !== clip.NEUTRAL_HINT, `${kind}：提示语按类型给出`);
+    eq(clip.buildClipQuestion(kind, src).question, r.question, `${kind}：纯函数，两次调用一致`);
+  }
+
+  // 链接不加围栏：加了反而没法直接点
+  const urlQ = clip.buildClipQuestion('url', URLS);
+  ok(!urlQ.question.includes('```'), 'url：不加代码围栏');
+
+  // 有结构的内容要包起来，模型才能分清「哪段是给我的材料」
+  for (const kind of ['error', 'code', 'json', 'longtext']) {
+    ok(clip.buildClipQuestion(kind, 'y'.repeat(60)).question.includes('```'), `${kind}：用代码围栏包住内容`);
+  }
+}
+
+section('问法 · 围栏不与内容里的反引号打架');
+{
+  // 粘来的代码自己带 ``` 时，等长围栏会被提前闭合，后面的内容跑到代码块外面去
+  const inner = '说明：\n```js\nconst a = 1;\n```\n就这些';
+  const r = clip.buildClipQuestion('code', inner);
+  ok(r.question.includes(inner), '含 ``` 的内容原样保留');
+
+  const bars = r.question.match(/`{3,}/g) || [];
+  const outer = bars.filter((b) => !inner.includes(b));
+  ok(outer.length >= 2, '外层围栏成对出现', `反引号串：${JSON.stringify(bars)}`);
+  const innerMax = Math.max(...(inner.match(/`+/g) || []).map((s) => s.length));
+  // 取不到就不比长度：断言要报出问题，不该自己抛异常
+  ok(outer.length > 0 && outer[0].length > innerMax, '外层围栏比内容里最长的一段反引号更长',
+    outer.length ? `外 ${outer[0].length} vs 内 ${innerMax}` : '取不到外层围栏');
+
+  // 内容里没有任何反引号时，用最短的合规围栏
+  ok(clip.buildClipQuestion('code', 'z'.repeat(60)).question.includes('\n```\n'), '无反引号时用三连反引号');
+}
+
+section('问法 · 退化输入');
+{
+  for (const [name, v] of [['空串', ''], ['null', null], ['undefined', undefined], ['纯空白', '   \n ']]) {
+    const r = clip.buildClipQuestion('error', v);
+    eq(r.question, '', `无内容时问法为空：${name}`);
+    eq(r.hint, '', `无内容时提示为空：${name}`);
+  }
+
+  // 认不出的类型：原样文本 + 中性提示，不硬套一个问法
+  const unknown = clip.buildClipQuestion('ignore', 'w'.repeat(60));
+  eq(unknown.question, 'w'.repeat(60), '未知类型：内容原样');
+  eq(unknown.hint, clip.NEUTRAL_HINT, '未知类型：中性提示');
+  ok(!!clip.buildClipQuestion(undefined, 'q'.repeat(60)).question, '缺 kind 也不炸');
+
+  // 尾部空白（复制时常带）不该进到问句里
+  const padded = clip.buildClipQuestion('code', 'v'.repeat(60) + '\n\n  ');
+  ok(padded.question.endsWith('v'.repeat(20) + '\n```'), '尾部空白已裁掉，围栏紧贴内容');
+}
+
 // ---------------- 汇总 ----------------
 console.log('\n' + '='.repeat(46));
 if (fails.length) {

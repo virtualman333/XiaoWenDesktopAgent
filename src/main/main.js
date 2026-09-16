@@ -1094,8 +1094,13 @@ function onClipSuggest(hit, text) {
         try {
           const win = createPanelWindow();
           win.show();
+          // 问法在主进程这一侧生成（clip-sense.buildClipQuestion 是唯一来源），
+          // 渲染进程只管填 —— 模板不复制到面板里，否则两份写法必然漂移
+          const ask = clipSense.buildClipQuestion(hit.kind, text);
           const send = () => {
-            try { win.webContents.send('clip:ask', { kind: hit.kind, text }); } catch (e) { /* ignore */ }
+            try {
+              win.webContents.send('clip:ask', { kind: hit.kind, text, question: ask.question, hint: ask.hint });
+            } catch (e) { /* ignore */ }
           };
           if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send);
           else send();
