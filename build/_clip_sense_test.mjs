@@ -826,6 +826,76 @@ section('导入导出 · 文件大小上限存在且是一个有限数');
   ok(clip.MAX_RULES_FILE_BYTES <= 1024 * 1024, '上限不超过 1MB（规则文件是手写的）', String(clip.MAX_RULES_FILE_BYTES));
 }
 
+// ---------------- 规则文件的格式版本 ----------------
+// 没有版本标记时，跨版本迁移只能靠字段存在性猜：新版本加了字段，旧版本导入时
+// 只打印一句「未知字段」然后照样收下 —— 用户以为迁移成功了，其实丢了一半。
+section('导入导出 · 规则文件带格式版本标记（跨版本迁移不靠猜）');
+{
+  const MARK = `${clip.RULES_SCHEMA}/${clip.RULES_SCHEMA_VERSION}`;
+  const cfg = JSON.stringify({
+    disableKinds: ['url'],
+    customKinds: [{ id: 'corp', pattern: '^\\[corp\\]', label: '内部日志' }]
+  });
+  const out = clip.rulesExportText(cfg);
+  eq(out.ok, true, '带标记的导出仍然成功');
+
+  // 1. 标记是文件里的**第一个键**（人打开文件、或用 diff 看时第一眼就能看到），
+  //    版本号来自代码里的常量，不是散落的字面量。
+  //    注意 JSON.stringify 的缩进形式里第 1 行是 `{`，标记落在第 2 行 —— 断言取键序而不是行号，
+  //    免得将来改成单行输出就假红。
+  eq(Object.keys(JSON.parse(out.text))[0], '$schema', '格式标记是文件里的第一个键');
+  eq(String(out.text).split('\n')[1].trim(), `"$schema": "${MARK}",`, '缩进输出下标记在第 2 行（打开就能看到）');
+  eq(JSON.parse(out.text).$schema, MARK, '标记 = 前缀 + 当前版本号');
+  ok(clip.RULES_SCHEMA_VERSION >= 1 && Number.isInteger(clip.RULES_SCHEMA_VERSION), '版本号是从 1 起的整数');
+
+  // 2. 往返：导出的文件能被自己导入回来，规则一条不少、也没有多出警告
+  const back = clip.parseRulesText(out.text);
+  eq(back.ok, true, '导出的文件能被自己导入');
+  eq(back.summary.disabledKinds.join(','), 'url', '关闭的类型原样回来');
+  eq(back.summary.custom.length, 1, '自定义类型原样回来');
+  eq(back.warnings.filter((w) => /未知字段/.test(w)).length, 0, '标记不算未知字段');
+
+  // 3. **标记不能污染配置**：界面保存的是 parse 出来的 value
+  //    （panel.js 的 setConfig({ clipSenseRules: r.value })），标记没剥掉就会一路写进
+  //    config.json，并在下一次导出时叠一层。
+  ok(!('$schema' in back.value), '解析结果里没有 $schema（否则会被写进 config.json）');
+  eq(JSON.stringify(clip.rulesExportText(JSON.stringify(back.value)).text) === JSON.stringify(out.text), true,
+     '导入再导出与原文件逐字一致（标记不叠加）');
+
+  // 4. 旧文件（没有标记）照常导入，并如实报告「文件里没有标记」
+  const legacy = clip.parseRulesText('{"disableKinds": ["url"]}');
+  eq(legacy.ok, true, '没有标记的旧文件照常导入');
+  eq(legacy.schema.present, false, '如实标记「这份文件没有格式标记」');
+  eq(legacy.value.disableKinds.join(','), 'url', '旧文件的规则照样生效');
+
+  // 5. 更高版本的文件必须**拒绝**：静默收下等于偷偷丢掉新字段
+  const future = clip.parseRulesText(
+    JSON.stringify({ $schema: `${clip.RULES_SCHEMA}/${clip.RULES_SCHEMA_VERSION + 1}`, disableKinds: ['url'] })
+  );
+  eq(future.ok, false, '更新版本导出的文件被拒绝');
+  ok(/更新版本/.test(String(future.error)) && /升级/.test(String(future.error)),
+     '错误说清是版本问题，并给出「升级程序」这个动作', future.error);
+
+  // 6. 认不出的标记 = 选错了文件，要明确指出，而不是回一串「未知字段」
+  const foreign = clip.parseRulesText(
+    JSON.stringify({ $schema: 'https://json.schemastore.org/vscode-settings.json', workbench: {} })
+  );
+  eq(foreign.ok, false, '认不出的 $schema 直接拒绝');
+  ok(/\$schema/.test(String(foreign.error)), '错误里点名是 $schema 认不出', foreign.error);
+
+  // 7. 同版本放行；空规则的导出也带标记（模板文件同样可识别）
+  const same = clip.parseRulesText(JSON.stringify({ $schema: MARK }));
+  eq(same.ok, true, '标记版本与当前版本相同时放行');
+  eq(JSON.parse(clip.rulesExportText('').text).$schema, MARK, '空规则导出同样带标记');
+
+  // 8. readRulesSchema 的三态各自站得住
+  eq(clip.readRulesSchema({}).present, false, '无标记：present=false');
+  eq(clip.readRulesSchema(null).present, false, 'null 入参不崩');
+  eq(clip.readRulesSchema({ $schema: `${clip.RULES_SCHEMA}/7` }).version, 7, '读出任意合法版本号');
+  ok(!!clip.readRulesSchema({ $schema: 'nope/1' }).error, '前缀不对：报错');
+  ok(!!clip.readRulesSchema({ $schema: `${clip.RULES_SCHEMA}/x` }).error, '版本号不是数字：报错');
+}
+
 // ---------------- 一致性：显示名与判定链都不许有第二份 ----------------
 section('一致性 · 显示名与判定链都只有一份');
 {

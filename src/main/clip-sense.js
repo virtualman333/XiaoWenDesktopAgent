@@ -103,6 +103,19 @@ const MAX_CUSTOM_KINDS = 20;
 /** `clipSenseRules` 认得的字段。**只有这三个**，多出来的字段一律报警（见 compileRules） */
 const RULE_KEYS = ['disableKinds', 'ignorePatterns', 'customKinds'];
 
+/**
+ * 导出文件的格式标记：`$schema` 的值形如 `xwda-clip-rules/1`。
+ *
+ * 为什么需要它：导出的 JSON 就是「规则对象本身」，文件里没有任何东西说明它是什么、
+ * 哪一版程序写的。将来规则加了字段（比如给 customKinds 增加 `weight`），旧版本程序
+ * 导入新版本导出的文件时**只会打印一句「有未知字段」然后照样收下** —— 用户以为
+ * 迁移成功了，实际丢掉了新字段；反向（新版本导入旧文件）也全靠字段存在性猜。
+ * 有了标记，这两个方向都能说清楚。
+ */
+const RULES_SCHEMA = 'xwda-clip-rules';
+/** 当前支持的规则文件格式版本。**新增会改变语义的字段时 +1**，并在下面补迁移说明。 */
+const RULES_SCHEMA_VERSION = 1;
+
 /** 空规则集：不传规则时的默认行为，与加配置之前完全一致 */
 const EMPTY_RULES = { off: new Set(), disableKinds: [], ignoreRes: [], custom: [], warnings: [] };
 
@@ -236,6 +249,36 @@ function summarizeRules(rules) {
 }
 
 /**
+ * 读出规则 JSON 里的格式标记。
+ *
+ * 三种结果要分清楚，它们的处理方式完全不同：
+ *   · **没有标记** → 视为第 1 版（手写的、或旧版本导出的文件都长这样），照常接受；
+ *   · **标记是本程序认得的前缀** → 记下版本号，交给调用方比对；
+ *   · **认不出的标记** → 报错。别小看这一条：VS Code 的 `settings.json` 这类文件
+ *     第一行就是 `"$schema": "https://json.schemastore.org/..."`，以前选错文件时
+ *     只会得到一串「未知字段」警告，看上去像是规则写得不对，其实文件压根不对。
+ *
+ * @returns {{present:boolean, version:number|null, error?:string}}
+ */
+function readRulesSchema(obj) {
+  if (!obj || typeof obj !== 'object') return { present: false, version: null };
+  const raw = obj.$schema;
+  if (raw === undefined || raw === null || raw === '') return { present: false, version: null };
+  const m = /^xwda-clip-rules\/(\d+)$/.exec(String(raw).trim());
+  if (!m) {
+    return {
+      present: true,
+      version: null,
+      error:
+        `认不出的格式标记 $schema：${JSON.stringify(raw)}。` +
+        `本程序导出的规则文件第一行是 "$schema": "${RULES_SCHEMA}/${RULES_SCHEMA_VERSION}"，` +
+        '请确认选对了文件。'
+    };
+  }
+  return { present: true, version: Number(m[1]) };
+}
+
+/**
  * 解析设置界面里那段规则文本 —— **纯函数**，不碰文件也不碰 Electron。
  *
  * 为什么不把这段逻辑写在渲染进程里：规则知识（哪些字段合法、哪些条目会被丢掉、
@@ -250,7 +293,14 @@ function parseRulesText(text) {
   // labels 随校验结果一起下发：内置类型的显示名只有这一份（见 BUILTIN_LABELS），
   // 界面照抄即可，自己再抄一份的话「新增一类后界面显示原始 id」不会有人发现。
   if (!s) {
-    return { ok: true, value: {}, summary: summarizeRules(compileRules({})), warnings: [], labels: BUILTIN_LABELS };
+    return {
+      ok: true,
+      value: {},
+      summary: summarizeRules(compileRules({})),
+      warnings: [],
+      labels: BUILTIN_LABELS,
+      schema: { present: false, version: null }
+    };
   }
   let obj;
   try {
@@ -261,8 +311,35 @@ function parseRulesText(text) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     return { ok: false, error: '规则必须是一个 JSON 对象，形如 {"disableKinds": ["url"]}', warnings: [] };
   }
-  const rules = compileRules(obj);
-  return { ok: true, value: obj, summary: summarizeRules(rules), warnings: rules.warnings, labels: BUILTIN_LABELS };
+
+  // 格式版本：比本程序新的文件一律**拒绝**，不静默收下
+  const schema = readRulesSchema(obj);
+  if (schema.error) return { ok: false, error: schema.error, warnings: [] };
+  if (schema.version !== null && schema.version > RULES_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      error:
+        `这份规则文件是更新版本的程序导出的（${RULES_SCHEMA}/${schema.version}），` +
+        `当前版本只认识到 ${RULES_SCHEMA_VERSION}。强行导入会静默丢掉新版本才有的字段，` +
+        '所以这里直接拒绝 —— 请先升级程序。',
+      warnings: []
+    };
+  }
+
+  // 标记不是规则：剥掉再交给 compileRules，否则它会被报成「未知字段」，
+  // 还会顺着「导入 → 保存」写进 config.json 一直传下去（导出时再补一个新的）。
+  const rulesObj = { ...obj };
+  delete rulesObj.$schema;
+
+  const rules = compileRules(rulesObj);
+  return {
+    ok: true,
+    value: rulesObj,
+    summary: summarizeRules(rules),
+    warnings: rules.warnings,
+    labels: BUILTIN_LABELS,
+    schema: { present: schema.present, version: schema.version }
+  };
 }
 
 /** 判定结果里「为什么」的那一半 —— 界面直接印，不在渲染进程再写一遍文案 */
@@ -613,8 +690,9 @@ function rulesExportText(text) {
   return {
     ok: true,
     empty,
+    // 第一行是格式标记（人打开文件第一眼就能看出这是什么、哪一版写的）；
     // 结尾补一个换行：手写的 JSON 文件都带换行，diff 时不会显示「\ No newline at end of file」
-    text: JSON.stringify(value, null, 2) + '\n',
+    text: JSON.stringify({ $schema: `${RULES_SCHEMA}/${RULES_SCHEMA_VERSION}`, ...value }, null, 2) + '\n',
     summary: parsed.summary,
     warnings,
     labels: parsed.labels
@@ -642,5 +720,8 @@ module.exports = {
   BUILTIN_KINDS,
   BUILTIN_LABELS,
   REASON_TEXT,
-  RULE_KEYS
+  RULE_KEYS,
+  RULES_SCHEMA,
+  RULES_SCHEMA_VERSION,
+  readRulesSchema
 };
