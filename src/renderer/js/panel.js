@@ -1400,6 +1400,7 @@ function initSettings() {
   bindMeeting();
   bindMeetingEvents();
   bindClipSense();
+  bindClipTest();
   bindAdvanced();
   fillAll();
 }
@@ -3293,7 +3294,15 @@ function renderHotkeyState(st) {
 //
 // 界面上要显示的是「**实际生效的结果**」而不是用户填的原文：compileRules 对写错的
 // 条目一律只警告不抛，只回显原文的话，用户看不出「填了 5 条、只生效 1 条」。
-const CLIP_KIND_LABELS = { error: '报错', json: 'JSON', url: '链接', code: '代码', longtext: '长文本' };
+//
+// 内置类型的显示名由主进程下发（`clip-sense.js` 的 BUILTIN_LABELS 是唯一来源），
+// 界面这里**只缓存不定义** —— 自己再抄一份的话，将来新增一类时界面会显示原始 id，
+// 而且没有任何东西会报错提示你抄漏了。
+let clipKindLabels = {};
+
+function clipLabelOf(kind) {
+  return clipKindLabels[kind] || kind;
+}
 
 const CLIP_RULES_SAMPLE = {
   disableKinds: ['url'],
@@ -3336,8 +3345,10 @@ function renderClipRulesResult(r) {
     add('cb-err', '✗ ' + ((r && r.error) || '校验失败，规则未生效'));
     return r;
   }
+  // 主进程随校验结果一起下发内置类型的显示名，缓存下来给摘要和试跑共用
+  if (r.labels && Object.keys(r.labels).length) clipKindLabels = r.labels;
   const s = r.summary || {};
-  const active = (s.activeKinds || []).map((k) => CLIP_KIND_LABELS[k] || k);
+  const active = (s.activeKinds || []).map(clipLabelOf);
   const parts = ['仍然提示：' + (active.length ? active.join(' / ') : '（内置类型已全部关闭）')];
   if ((s.disabledKinds || []).length) parts.push('已关闭：' + s.disabledKinds.join(' / '));
   parts.push('忽略正则 ' + (s.ignoreCount || 0) + ' 条');
@@ -3368,6 +3379,9 @@ function scheduleClipValidate() {
   clipRulesTimer = setTimeout(() => {
     clipRulesTimer = null;
     validateClipRules();
+    // 试跑的结果取决于当前这份（可能还没保存的）规则，规则一改就得重算，
+    // 否则界面上会留着上一次规则下的结论 —— 比不显示更容易误导人。
+    scheduleClipTest();
   }, 250);
 }
 
@@ -3443,6 +3457,107 @@ function bindClipSense() {
   }
   const save = $('clipRulesSave');
   if (save) save.addEventListener('click', saveClipRules);
+}
+
+// ---- 拿一段内容试试 ----
+// 为什么需要它：compileRules 只对**写坏**的规则报警（正则编译不过、字段名不认识），
+// 对「规则本身没毛病、但这台机器上永远不会命中」一声不吭。主人照着示例写完一条
+// `^\[corp\]`，复制公司日志毫无反应，此时他手上没有任何自证手段 —— 只能怀疑功能坏了。
+// 判定链是硬编码的，从界面上根本看不出到底是「写错了」还是「压根没轮到它」。
+let clipTestTimer = null;
+
+function clipTestEl() {
+  return $('clipTestText');
+}
+
+function clipTestText() {
+  const el = clipTestEl();
+  return el ? String(el.value || '') : '';
+}
+
+function renderClipTestResult(r) {
+  const box = $('clipTestResult');
+  if (!box) return r;
+  box.textContent = '';
+  const add = (cls, text) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    box.appendChild(d);
+  };
+  // 没贴内容就不占地方（.cb-result:empty 会自动收起）
+  if (!clipTestText().trim()) return r;
+  if (!r || !r.ok) {
+    add('cb-err', '✗ 规则有误，先在上面改好再试：' + ((r && r.error) || '无法试跑'));
+    return r;
+  }
+  if (r.labels && Object.keys(r.labels).length) clipKindLabels = r.labels;
+  const v = r.verdict || {};
+  if (v.worth) {
+    const how = v.stage === 'custom' ? '你配的自定义类型' : '内置类型';
+    add('cb-note', `✓ 会提示 —— 判为「${v.label || clipLabelOf(v.kind)}」（${how}），横幅上显示：${v.title}`);
+    if (v.question) add('cb-ask', '复制后会自动填进输入框（仍要你按回车才发出去）：\n' + v.question);
+    add('cb-warn', '提示本身还有 20 秒冷却期，这里试跑不受影响。');
+  } else {
+    add('cb-warn', `✗ 不会提示 —— ${v.reasonText}${v.detail ? '：' + v.detail : ''}`);
+    if (v.reason === 'secret') {
+      add('cb-note', '这是硬保护：既不会提示，内容也不会被带进任何地方。');
+    } else if (v.reason === 'ignored') {
+      add('cb-note', '是上面 ignorePatterns 里那条正则拦下的，改它或删掉即可。');
+    } else if (v.reason === 'disabled') {
+      add('cb-note', '把 disableKinds 里对应的类型去掉就会恢复提示。');
+    }
+  }
+  return r;
+}
+
+async function runClipTest() {
+  let r = null;
+  try {
+    r = await window.xw.clipRulesTest(clipTestText(), clipRulesText());
+  } catch (e) {
+    r = { ok: false, error: String((e && e.message) || e) };
+  }
+  return renderClipTestResult(r);
+}
+
+function scheduleClipTest() {
+  if (clipTestTimer) clearTimeout(clipTestTimer);
+  clipTestTimer = setTimeout(() => {
+    clipTestTimer = null;
+    runClipTest();
+  }, 250);
+}
+
+function bindClipTest() {
+  const el = clipTestEl();
+  if (el) el.addEventListener('input', scheduleClipTest);
+  const paste = $('clipTestPaste');
+  if (paste) {
+    paste.addEventListener('click', async () => {
+      try {
+        const r = await window.xw.clipboardRead();
+        if (!r || !r.ok) {
+          setToast('读剪贴板失败：' + ((r && r.error) || '未知原因'));
+          return;
+        }
+        if (el) el.value = r.text || '';
+        if (!String(r.text || '').trim()) {
+          setToast('剪贴板里没有文本');
+        }
+        await runClipTest();
+      } catch (e) {
+        setToast('读剪贴板失败：' + ((e && e.message) || e));
+      }
+    });
+  }
+  const clear = $('clipTestClear');
+  if (clear) {
+    clear.addEventListener('click', () => {
+      if (el) el.value = '';
+      renderClipTestResult(null);
+    });
+  }
 }
 
 // ================== 截图与更新设置 ==================

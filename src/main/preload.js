@@ -359,6 +359,9 @@ contextBridge.exposeInMainWorld('xw', {
   // 校验设置界面里那段规则 JSON（纯校验，不落盘）。规则知识只在 clip-sense.js 一份，
   // 界面不重复实现 —— 否则「界面说没问题、实际全被丢弃」这种漂移迟早会发生。
   clipRulesParse: (text) => ipcRenderer.invoke('clip:rules-parse', text),
+  // 拿一段内容试跑当前规则（含未保存的编辑）。返回「会不会提示 / 为什么 / 会填进去
+  // 什么问法」——判定链的实现只在 clip-sense.js 一份，界面不重复实现。
+  clipRulesTest: (text, rulesText) => ipcRenderer.invoke('clip:test', { text, rulesText }),
 
   // 会议状态变化（检测到 / 开始记录 / 已生成纪要 / 丢弃）
   onMeetingEvent: (cb) => {

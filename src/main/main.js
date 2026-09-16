@@ -1506,6 +1506,17 @@ ipcMain.handle('config:get', () => sanitizeConfig(loadConfig()));
 // 规则文本校验（设置界面里那段 JSON）：不落盘、不碰文件，界面边打字边调。
 // 规则知识只在 clip-sense.js 一份，界面不自己实现一遍。
 ipcMain.handle('clip:rules-parse', (_e, text) => clipSense.parseRulesText(text));
+// 命令面板的「拿一段内容试试」：把界面里那段（可能还没保存的）规则 + 一段内容
+// 交给主进程试跑，返回「会不会提示 / 为什么 / 会填进去什么问法」。
+// 判定链的知识只在 clip-sense.js 一份，界面不自己实现一遍。
+ipcMain.handle('clip:test', (_e, payload) => {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  try {
+    return clipSense.testRules(p.text, p.rulesText);
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e), warnings: [] };
+  }
+});
 
 ipcMain.handle('config:set', (_e, patch) => {
   const cur = loadConfig();

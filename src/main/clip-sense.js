@@ -85,6 +85,11 @@ const URL_RE = /^https?:\/\/\S+$/i;
 
 /** 内置类型表（凭证不在此列，也永远不会进来） */
 const BUILTIN_KINDS = ['error', 'json', 'url', 'code', 'longtext'];
+/**
+ * 内置类型的显示名。**唯一来源** —— 设置界面从主进程拿这张表，不自己再抄一份：
+ * 抄一份的后果是「新增一类后界面显示原始 id」，且没有任何报错提示你抄漏了。
+ */
+const BUILTIN_LABELS = { error: '报错', json: 'JSON', url: '链接', code: '代码', longtext: '长文本' };
 /** 自定义正则长度上限：正则由主人自己写，太长既难读也容易被 ReDoS 拖死轮询 */
 const MAX_PATTERN_LEN = 200;
 /** 自定义类型条数上限 */
@@ -236,8 +241,10 @@ function summarizeRules(rules) {
  */
 function parseRulesText(text) {
   const s = String(text == null ? '' : text).trim();
+  // labels 随校验结果一起下发：内置类型的显示名只有这一份（见 BUILTIN_LABELS），
+  // 界面照抄即可，自己再抄一份的话「新增一类后界面显示原始 id」不会有人发现。
   if (!s) {
-    return { ok: true, value: {}, summary: summarizeRules(compileRules({})), warnings: [] };
+    return { ok: true, value: {}, summary: summarizeRules(compileRules({})), warnings: [], labels: BUILTIN_LABELS };
   }
   let obj;
   try {
@@ -249,12 +256,93 @@ function parseRulesText(text) {
     return { ok: false, error: '规则必须是一个 JSON 对象，形如 {"disableKinds": ["url"]}', warnings: [] };
   }
   const rules = compileRules(obj);
-  return { ok: true, value: obj, summary: summarizeRules(rules), warnings: rules.warnings };
+  return { ok: true, value: obj, summary: summarizeRules(rules), warnings: rules.warnings, labels: BUILTIN_LABELS };
+}
+
+/** 判定结果里「为什么」的那一半 —— 界面直接印，不在渲染进程再写一遍文案 */
+const REASON_TEXT = {
+  hit: '会提示',
+  empty: '没有内容',
+  'too-short': `太短（不足 ${MIN_LENGTH} 个字符）`,
+  secret: '疑似凭证 —— 硬保护，任何配置都改不了',
+  ignored: '命中「永不提示」正则',
+  disabled: '命中的内置类型被关掉了（disableKinds）',
+  unrecognized: '认不出类型'
+};
+
+/**
+ * 拿一段内容「试跑」当前规则 —— 设置界面那块「试试我的规则」按的就是这个。
+ *
+ * 为什么需要它：`compileRules` 只对**写坏**的规则报警（正则编译不过、字段名不认识），
+ * 对「规则写对了、但永远匹配不上你这台机器上的内容」一声不吭。主人照着示例写完
+ * 一条 `^\[corp\]`，复制公司日志却毫无反应，此时他手上没有任何自证手段 ——
+ * 只能怀疑功能坏了。判定链（凭证 → ignore → custom → 内置）是硬编码的，
+ * 但从界面上完全看不出来是「写错了」还是「压根没轮到它」。
+ *
+ * 试跑**只读**：不读真剪贴板、不落盘、不改变任何状态，随时可以试。
+ *
+ * @param {string} text    想试的内容
+ * @param {string} rulesText 界面里那段规则 JSON（未保存的也要能试）
+ * @returns {{ok:boolean, error?:string, warnings:string[], verdict?:object}}
+ */
+function testRules(text, rulesText) {
+  const parsed = parseRulesText(rulesText);
+  if (!parsed.ok) return { ok: false, error: parsed.error, warnings: [] };
+  const rules = compileRules(parsed.value || {});
+  const raw = String(text == null ? '' : text);
+  const hit = classifyClipboard(raw, rules);
+  const custom = (rules.custom || []).find((c) => c.id === hit.kind);
+  const label =
+    hit.kind === 'secret' ? '疑似凭证'
+      : hit.kind === 'ignore' ? ''
+        : (custom ? custom.label : BUILTIN_LABELS[hit.kind] || hit.kind);
+  // 问法由主进程生成（与真提示走的是同一个函数），界面只负责显示 ——
+  // 试跑看到的就是复制后真实会填进输入框的那段字，不是另写一份演示文案。
+  const ask = hit.worth ? buildClipQuestion(hit.kind, raw, rules) : { question: '', hint: '' };
+  return {
+    ok: true,
+    warnings: rules.warnings,
+    labels: BUILTIN_LABELS,
+    verdict: {
+      worth: hit.worth,
+      kind: hit.kind,
+      label,
+      title: hit.title,
+      preview: hit.preview,
+      reason: hit.reason,
+      stage: hit.stage,
+      detail: hit.detail,
+      reasonText: REASON_TEXT[hit.reason] || hit.reason,
+      question: ask.question,
+      hint: ask.hint
+    }
+  };
 }
 
 function preview(text) {
   const one = String(text).replace(/\s+/g, ' ').trim();
   return one.length > MAX_PREVIEW ? one.slice(0, MAX_PREVIEW) + '…' : one;
+}
+
+/**
+ * 判定链上「不提示」的那几种结果。
+ *
+ * 为什么要分开：不提示有**五种完全不同的原因** —— 内容太短、被凭证保护拦下、
+ * 被自己的「永不提示」正则拦下、命中的内置类型被自己关掉、以及真的认不出来。
+ * 原先它们都是同一个「不提示」，于是主人没有任何办法知道该去改哪里：
+ * 明明写了自定义规则却不生效，可能只是前面有条忽略正则先命中了。
+ * 现在原因与「命中的是什么」都带上，界面上直接说得清。
+ */
+function missWith(reason, stage, detail) {
+  return { worth: false, kind: 'ignore', title: '', preview: '', reason, stage, detail: detail || '' };
+}
+
+/** 内置类型命中（worth:true）。detail 放显示名，界面不必再翻译一次 */
+function builtinHit(kind, title, pv) {
+  return {
+    worth: true, kind, title, preview: pv,
+    reason: 'hit', stage: 'builtin', detail: BUILTIN_LABELS[kind] || kind
+  };
 }
 
 /**
@@ -266,25 +354,31 @@ function preview(text) {
  *
  * @param {string} text 剪贴板原文
  * @param {object} [rules] compileRules() 的产物
- * @returns {{worth: boolean, kind: string, title: string, preview: string}}
- *   kind: secret | ignore | 内置 5 类 | 自定义 id
+ * @returns {{worth: boolean, kind: string, title: string, preview: string,
+ *            reason: string, stage: string, detail: string}}
+ *   kind:   secret | ignore | 内置 5 类 | 自定义 id
+ *   reason: hit | empty | too-short | secret | ignored | disabled | unrecognized
+ *   stage:  length | secret | ignore | custom | builtin | none
+ *   detail: 命中的那条规则 / 类型的可读说明（没有则为空串）
  */
 function classifyClipboard(text, rules) {
-  const miss = { worth: false, kind: 'ignore', title: '', preview: '' };
   const raw = String(text == null ? '' : text);
   const trimmed = raw.trim();
-  if (trimmed.length < MIN_LENGTH) return miss;
+  if (!trimmed) return missWith('empty', 'length');
+  if (trimmed.length < MIN_LENGTH) return missWith('too-short', 'length');
 
   // 凭证优先于一切判断：先排除，再谈分类。这一步**不受任何配置影响**。
   for (const re of SECRET_RES) {
-    if (re.test(trimmed)) return { worth: false, kind: 'secret', title: '', preview: '' };
+    if (re.test(trimmed)) {
+      return { worth: false, kind: 'secret', title: '', preview: '', reason: 'secret', stage: 'secret', detail: '' };
+    }
   }
 
   const r = rules && typeof rules === 'object' ? rules : EMPTY_RULES;
 
   // 主人自己写的「永不提示」压过其它一切（凭证已在上一步拦掉）
   for (const re of r.ignoreRes || []) {
-    if (re.test(trimmed)) return miss;
+    if (re.test(trimmed)) return missWith('ignored', 'ignore', String(re));
   }
 
   const lines = trimmed.split(/\r?\n/).length;
@@ -293,27 +387,35 @@ function classifyClipboard(text, rules) {
   // 自定义类型先于内置：主人自己配的规则优先于我们的猜测
   for (const c of r.custom || []) {
     if (c.re.test(trimmed)) {
-      return { worth: true, kind: c.id, title: c.title, preview: pv };
+      return {
+        worth: true, kind: c.id, title: c.title, preview: pv,
+        reason: 'hit', stage: 'custom', detail: c.label
+      };
     }
   }
 
   const off = r.off || EMPTY_RULES.off;
-  if (!off.has('error') && ERROR_RE.test(trimmed)) {
-    return { worth: true, kind: 'error', title: '这段报错要我看看吗？', preview: pv };
+  // 内置 5 类：先命中先返回。**顺序即优先级**，与加配置之前逐条一致。
+  // 命中但被 disableKinds 关掉的，记下来继续往下试 —— 这正是今天的行为
+  // （关了「报错」还有「长文本」兜底），记下来的那份只用于「为什么没提示」的诊断。
+  const trial = [
+    ['error', () => ERROR_RE.test(trimmed), '这段报错要我看看吗？'],
+    ['json', () => JSON_RE.test(trimmed) && lines >= 3, '这段 JSON 要我看看吗？'],
+    ['url', () => URL_RE.test(trimmed), '这个链接要我看看吗？'],
+    ['code', () => CODE_RE.test(trimmed) && lines >= 3, '这段代码要我看看吗？'],
+    ['longtext', () => trimmed.length >= LONG_TEXT, '这段内容要我看看吗？']
+  ];
+  let offHit = '';
+  for (const [id, hit, title] of trial) {
+    if (!hit()) continue;
+    if (off.has(id)) {
+      if (!offHit) offHit = id;
+      continue;
+    }
+    return builtinHit(id, title, pv);
   }
-  if (!off.has('json') && JSON_RE.test(trimmed) && lines >= 3) {
-    return { worth: true, kind: 'json', title: '这段 JSON 要我看看吗？', preview: pv };
-  }
-  if (!off.has('url') && URL_RE.test(trimmed)) {
-    return { worth: true, kind: 'url', title: '这个链接要我看看吗？', preview: pv };
-  }
-  if (!off.has('code') && lines >= 3 && CODE_RE.test(trimmed)) {
-    return { worth: true, kind: 'code', title: '这段代码要我看看吗？', preview: pv };
-  }
-  if (!off.has('longtext') && trimmed.length >= LONG_TEXT) {
-    return { worth: true, kind: 'longtext', title: '这段内容要我看看吗？', preview: pv };
-  }
-  return miss;
+  if (offHit) return missWith('disabled', 'builtin', BUILTIN_LABELS[offHit] || offHit);
+  return missWith('unrecognized', 'none');
 }
 
 /**
@@ -474,6 +576,7 @@ module.exports = {
   buildClipQuestion,
   compileRules,
   parseRulesText,
+  testRules,
   summarizeRules,
   createClipSense,
   MAX_PREVIEW,
@@ -484,5 +587,7 @@ module.exports = {
   ASK_TEMPLATES,
   NEUTRAL_HINT,
   BUILTIN_KINDS,
+  BUILTIN_LABELS,
+  REASON_TEXT,
   RULE_KEYS
 };

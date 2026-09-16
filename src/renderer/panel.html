@@ -1084,6 +1084,22 @@
             <button class="btn-ghost" id="clipRulesClear">清空</button>
             <button class="btn-primary" id="clipRulesSave">保存规则</button>
           </div>
+
+          <h3>拿一段内容试试</h3>
+          <div class="field">
+            <label>贴一段内容，马上看到它会不会被提示、为什么 <span class="hint-inline">改规则后不用保存也能试</span></label>
+            <textarea id="clipTestText" rows="4" spellcheck="false" placeholder="例如：[corp] 2026-09-16 16:20 订单服务超时，重试 3 次后失败"></textarea>
+            <div class="cb-result" id="clipTestResult"></div>
+          </div>
+          <div class="key-row">
+            <button class="btn-ghost" id="clipTestPaste">用剪贴板里的内容</button>
+            <button class="btn-ghost" id="clipTestClear">清空</button>
+          </div>
+          <div class="hint">
+            判定链是<strong>先到先得</strong>：「疑似凭证」永远第一条且不可绕过，然后是「永不提示」正则，
+            再到你的自定义类型，最后才轮到内置 5 类。所以自定义规则不生效，通常不是写法错了，
+            而是前面某条先命中了 —— 这里会直接告诉你是哪一条。
+          </div>
           <div class="hint">
             三个字段：<code>disableKinds</code> 关掉不想被提示的内置类型、<code>ignorePatterns</code> 永不提示的正则、
             <code>customKinds</code> 你自己的类型（公司日志前缀、内网域名、自家框架的栈帧格式…）。

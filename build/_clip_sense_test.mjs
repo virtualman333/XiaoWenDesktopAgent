@@ -8,8 +8,12 @@
  * 后者比前者严重得多，所以凭证识别是逐个样例钉死的。
  */
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const clip = require('../src/main/clip-sense.js');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 let pass = 0; const fails = [];
 const ok = (cond, name, extra) => { if (cond) pass++; else fails.push(name + (extra ? ` → ${extra}` : '')); };
@@ -629,6 +633,178 @@ section('设置界面 · 规则文本校验');
   eq(at(r, 'custom', []).length, 1, '只有合法的那一条生效');
   eq(pick(r, 'summary', 'custom', 0, 'id'), 'ok-one', '生效的是合法条目');
   eq(r.warnings.length, 2, '另外两条各给一条警告');
+}
+
+// ---------------- 判定理由：不提示也要说得清为什么 ----------------
+// 「不提示」原先只有一种表达，于是主人没有任何办法知道该改哪里：写了自定义规则却
+// 不生效，可能只是前面有条忽略正则先命中了。现在原因与「命中的是什么」都要带上。
+section('判定理由 · 不提示的五种原因要分得开');
+{
+  const CASES = [
+    ['空内容', '', 'empty', 'length'],
+    ['纯空白', '   \n\t ', 'empty', 'length'],
+    ['太短', '好的', 'too-short', 'length'],
+    ['疑似凭证', 'api_key = "abcdef1234567890"', 'secret', 'secret'],
+    ['认不出', '今天天气不错要不要一起去吃饭啊', 'unrecognized', 'none']
+  ];
+  for (const [name, input, reason, stage] of CASES) {
+    const r = clip.classifyClipboard(input);
+    eq(r.worth, false, `不提示：${name}`);
+    eq(r.reason, reason, `理由分得开：${name}`);
+    eq(r.stage, stage, `判定阶段正确：${name}`);
+  }
+}
+
+{
+  // 命中「永不提示」正则：必须说清是哪一条把内容拦下的 —— 否则主人会去改错的规则
+  const rules = clip.compileRules({ ignorePatterns: ['^\\[内部\\]'] });
+  const r = clip.classifyClipboard('[内部] 这段内容不该提示，后面还有一长串说明文字', rules);
+  eq(r.worth, false, '忽略正则命中 → 不提示');
+  eq(r.reason, 'ignored', '理由是 ignored');
+  eq(r.stage, 'ignore', '判定阶段是 ignore');
+  ok(r.detail.includes('内部'), 'detail 指出是哪条正则', r.detail);
+}
+
+{
+  // 命中被 disableKinds 关掉的内置类型：要说清是哪一类被自己关了
+  const rules = clip.compileRules({ disableKinds: ['longtext'] });
+  const r = clip.classifyClipboard('这是一段很长的内容。'.repeat(30), rules);
+  eq(r.worth, false, '关掉长文本 → 不提示');
+  eq(r.reason, 'disabled', '理由是 disabled（而不是「认不出」）');
+  eq(r.stage, 'builtin', '判定阶段是内置类型');
+  eq(r.detail, '长文本', 'detail 用显示名指出被关掉的是哪一类');
+}
+
+{
+  // 关掉一类不能让另一类跟着失效：诊断信息不许溢出成行为
+  const rules = clip.compileRules({ disableKinds: ['longtext'] });
+  const t = 'TypeError: x is not a function\n' + 'y'.repeat(400);
+  const r = clip.classifyClipboard(t, rules);
+  eq(r.worth, true, '关掉长文本不影响报错命中');
+  eq(r.kind, 'error', '仍判为报错');
+  eq(r.reason, 'hit', '命中的是 hit，不该报成 disabled');
+}
+
+{
+  // 自定义类型命中：detail 是主人自己写的 label
+  const rules = clip.compileRules({
+    customKinds: [{ id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]', title: '这段公司日志要我看看吗？' }]
+  });
+  const r = clip.classifyClipboard('[corp] 2026-09-16 16:20 订单服务超时，重试 3 次后失败', rules);
+  eq(r.worth, true, '自定义类型命中 → 提示');
+  eq(r.kind, 'corp-log', 'kind 是自定义 id');
+  eq(r.stage, 'custom', '判定阶段是 custom');
+  eq(r.detail, '公司日志', 'detail 用主人自己起的名字');
+}
+
+{
+  // 内置类型命中：detail 直接用显示名，界面不必再翻译一次
+  const r = clip.classifyClipboard('TypeError: Cannot read properties of undefined');
+  eq(r.reason, 'hit', '命中理由');
+  eq(r.stage, 'builtin', '命中阶段');
+  eq(r.detail, '报错', 'detail 是显示名');
+}
+
+// ---------------- 试跑：设置界面「拿一段内容试试」按的就是它 ----------------
+section('试跑 · 设置界面的「拿一段内容试试」');
+{
+  const r = clip.testRules('TypeError: Cannot read properties of undefined', '');
+  ok(r.ok, '试跑成功');
+  eq(pick(r, 'verdict', 'worth'), true, '试跑判定会提示');
+  eq(pick(r, 'verdict', 'label'), '报错', 'verdict 带显示名（界面不自己翻译）');
+  eq(pick(r, 'verdict', 'stage'), 'builtin', 'verdict 带判定阶段');
+  ok(!!pick(r, 'verdict', 'reasonText'), 'verdict 带人话理由');
+  ok(String(pick(r, 'verdict', 'question') || '').includes('TypeError'), 'verdict 带会填进输入框的问法');
+}
+
+{
+  // 试跑的问法必须与真提示走同一个函数：另写一份演示文案等于给主人看假结论
+  const t = 'TypeError: a is not a function';
+  const r = clip.testRules(t, '');
+  const direct = clip.buildClipQuestion('error', t, clip.compileRules({}));
+  eq(pick(r, 'verdict', 'question'), direct.question, '试跑的问法与真提示同一个来源');
+  eq(pick(r, 'verdict', 'title'), clip.classifyClipboard(t).title, '试跑的横幅文案与真提示一致');
+}
+
+{
+  // 未保存的规则也要能试 —— 试跑看的就是界面里那份文本，不是落盘的那份
+  const text = '[corp] 2026-09-16 16:20 订单服务超时，重试 3 次后失败';
+  const off = clip.testRules(text, '');
+  eq(pick(off, 'verdict', 'worth'), false, '不配规则时这段认不出来');
+  const on = clip.testRules(text, JSON.stringify({
+    customKinds: [{
+      id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]',
+      title: '这段公司日志要我看看吗？', ask: '帮我分析这段公司日志。'
+    }]
+  }));
+  eq(pick(on, 'verdict', 'worth'), true, '配上自定义规则后就能认出');
+  eq(pick(on, 'verdict', 'label'), '公司日志', 'verdict 用自定义的 label');
+  eq(pick(on, 'verdict', 'stage'), 'custom', '判定阶段是 custom');
+  ok(String(pick(on, 'verdict', 'question') || '').includes('帮我分析这段公司日志'), '自定义的 ask 参与生成问法');
+}
+
+{
+  // 规则文本坏了 → 试跑短路，把 JSON 错误原样带出来（界面显示同一句话）
+  const bad = clip.testRules('x'.repeat(50), '{ 坏 JSON');
+  eq(bad.ok, false, '规则文本坏了 → 试跑短路');
+  ok(/JSON/.test(String(bad.error)), '短路时把 JSON 错误带出来', String(bad.error));
+}
+
+{
+  // 规则「能解析但有毛病」不该让试跑失败：警告照给，判定照做
+  const r = clip.testRules('TypeError: a is not a function', '{"disableKinds": ["secret"]}');
+  eq(r.ok, true, '写 secret 不影响试跑');
+  eq(r.warnings.length, 1, '试跑把规则警告一起带出来');
+  ok(!!(r.labels && r.labels.error), '试跑结果里带内置类型显示名（界面唯一来源）');
+}
+
+{
+  // 试跑是只读的：连试几次结论必须一样，且不污染全局规则
+  const a = clip.testRules('TypeError: a', '{"disableKinds": ["error"]}');
+  const b = clip.testRules('TypeError: a', '{"disableKinds": ["error"]}');
+  eq(pick(a, 'verdict', 'worth'), pick(b, 'verdict', 'worth'), '两次试跑结论一致');
+  eq(pick(b, 'verdict', 'reason'), 'disabled', '被关掉的报错报成 disabled');
+  eq(clip.classifyClipboard('TypeError: a').worth, true, '试跑没有污染不传规则时的默认行为');
+}
+
+// ---------------- 一致性：显示名与判定链都不许有第二份 ----------------
+section('一致性 · 显示名与判定链都只有一份');
+{
+  // BUILTIN_LABELS 必须与 BUILTIN_KINDS 一一对应。将来新增一类时漏配显示名，
+  // 界面会静默显示原始 id —— 这条断言就是那个「会报错的东西」。
+  const missing = clip.BUILTIN_KINDS.filter((k) => !clip.BUILTIN_LABELS[k]);
+  eq(missing.length, 0, '每个内置类型都有显示名', missing.join(','));
+  const extra = Object.keys(clip.BUILTIN_LABELS).filter((k) => !clip.BUILTIN_KINDS.includes(k));
+  eq(extra.length, 0, 'BUILTIN_LABELS 没有多余条目（多余就是第二份清单）', extra.join(','));
+}
+{
+  // 每种「不提示」的理由都要有人话，否则界面只能把 reason 这种内部词印给用户
+  const REASONS = ['hit', 'empty', 'too-short', 'secret', 'ignored', 'disabled', 'unrecognized'];
+  const missing = REASONS.filter((r) => !clip.REASON_TEXT[r]);
+  eq(missing.length, 0, '每种理由都有文案', missing.join(','));
+}
+
+{
+  const strip = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')          // 块注释
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');     // 行注释（避开 http://）
+  const read = (p) => strip(fs.readFileSync(path.join(ROOT, p), 'utf-8'));
+
+  // 渲染进程不得再维护一份内置类型显示名（第 6 轮就是这么删掉 CLIP_KIND_LABELS 的）
+  const panel = read(path.join('src', 'renderer', 'js', 'panel.js'));
+  ok(!/CLIP_KIND_LABELS/.test(panel), 'panel.js 不再自己维护内置类型显示名');
+  ok(!/\[\s*'error'\s*,\s*'json'/.test(panel), 'panel.js 里没有第二份内置类型清单');
+  ok(/clipRulesTest\s*\(/.test(panel), 'panel.js 的试跑走主进程（clipRulesTest）');
+  ok(/clipboardRead\s*\(/.test(panel), '「用剪贴板里的内容」走主进程读剪贴板');
+
+  // 主进程侧：判定链只允许 clip-sense.js 一份
+  const main = read(path.join('src', 'main', 'main.js'));
+  ok(/clip:test/.test(main), 'main.js 注册了 clip:test');
+  ok(/clipSense\.testRules\s*\(/.test(main), 'clip:test 复用 clipSense.testRules，不自己实现判定链');
+
+  const preload = read(path.join('src', 'main', 'preload.js'));
+  ok(/clipRulesTest/.test(preload), 'preload 暴露了 clipRulesTest');
+  ok(/invoke\(\s*'clip:test'/.test(preload), 'preload 指向 clip:test');
 }
 
 // ---------------- 汇总 ----------------
