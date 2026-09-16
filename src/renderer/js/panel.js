@@ -1604,22 +1604,38 @@ function bindPersona() {
     await window.xw.memoryClear();
     fillPersona();
   });
+
+  // 记忆检索预览：主进程的 `memory:search` 从建立起就有、也一直挂在 preload 上，
+  // 但界面上**一次都没调用过** —— 用户只能看到全部记忆的流水，看不到「这句话会让小问想起哪几条」。
+  // 这里用同一套检索（`store.searchMemories`，就是对话注入用的那个函数）把结果摊开，
+  // 命中不了的记忆用户可以据此删掉，而不是让它们永远躺在列表里占着位置。
+  let searchTimer = null;
+  const runSearch = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { fillPersona(); }, 140);
+  };
+  $('memSearch').addEventListener('input', runSearch);
+  $('memSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); fillPersona(); } });
+  $('memSearchClear').addEventListener('click', () => {
+    $('memSearch').value = '';
+    fillPersona();
+  });
 }
 
-async function fillPersona() {
-  persona = await window.xw.personaGet();
-  const map = { pzName: 'assistantName', pzRole: 'assistantRole', pzTraits: 'assistantTraits', pzStyle: 'styleRules', pzCustom: 'customPrompt', pzUser: 'userName', pzAlias: 'userAlias', pzProfile: 'userProfile' };
-  Object.entries(map).forEach(([id, key]) => { const el = $(id); if (el) el.value = persona[key] || ''; });
-
-  const list = await window.xw.memoryList();
-  $('memCount').textContent = list.length;
+/**
+ * 渲染记忆列表 —— **列表与搜索结果共用这一份**。
+ *
+ * 分两份写是这类界面最容易出的漂移：一边加了标签、另一边没有；一边的删除按钮忘了刷新。
+ * 所以渲染只有这一个入口，`meta` 只描述「这批是怎么来的」，不参与怎么画。
+ */
+function renderMemories(items, meta) {
   const box = $('memList');
   box.innerHTML = '';
-  if (!list.length) {
-    box.innerHTML = '<div class="empty">还没有记忆。让小问记住点什么吧。</div>';
+  if (!items.length) {
+    box.innerHTML = `<div class="empty">${meta.emptyText}</div>`;
     return;
   }
-  [...list].reverse().forEach((m) => {
+  items.forEach((m) => {
     const row = document.createElement('div');
     row.className = 'mem-item';
     const txt = document.createElement('div');
@@ -1636,6 +1652,26 @@ async function fillPersona() {
     row.appendChild(del);
     box.appendChild(row);
   });
+}
+
+async function fillPersona() {
+  persona = await window.xw.personaGet();
+  const map = { pzName: 'assistantName', pzRole: 'assistantRole', pzTraits: 'assistantTraits', pzStyle: 'styleRules', pzCustom: 'customPrompt', pzUser: 'userName', pzAlias: 'userAlias', pzProfile: 'userProfile' };
+  Object.entries(map).forEach(([id, key]) => { const el = $(id); if (el) el.value = persona[key] || ''; });
+
+  const all = await window.xw.memoryList();
+  $('memCount').textContent = all.length;
+
+  const q = ($('memSearch') && $('memSearch').value || '').trim();
+  const hint = $('memSearchHint');
+  if (q) {
+    const hits = await window.xw.memorySearch(q);
+    hint.textContent = `按「${q}」检索：命中 ${hits.length} 条（与对话注入同一套检索、同一个条数）。调不出记忆时，先看这里有没有命中。`;
+    renderMemories(hits, { emptyText: `没有记忆命中「${q}」。小问这次对话不会想起任何长期记忆。` });
+    return;
+  }
+  hint.textContent = '';
+  renderMemories([...all].reverse(), { emptyText: '还没有记忆。让小问记住点什么吧。' });
 }
 
 // ---------- Agent ----------

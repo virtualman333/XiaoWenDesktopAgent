@@ -67,7 +67,12 @@ function registerAll() {
   ipcMain.handle('memory:add', (_e, m) => store.addMemory(m || {}));
   ipcMain.handle('memory:remove', (_e, id) => store.removeMemory(id));
   ipcMain.handle('memory:clear', () => store.clearMemories());
-  ipcMain.handle('memory:search', (_e, q) => store.searchMemories(String(q || ''), 10));
+  ipcMain.handle('memory:search', (_e, q, limit) => {
+    // 条数默认取 store 的唯一来源（与对话注入同一套检索、同一个条数）：
+    // 设置页要能让用户看到「哪些记忆会被检索到」，那就必须是同一批。
+    const n = Math.min(50, Math.max(1, Number(limit) || store.MEMORY_PROMPT_LIMIT));
+    return store.searchMemories(String(q || ''), n);
+  });
 
   // ---------------- 会话（短期记忆） ----------------
   ipcMain.handle('session:list', () => {

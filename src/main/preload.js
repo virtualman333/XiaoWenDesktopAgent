@@ -221,7 +221,7 @@ contextBridge.exposeInMainWorld('xw', {
   clipboardRead: () => ipcRenderer.invoke('clip:read'),
   memoryRemove: (id) => ipcRenderer.invoke('memory:remove', id),
   memoryClear: () => ipcRenderer.invoke('memory:clear'),
-  memorySearch: (q) => ipcRenderer.invoke('memory:search', q),
+  memorySearch: (q, limit) => ipcRenderer.invoke('memory:search', q, limit),
 
   // 短期记忆（会话）
   sessionList: () => ipcRenderer.invoke('session:list'),

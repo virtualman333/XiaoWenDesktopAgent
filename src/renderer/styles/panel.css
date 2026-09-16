@@ -897,6 +897,8 @@ body { border-radius: 0; }
   background: #fff; color: var(--text);
 }
 .mem-add input:focus { outline: none; border-color: var(--brand); }
+.mem-hint { font-size: 11.5px; color: #8b93a3; line-height: 1.5; margin: -2px 0 8px; }
+.mem-hint:empty { display: none; }
 .mem-list { max-height: 260px; overflow-y: auto; margin-bottom: 10px; }
 .mem-item {
   display: flex; align-items: center; gap: 8px;

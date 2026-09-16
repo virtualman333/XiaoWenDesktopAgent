@@ -160,7 +160,17 @@ function tokenize(text) {
   return { en, cn, raw: s };
 }
 
-function searchMemories(query, limit = 8) {
+/**
+ * 对话注入的记忆条数 —— **只有这一处**。
+ *
+ * 为什么要抽成常量：同一套检索此前有两个条数 —— 对话注入写死 8（`agent.js` 直接传 8），
+ * 而设置页走的 `memory:search` 写死 10。两个数字都不报错，只是「你在设置里看到会被检索到的
+ * 那几条」与「对话里真正注入的那几条」不是同一批：用户按搜索结果判断小问记住了什么，
+ * 判断的却是另一个列表。检索条数不是可以各写一遍的东西，这里作为唯一来源。
+ */
+const MEMORY_PROMPT_LIMIT = 8;
+
+function searchMemories(query, limit = MEMORY_PROMPT_LIMIT) {
   const q = tokenize(query);
   if (!q.cn.length && !q.en.length) {
     return getMemories()
@@ -191,7 +201,7 @@ function searchMemories(query, limit = 8) {
 }
 
 /** 给 system prompt 用的记忆摘要 */
-function memoryPrompt(query, limit = 8) {
+function memoryPrompt(query, limit = MEMORY_PROMPT_LIMIT) {
   const list = searchMemories(query, limit);
   if (!list.length) return '';
   return '你记得关于主人的这些事：\n' + list.map((m) => `- ${m.content}`).join('\n');
@@ -367,6 +377,7 @@ module.exports = {
   clearMemories,
   searchMemories,
   memoryPrompt,
+  MEMORY_PROMPT_LIMIT,
   // sessions
   getSessions,
   createSession,

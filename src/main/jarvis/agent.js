@@ -242,7 +242,9 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   if (persona) parts.push(persona);
   const query = (messages || []).filter((m) => m.role === 'user').slice(-2).map((m) => m.content).join(' ');
   if (opts.useMemory !== false) {
-    const mem = store.memoryPrompt(query, 8);
+    // 条数由 store 的 MEMORY_PROMPT_LIMIT 决定（此前这里写死 8，而设置页那条检索路径写死 10 ——
+    // 用户在设置里看到的「会被检索到的记忆」于是与真正注入的不是同一批）。
+    const mem = store.memoryPrompt(query);
     if (mem) parts.push(mem);
   }
   if (opts.useSkills !== false) {
