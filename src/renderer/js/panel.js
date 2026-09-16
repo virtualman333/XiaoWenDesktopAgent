@@ -3457,6 +3457,67 @@ function bindClipSense() {
   }
   const save = $('clipRulesSave');
   if (save) save.addEventListener('click', saveClipRules);
+
+  // ---- 导入 / 导出 ----
+  // 导出的是**输入框里当前这一份**（含还没保存的编辑）：想先试一版再决定要不要存时，
+  // 导出的正是他眼前看到的那份，而不是 config.json 里的旧版。
+  const exp = $('clipRulesExport');
+  if (exp) {
+    exp.addEventListener('click', async () => {
+      // 先校验：导出一份自己都编译不过的规则没有意义，原因得留在导出方手里
+      const r = await validateClipRules();
+      if (!r || !r.ok) {
+        setToast('规则有误，先改好再导出');
+        return;
+      }
+      let res = null;
+      try {
+        res = await window.xw.clipRulesExport(clipRulesText());
+      } catch (e) {
+        setToast('导出失败：' + ((e && e.message) || e));
+        return;
+      }
+      if (!res || res.canceled) return;
+      if (!res.ok) {
+        setToast('导出失败：' + (res.error || '未知原因'));
+        return;
+      }
+      const warns = (res.warnings || []).length;
+      setToast('已导出到 ' + res.filePath + (warns ? `（有 ${warns} 条警告，见上方摘要）` : ''));
+    });
+  }
+
+  const imp = $('clipRulesImport');
+  if (imp) {
+    imp.addEventListener('click', async () => {
+      let res = null;
+      try {
+        res = await window.xw.clipRulesImport();
+      } catch (e) {
+        setToast('导入失败：' + ((e && e.message) || e));
+        return;
+      }
+      if (!res || res.canceled) return;
+      if (!res.ok) {
+        setToast('导入失败：' + (res.error || '未知原因'));
+        return;
+      }
+      // 导入只填进输入框、**不自动保存**：换机器时最怕是「导进来一份不对的规则
+      // 直接生效」—— 那样连原来的规则都没了。让用户看过摘要再点保存。
+      if (el) {
+        el.value = res.text;
+        el.dataset.dirty = '1';
+        el.scrollIntoView({ block: 'nearest' });
+      }
+      const r = await validateClipRules();
+      scheduleClipTest();
+      if (r && r.ok) {
+        setToast('已读入 ' + res.filePath + '，确认摘要无误后点「保存规则」才会生效');
+      } else {
+        setToast('读入的内容不是合法规则，请改好或重新导入');
+      }
+    });
+  }
 }
 
 // ---- 拿一段内容试试 ----

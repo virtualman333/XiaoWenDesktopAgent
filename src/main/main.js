@@ -1518,6 +1518,63 @@ ipcMain.handle('clip:test', (_e, payload) => {
   }
 });
 
+/**
+ * 剪贴板规则的导入 / 导出。
+ *
+ * 为什么要经过主进程：渲染进程没有 fs，也不该有。所以「选文件 + 读写」放这里，
+ * 但**规则是否合法仍由 clip:rules-parse 判定** —— 这里只负责搬运文本，
+ * 不重复实现一遍规则知识（否则导入的校验口径会和界面上的摘要是两套）。
+ *
+ * 导出前先校验一次：导出一份自己都编译不过的规则没有意义，原因留在导出方手里，
+ * 导入方只会看到「JSON 语法错误」。
+ */
+ipcMain.handle('clip:rules-export', async (_e, text) => {
+  let exported;
+  try {
+    exported = clipSense.rulesExportText(text);
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+  if (!exported.ok) return exported;
+  try {
+    const opts = {
+      title: '导出剪贴板识别规则',
+      defaultPath: path.join(app.getPath('documents'), clipSense.rulesExportName()),
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    };
+    const win = BrowserWindow.getFocusedWindow();
+    const res = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+    if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(res.filePath, exported.text, 'utf-8');
+    return { ok: true, filePath: res.filePath, empty: exported.empty, warnings: exported.warnings };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle('clip:rules-import', async () => {
+  try {
+    const opts = {
+      title: '导入剪贴板识别规则',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    };
+    const win = BrowserWindow.getFocusedWindow();
+    const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    if (res.canceled || !res.filePaths || !res.filePaths.length) return { ok: false, canceled: true };
+    const p = res.filePaths[0];
+    const size = fs.statSync(p).size;
+    if (size > clipSense.MAX_RULES_FILE_BYTES) {
+      return { ok: false, error: `文件太大（${size} 字节）—— 规则文件是手写的，通常只有几 KB，可能选错了文件` };
+    }
+    // 只把文本拿回来，**不落盘、不改配置**：导入的内容要不要用，由用户在界面上
+    // 看过摘要之后再点「保存规则」决定。写配置的路径始终只有 config:set 一条。
+    return { ok: true, filePath: p, text: fs.readFileSync(p, 'utf-8') };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
 ipcMain.handle('config:set', (_e, patch) => {
   const cur = loadConfig();
   const next = { ...cur, ...patch };

@@ -362,6 +362,11 @@ contextBridge.exposeInMainWorld('xw', {
   // 拿一段内容试跑当前规则（含未保存的编辑）。返回「会不会提示 / 为什么 / 会填进去
   // 什么问法」——判定链的实现只在 clip-sense.js 一份，界面不重复实现。
   clipRulesTest: (text, rulesText) => ipcRenderer.invoke('clip:test', { text, rulesText }),
+  // 规则的导入 / 导出：选文件与读写都在主进程（渲染进程没有 fs）。导入回来的只是
+  // **文本**，是否合法仍走 clipRulesParse，是否启用由用户点「保存规则」决定 ——
+  // 写配置的路径始终只有 setConfig 一条。
+  clipRulesExport: (text) => ipcRenderer.invoke('clip:rules-export', text),
+  clipRulesImport: () => ipcRenderer.invoke('clip:rules-import'),
 
   // 会议状态变化（检测到 / 开始记录 / 已生成纪要 / 丢弃）
   onMeetingEvent: (cb) => {

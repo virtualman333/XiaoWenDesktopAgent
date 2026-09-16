@@ -83,13 +83,19 @@ const URL_RE = /^https?:\/\/\S+$/i;
 //   是比「认出来」更强的意图。
 // ─────────────────────────────────────────────────────────────────────────
 
-/** 内置类型表（凭证不在此列，也永远不会进来） */
-const BUILTIN_KINDS = ['error', 'json', 'url', 'code', 'longtext'];
 /**
- * 内置类型的显示名。**唯一来源** —— 设置界面从主进程拿这张表，不自己再抄一份：
+ * 内置类型的显示名。**唯一定义处** —— 设置界面从主进程拿这张表，不自己再抄一份：
  * 抄一份的后果是「新增一类后界面显示原始 id」，且没有任何报错提示你抄漏了。
+ * 「有哪些内置类型」也从它派生（见 BUILTIN_KINDS），不另写第二份清单。
  */
 const BUILTIN_LABELS = { error: '报错', json: 'JSON', url: '链接', code: '代码', longtext: '长文本' };
+/**
+ * 可关闭的内置类型。**由 BUILTIN_LABELS 派生** —— 此前这里是一份独立的数组，
+ * 与 BUILTIN_LABELS 各写一遍、靠人记着同时改。漏改的后果是静默的：
+ * 只加进数组则界面显示原始 id（`newkind` 而不是「新类型」），只加进标签表则
+ * 这个类型关不掉（`disableKinds` 里写它会报「未知类型」）。两处都不报错。
+ */
+const BUILTIN_KINDS = Object.keys(BUILTIN_LABELS);
 /** 自定义正则长度上限：正则由主人自己写，太长既难读也容易被 ReDoS 拖死轮询 */
 const MAX_PATTERN_LEN = 200;
 /** 自定义类型条数上限 */
@@ -571,11 +577,58 @@ function createClipSense(opts = {}) {
   };
 }
 
+/**
+ * 导出规则时的默认文件名（带日期，便于留档与「这台机器 vs 那台机器」对比）。
+ * 单独一个函数而不是在 IPC 里拼字符串：日期格式是**用户看得见**的东西，
+ * 拼错（月份少补零、用了 UTC）不会报错，只是文件看起来莫名其妙。
+ */
+function rulesExportName(date) {
+  const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `clip-sense-rules-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.json`;
+}
+
+/** 规则文件的大小上限：手写的规则几 KB 顶天了，大到离谱多半是选错了文件 */
+const MAX_RULES_FILE_BYTES = 256 * 1024;
+
+/**
+ * 把界面里那段（可能还没保存的）规则整理成可导出的文本。
+ *
+ * 复用 `parseRulesText`，**不另写一份校验**：导出一份自己都编译不过的规则毫无意义
+ * —— 导入方看到的只会是「JSON 语法错误」，而真正的原因（哪条正则写错了）留在了
+ * 导出方，正是最该被告知的那个人。
+ *
+ * @returns {{ok:boolean, error?:string, text?:string, empty?:boolean,
+ *            summary?:object, warnings?:string[], labels?:object}}
+ */
+function rulesExportText(text) {
+  const parsed = parseRulesText(text);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  const value = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+  const empty = Object.keys(value).length === 0;
+  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.slice() : [];
+  if (empty) {
+    warnings.push('当前没有任何规则，导出的是一份空规则集（导入后与「留空」等效）');
+  }
+  return {
+    ok: true,
+    empty,
+    // 结尾补一个换行：手写的 JSON 文件都带换行，diff 时不会显示「\ No newline at end of file」
+    text: JSON.stringify(value, null, 2) + '\n',
+    summary: parsed.summary,
+    warnings,
+    labels: parsed.labels
+  };
+}
+
 module.exports = {
   classifyClipboard,
   buildClipQuestion,
   compileRules,
   parseRulesText,
+  rulesExportName,
+  rulesExportText,
+  MAX_RULES_FILE_BYTES,
   testRules,
   summarizeRules,
   createClipSense,

@@ -767,6 +767,65 @@ section('试跑 · 设置界面的「拿一段内容试试」');
   eq(clip.classifyClipboard('TypeError: a').worth, true, '试跑没有污染不传规则时的默认行为');
 }
 
+// ---------------- 规则的导入 / 导出 ----------------
+// 导出必须先过校验：一份自己都编译不过的规则导出出去，导入方只会看到
+// 「JSON 语法错误」，而真正的原因（哪条正则写错了）留在了导出方 —— 最该被告知的
+// 那个人反而什么都看不到。
+section('导入导出 · 导出前先校验，且导出的是「当前输入框里那一份」');
+{
+  const good = clip.rulesExportText(JSON.stringify({ disableKinds: ['url'] }));
+  eq(good.ok, true, '合法规则可导出');
+  eq(good.empty, false, '有内容时不是空规则集');
+  ok(/\n$/.test(String(good.text)), '导出文本以换行结尾（diff 里不出现 no newline 提示）');
+  // 关键：导出的文本必须能被原样读回来，且摘要完全一致
+  const back = clip.parseRulesText(good.text);
+  eq(back.ok, true, '导出的文本能被重新解析');
+  eq(
+    JSON.stringify(clip.summarizeRules(clip.compileRules(back.value))),
+    JSON.stringify(clip.summarizeRules(clip.compileRules(JSON.parse(good.text)))),
+    '导出的文本解析回来语义不变'
+  );
+
+  const bad = clip.rulesExportText('{ 这不是 JSON }');
+  eq(bad.ok, false, '语法错误时不导出');
+  ok(!bad.text, '失败时不给出文本（免得调用方顺手写盘）');
+  ok(/JSON/.test(String(bad.error)), '失败原因要说清是 JSON 的问题', bad.error);
+
+  const arr = clip.rulesExportText('[1,2]');
+  eq(arr.ok, false, '顶层是数组时不导出');
+
+  const empty = clip.rulesExportText('');
+  eq(empty.ok, true, '空规则也能导出（相当于「重置为默认」的模板）');
+  eq(empty.empty, true, '空规则要标记 empty');
+  eq(
+    empty.warnings.filter((w) => /空规则集/.test(w)).length,
+    1,
+    '空规则必须有一句人话提醒，不能让人以为导出了一份配置'
+  );
+
+  // 写坏的条目能被导出的警告带出来（而不是静默丢掉）
+  const withWarn = clip.rulesExportText('{"ignorePatterns": ["("], "unknownField": 1}');
+  eq(withWarn.ok, true, '有写坏的条目仍可导出（规则本身是合法 JSON）');
+  eq(withWarn.warnings.length, 2, '两条警告都要带出来（正则编译不了 + 未知字段）', JSON.stringify(withWarn.warnings));
+}
+
+section('导入导出 · 默认文件名');
+{
+  eq(clip.rulesExportName(new Date(2026, 8, 16)), 'clip-sense-rules-20260916.json', '月/日补零，用本地日期');
+  eq(clip.rulesExportName(new Date(2026, 0, 5)), 'clip-sense-rules-20260105.json', '一月五日补零正确');
+  // 传进来的不是 Date（或被调用方写坏）时退回今天，而不是拼出 NaN
+  const t = clip.rulesExportName('nonsense');
+  ok(/^clip-sense-rules-\d{8}\.json$/.test(t), '非法入参退回当天日期而不是 NaN', t);
+  const bad = clip.rulesExportName(new Date('x'));
+  ok(/^clip-sense-rules-\d{8}\.json$/.test(bad), 'Invalid Date 也退回当天', bad);
+}
+
+section('导入导出 · 文件大小上限存在且是一个有限数');
+{
+  ok(typeof clip.MAX_RULES_FILE_BYTES === 'number' && clip.MAX_RULES_FILE_BYTES > 0, '有上限');
+  ok(clip.MAX_RULES_FILE_BYTES <= 1024 * 1024, '上限不超过 1MB（规则文件是手写的）', String(clip.MAX_RULES_FILE_BYTES));
+}
+
 // ---------------- 一致性：显示名与判定链都不许有第二份 ----------------
 section('一致性 · 显示名与判定链都只有一份');
 {
@@ -805,6 +864,48 @@ section('一致性 · 显示名与判定链都只有一份');
   const preload = read(path.join('src', 'main', 'preload.js'));
   ok(/clipRulesTest/.test(preload), 'preload 暴露了 clipRulesTest');
   ok(/invoke\(\s*'clip:test'/.test(preload), 'preload 指向 clip:test');
+
+  // ---- 规则的导入 / 导出：四处接线缺一处就静默失效 ----
+  // 这类「新增一条 IPC」的漏接是无声的：少写 preload 就报 undefined is not a function，
+  // 少写 html 就是按钮点不到（更没有任何报错）。所以四处都钉住。
+  const sense = read(path.join('src', 'main', 'clip-sense.js'));
+  ok(/clip:rules-export/.test(main), 'main.js 注册了 clip:rules-export');
+  ok(/clip:rules-import/.test(main), 'main.js 注册了 clip:rules-import');
+  ok(/clipSense\.rulesExportText\s*\(/.test(main), '导出走 clipSense.rulesExportText，不在 IPC 里另写一份校验');
+  ok(/showSaveDialog/.test(main) && /showOpenDialog/.test(main), '导入导出用系统文件对话框');
+  ok(/MAX_RULES_FILE_BYTES/.test(main), '导入有大小上限（引的是 clip-sense.js 的常量，不是就地写死的数）');
+  ok(/rulesExportName\s*\(/.test(main), '默认文件名来自 clipSense.rulesExportName');
+  // preload 里是对象字面量（`clipRulesExport: (text) => ...`），名字与括号之间有冒号，
+  // 所以这里不能照抄 panel.js 那条 `名字(` 的写法 —— 那样永远匹配不上。
+  ok(/clipRulesExport\s*:\s*\(/.test(preload), 'preload 暴露了 clipRulesExport');
+  ok(/clipRulesImport\s*:\s*\(/.test(preload), 'preload 暴露了 clipRulesImport');
+  ok(/clipRulesExport\s*\(/.test(panel), 'panel.js 调了 clipRulesExport');
+  ok(/clipRulesImport\s*\(/.test(panel), 'panel.js 调了 clipRulesImport');
+  const html = read(path.join('src', 'renderer', 'panel.html'));
+  ok(/id="clipRulesExport"/.test(html), 'panel.html 有导出按钮');
+  ok(/id="clipRulesImport"/.test(html), 'panel.html 有导入按钮');
+  ok(/\$\('clipRulesExport'\)/.test(panel) && /\$\('clipRulesImport'\)/.test(panel), '两个按钮都绑了事件');
+
+  // 导入**不许自动生效**：换机器时最怕「导进来一份不对的规则直接生效」—— 那样连
+  // 原来的规则都没了，而且没有任何提示。导入只填进输入框，写配置的路径始终只有
+  // 用户自己点「保存规则」这一条。
+  //
+  // 切片边界取到下一个分节注释（`// ---- 拿一段内容试试 ----`），而不是固定字数：
+  // 字数窗口会随排版漂移，而分节注释就是这一段的结束位置。
+  const impAt = panel.indexOf("$('clipRulesImport')");
+  const impEnd = panel.indexOf('// ---- 拿一段内容试试', impAt);
+  const impBlock = impAt < 0 ? '' : panel.slice(impAt, impEnd < 0 ? impAt + 1600 : impEnd);
+  ok(impAt > -1 && impBlock.length > 200, 'panel.js 里有导入按钮的处理块', String(impBlock.length));
+  ok(
+    !/setConfig/.test(impBlock) && !/saveClipRules\s*\(/.test(impBlock),
+    '导入只填进输入框，不自动保存（写配置的路径只有「保存规则」一条）'
+  );
+
+  // 内置类型清单只允许有一份，且必须**派生**自显示名表。
+  // 只断言「两张表一一对应」是不够的：照抄一份完全相同的数组也能通过，
+  // 而漂移从下一次新增类型才开始。
+  ok(!/const\s+BUILTIN_KINDS\s*=\s*\[/.test(sense), 'BUILTIN_KINDS 不是手写数组');
+  ok(/const\s+BUILTIN_KINDS\s*=\s*Object\.keys\(\s*BUILTIN_LABELS\s*\)/.test(sense), 'BUILTIN_KINDS 由 BUILTIN_LABELS 派生');
 }
 
 // ---------------- 汇总 ----------------
