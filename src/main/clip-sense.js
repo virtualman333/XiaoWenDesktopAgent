@@ -89,6 +89,8 @@ const BUILTIN_KINDS = ['error', 'json', 'url', 'code', 'longtext'];
 const MAX_PATTERN_LEN = 200;
 /** 自定义类型条数上限 */
 const MAX_CUSTOM_KINDS = 20;
+/** `clipSenseRules` 认得的字段。**只有这三个**，多出来的字段一律报警（见 compileRules） */
+const RULE_KEYS = ['disableKinds', 'ignorePatterns', 'customKinds'];
 
 /** 空规则集：不传规则时的默认行为，与加配置之前完全一致 */
 const EMPTY_RULES = { off: new Set(), disableKinds: [], ignoreRes: [], custom: [], warnings: [] };
@@ -135,6 +137,19 @@ function safeRe(pattern, flags, warnings, where) {
 function compileRules(raw) {
   const warnings = [];
   const src = raw && typeof raw === 'object' ? raw : {};
+
+  // 未知字段必须报警。旧实现是**静默忽略**的：把 `ignorePatterns` 写成 `ignorePattern`
+  // （少个 s）或 `customKinds` 写成 `customKind` 时，规则一条都不生效、却什么都不说 ——
+  // 用户只会觉得「我明明填了」。改配置文件时这已经够难查，到了设置界面里就更是死胡同。
+  if (Array.isArray(raw)) {
+    warnings.push('clipSenseRules 应该是一个对象，收到的却是数组，已按空规则处理');
+  } else {
+    for (const k of Object.keys(src)) {
+      if (!RULE_KEYS.includes(k)) {
+        warnings.push(`clipSenseRules 里有未知字段「${k}」，已忽略（只认：${RULE_KEYS.join(' / ')}）`);
+      }
+    }
+  }
 
   const disableKinds = [];
   for (const k of Array.isArray(src.disableKinds) ? src.disableKinds : []) {
@@ -189,6 +204,52 @@ function compileRules(raw) {
   }
 
   return { off: new Set(disableKinds), disableKinds, ignoreRes, custom, warnings };
+}
+
+/**
+ * 规则编译结果的「人话摘要」。
+ *
+ * 界面上要显示的是**实际生效的结果**，不是用户填的原文：`compileRules` 对写错的
+ * 条目一律只警告不抛，所以「填了 5 条、生效 1 条」完全可能。只回显原文的话，
+ * 用户永远看不出哪几条被丢掉了。
+ */
+function summarizeRules(rules) {
+  const off = rules.off instanceof Set ? rules.off : new Set(rules.disableKinds || []);
+  return {
+    disabledKinds: rules.disableKinds || [],
+    /** 仍然会提示的内置类型（关掉的不算） */
+    activeKinds: BUILTIN_KINDS.filter((k) => !off.has(k)),
+    ignoreCount: (rules.ignoreRes || []).length,
+    custom: (rules.custom || []).map((c) => ({ id: c.id, label: c.label }))
+  };
+}
+
+/**
+ * 解析设置界面里那段规则文本 —— **纯函数**，不碰文件也不碰 Electron。
+ *
+ * 为什么不把这段逻辑写在渲染进程里：规则知识（哪些字段合法、哪些条目会被丢掉、
+ * 凭证为什么不能关）只有 `clip-sense.js` 一份。界面再实现一遍必然漂移，而漂移的
+ * 后果是「界面说没问题、实际全被丢弃」——最坏的一种。
+ *
+ * @param {string} text 规则 JSON 文本；空串表示「不用自定义规则」
+ * @returns {{ok:boolean, error?:string, value?:object, summary?:object, warnings:string[]}}
+ */
+function parseRulesText(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) {
+    return { ok: true, value: {}, summary: summarizeRules(compileRules({})), warnings: [] };
+  }
+  let obj;
+  try {
+    obj = JSON.parse(s);
+  } catch (e) {
+    return { ok: false, error: `JSON 语法错误：${(e && e.message) || e}`, warnings: [] };
+  }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { ok: false, error: '规则必须是一个 JSON 对象，形如 {"disableKinds": ["url"]}', warnings: [] };
+  }
+  const rules = compileRules(obj);
+  return { ok: true, value: obj, summary: summarizeRules(rules), warnings: rules.warnings };
 }
 
 function preview(text) {
@@ -412,6 +473,8 @@ module.exports = {
   classifyClipboard,
   buildClipQuestion,
   compileRules,
+  parseRulesText,
+  summarizeRules,
   createClipSense,
   MAX_PREVIEW,
   MIN_LENGTH,
@@ -420,5 +483,6 @@ module.exports = {
   DEFAULT_COOLDOWN,
   ASK_TEMPLATES,
   NEUTRAL_HINT,
-  BUILTIN_KINDS
+  BUILTIN_KINDS,
+  RULE_KEYS
 };

@@ -14,6 +14,15 @@ const clip = require('../src/main/clip-sense.js');
 let pass = 0; const fails = [];
 const ok = (cond, name, extra) => { if (cond) pass++; else fails.push(name + (extra ? ` → ${extra}` : '')); };
 const eq = (a, b, name) => ok(a === b, name, `期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`);
+/** 安全取值：断言里不要出现 `x.y[0].z` —— 被测对象坏掉时它会先抛 TypeError，
+ *  于是「报出问题」变成「脚本崩了」，反而看不出是哪条锁断了。 */
+const pick = (obj, ...path) => path.reduce((o, k) => (o == null ? undefined : o[k]), obj);
+/** 安全取 summary 字段：被测对象坏掉（ok:false、summary 缺失）时给兜底值，
+ *  否则断言自己会抛 TypeError，把「哪条锁断了」盖成「脚本崩了」。 */
+const at = (r, key, fallback) => {
+  const v = r && r.summary ? r.summary[key] : undefined;
+  return v === undefined ? fallback : v;
+};
 const section = (s) => console.log('\n' + s);
 
 // ---------------- 分类：不该提示的 ----------------
@@ -510,6 +519,116 @@ section('可配置规则 · 热替换与容错');
   w2.forget();
   ok(w2.checkNow() !== null, '换回正常规则后轮询器照常工作');
   eq(hits.length, 1, '恢复正常后只提示一次');
+}
+
+// ---------------- 设置界面：规则文本校验 ----------------
+// 界面上那段 JSON 由主进程校验（parseRulesText），规则知识只有一份。
+// 这里钉两件事：① 语法/结构错误必须**拦住保存**；② 写错字段名这类
+// 「校验通过但实际不生效」的情况必须给出**点名到字段**的警告 —— 旧实现是静默忽略的，
+// 用户只会觉得「我明明填了」。
+section('设置界面 · 规则文本校验');
+
+{
+  // 空文本 = 只用内置 5 类，不算错误
+  const r = clip.parseRulesText('');
+  ok(r.ok, '空文本视为「不用自定义规则」，不算错误');
+  eq(r.warnings.length, 0, '空文本没有警告');
+  eq(at(r, 'activeKinds', []).join(','), 'error,json,url,code,longtext', '空规则下 5 个内置类型都在提示');
+  eq(at(r, 'ignoreCount', -1), 0, '空规则下忽略正则 0 条');
+  eq(at(r, 'custom', []).length, 0, '空规则下自定义类型 0 个');
+
+  const rws = clip.parseRulesText('   \n  ');
+  ok(rws.ok, '纯空白同空文本');
+}
+
+{
+  // 一份完整可用的规则：必须零警告（警告通道不能有噪音，否则真警告会被忽略）
+  const text = JSON.stringify({
+    disableKinds: ['url'],
+    ignorePatterns: ['^\\[内部\\]'],
+    customKinds: [
+      { id: 'corp-log', label: '公司日志', pattern: '^\\[corp\\]', flags: 'im', ask: '帮我分析这段公司日志。' }
+    ]
+  });
+  const r = clip.parseRulesText(text);
+  ok(r.ok, '完整规则校验通过');
+  eq(r.warnings.length, 0, '完整规则零警告');
+  eq(at(r, 'disabledKinds', []).join(','), 'url', '摘要反映已关闭的内置类型');
+  ok(!at(r, 'activeKinds', []).includes('url'), '摘要里 url 已不在「仍然提示」之列');
+  eq(at(r, 'ignoreCount', -1), 1, '摘要里忽略正则 1 条');
+  eq(at(r, 'custom', []).length, 1, '摘要里自定义类型 1 个');
+  eq(pick(r, 'summary', 'custom', 0, 'label'), '公司日志', '摘要带出自定义类型的 label');
+  eq(pick(r, 'value', 'disableKinds', 0), 'url', 'value 是原样解析出的对象（保存时字段不丢）');
+}
+
+{
+  // 语法 / 结构错误：必须 ok=false（界面据此拒绝保存）
+  const bad = [
+    ['JSON 少个括号', '{"disableKinds": ["url"'],
+    ['JSON 用了单引号', "{'disableKinds': ['url']}"],
+    ['尾逗号', '{"disableKinds": ["url",]}'],
+    ['是数组', '[1, 2, 3]'],
+    ['是 null', 'null'],
+    ['是数字', '123'],
+    ['是字符串', '"disableKinds"']
+  ];
+  for (const [name, text] of bad) {
+    const r = clip.parseRulesText(text);
+    eq(r.ok, false, `拦下：${name}`);
+    ok(!!r.error, `有错误说明：${name}`);
+  }
+  ok(/JSON/.test(clip.parseRulesText('{').error), 'JSON 语法错误给出「JSON」字样');
+  ok(/对象/.test(clip.parseRulesText('[1]').error), '结构错误说明「必须是对象」');
+}
+
+{
+  // ★ 未知字段：校验通过但要**点名**报警（旧实现静默忽略，规则一条都不生效却什么都不说）
+  const r = clip.parseRulesText('{"ignorePattern": ["^\\\\[内部\\\\]"]}');
+  ok(r.ok, '未知字段不算致命错误（配置仍可用）');
+  eq(r.warnings.length, 1, '未知字段给出 1 条警告');
+  ok(String(pick(r, 'warnings', 0) || '').includes('ignorePattern'), '警告点名到具体字段', pick(r, 'warnings', 0));
+  eq(at(r, 'ignoreCount', -1), 0, '写错的字段确实没有生效（摘要如实显示 0 条）');
+}
+
+{
+  // 数组形式的 clipSenseRules
+  const r = clip.compileRules(['error']);
+  eq(r.warnings.length, 1, '数组形式给 1 条警告');
+  ok(/数组/.test(r.warnings[0]), '警告说明「应该是对象」', r.warnings[0]);
+  eq(r.disableKinds.length, 0, '数组形式按空规则处理');
+}
+
+{
+  // 凭证不可关：可以被保存，但必须明确告知这条被拒绝，且内置类型不受影响
+  const r = clip.parseRulesText('{"disableKinds": ["secret"]}');
+  ok(r.ok, 'disableKinds 写 secret 不算语法错误');
+  eq(r.warnings.length, 1, 'secret 被拒绝时给 1 条警告');
+  ok(/secret/.test(r.warnings[0]), '警告里点出 secret', r.warnings[0]);
+  eq(at(r, 'disabledKinds', []).length, 0, '实际一个内置类型都没被关闭');
+  ok(at(r, 'activeKinds', []).includes('error'), '内置类型照常提示');
+}
+
+{
+  // 非法正则：与 compileRules 同一套警告（界面不自己判）
+  const r = clip.parseRulesText('{"ignorePatterns": ["("]}');
+  ok(r.ok, '非法正则不致命（该条被丢掉，其余规则仍生效）');
+  eq(r.warnings.length, 1, '非法正则给 1 条警告');
+  ok(/正则/.test(r.warnings[0]), '警告说明正则问题', r.warnings[0]);
+  eq(at(r, 'ignoreCount', -1), 0, '非法正则没进生效列表');
+
+  const r2 = clip.parseRulesText('{"ignorePatterns": ["^ok$", "("]}');
+  eq(at(r2, 'ignoreCount', -1), 1, '一条坏正则不影响另一条好正则生效');
+}
+
+{
+  // 自定义类型的 id 冲突 / 缺字段：都在摘要里如实反映
+  const r = clip.parseRulesText(
+    JSON.stringify({ customKinds: [{ id: 'error', pattern: 'x' }, { pattern: 'y' }, { id: 'ok-one', pattern: 'z' }] })
+  );
+  ok(r.ok, 'id 冲突不算致命');
+  eq(at(r, 'custom', []).length, 1, '只有合法的那一条生效');
+  eq(pick(r, 'summary', 'custom', 0, 'id'), 'ok-one', '生效的是合法条目');
+  eq(r.warnings.length, 2, '另外两条各给一条警告');
 }
 
 // ---------------- 汇总 ----------------

@@ -1399,6 +1399,7 @@ function initSettings() {
   bindWatch();
   bindMeeting();
   bindMeetingEvents();
+  bindClipSense();
   bindAdvanced();
   fillAll();
 }
@@ -1446,6 +1447,7 @@ function fillAll() {
   fillSchedule();
   fillWatch();
   fillMeeting();
+  fillClipSense();
   refreshTrayDiag();
   refreshGpuStatus();
 }
@@ -3282,6 +3284,165 @@ function renderHotkeyState(st) {
     ? `<span class="hk-state-ok">✅ ${it.label} ${it.accel}</span>`
     : `<span class="hk-state-bad">❌ ${it.label}：${it.error}</span>`
   )).join('　');
+}
+
+// ================== 剪贴板感知 ==================
+// 开关 + 规则编辑。规则文本与 config.json 里的 `clipSenseRules` 是同一份，但
+// **校验走主进程**：哪些字段合法、哪些条目会被静默丢弃、凭证为什么不可关闭，
+// 这些知识只有 `src/main/clip-sense.js` 一份，界面不重复实现一遍。
+//
+// 界面上要显示的是「**实际生效的结果**」而不是用户填的原文：compileRules 对写错的
+// 条目一律只警告不抛，只回显原文的话，用户看不出「填了 5 条、只生效 1 条」。
+const CLIP_KIND_LABELS = { error: '报错', json: 'JSON', url: '链接', code: '代码', longtext: '长文本' };
+
+const CLIP_RULES_SAMPLE = {
+  disableKinds: ['url'],
+  ignorePatterns: ['^\\[内部\\]'],
+  customKinds: [
+    {
+      id: 'corp-log',
+      label: '公司日志',
+      pattern: '^\\[corp\\]',
+      flags: 'im',
+      title: '这段公司日志要我看看吗？',
+      ask: '帮我分析这段公司日志。'
+    }
+  ]
+};
+
+let clipRulesTimer = null;
+
+function clipRulesEl() {
+  return $('clipRules');
+}
+
+function clipRulesText() {
+  const el = clipRulesEl();
+  return el ? String(el.value || '').trim() : '';
+}
+
+/** 把校验结果画到界面上，返回主进程的原始结果（保存前要判 ok） */
+function renderClipRulesResult(r) {
+  const box = $('clipRulesResult');
+  if (!box) return r;
+  box.textContent = '';
+  const add = (cls, text) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    box.appendChild(d);
+  };
+  if (!r || !r.ok) {
+    add('cb-err', '✗ ' + ((r && r.error) || '校验失败，规则未生效'));
+    return r;
+  }
+  const s = r.summary || {};
+  const active = (s.activeKinds || []).map((k) => CLIP_KIND_LABELS[k] || k);
+  const parts = ['仍然提示：' + (active.length ? active.join(' / ') : '（内置类型已全部关闭）')];
+  if ((s.disabledKinds || []).length) parts.push('已关闭：' + s.disabledKinds.join(' / '));
+  parts.push('忽略正则 ' + (s.ignoreCount || 0) + ' 条');
+  const custom = s.custom || [];
+  parts.push(
+    '自定义类型 ' + custom.length + ' 个' + (custom.length ? '（' + custom.map((c) => c.label).join(' / ') + '）' : '')
+  );
+  const warns = r.warnings || [];
+  // 「凭证始终识别」在任何配置下都成立，索性钉在摘要里 —— 用户在改「关闭哪些类型」时
+  // 最容易产生的误解就是「那我能不能把密钥那条也关了」。
+  add('cb-note', '✓ 生效结果 — ' + parts.join('　·　') + '　·　凭证始终识别（不可关闭）' + (warns.length ? '' : '（无警告）'));
+  for (const w of warns) add('cb-warn', '⚠ ' + w);
+  return r;
+}
+
+async function validateClipRules() {
+  let r = null;
+  try {
+    r = await window.xw.clipRulesParse(clipRulesText());
+  } catch (e) {
+    r = { ok: false, error: String((e && e.message) || e) };
+  }
+  return renderClipRulesResult(r);
+}
+
+function scheduleClipValidate() {
+  if (clipRulesTimer) clearTimeout(clipRulesTimer);
+  clipRulesTimer = setTimeout(() => {
+    clipRulesTimer = null;
+    validateClipRules();
+  }, 250);
+}
+
+async function saveClipRules() {
+  // 校验不过就不落盘：写进配置的必须是通过校验的那一份
+  const r = await validateClipRules();
+  if (!r || !r.ok) {
+    setToast('规则有误，未保存');
+    return;
+  }
+  try {
+    cfg = await window.xw.setConfig({ clipSenseRules: r.value || {} });
+    const el = clipRulesEl();
+    if (el) delete el.dataset.dirty;
+    setToast('规则已保存，立即生效');
+  } catch (e) {
+    setToast('保存失败：' + ((e && e.message) || e));
+  }
+}
+
+function fillClipSense() {
+  const on = $('clipEnabled');
+  if (!on) return;
+  on.checked = !!cfg.clipSenseEnabled;
+  const el = clipRulesEl();
+  // 编辑到一半（dirty）不能被配置刷新覆盖掉 —— 同输入框草稿的处理
+  if (el && !el.dataset.dirty) {
+    const v = cfg.clipSenseRules;
+    el.value = v && Object.keys(v).length ? JSON.stringify(v, null, 2) : '';
+  }
+  validateClipRules();
+}
+
+function bindClipSense() {
+  const on = $('clipEnabled');
+  if (on) {
+    on.addEventListener('change', async () => {
+      try {
+        cfg = await window.xw.setConfig({ clipSenseEnabled: on.checked });
+        setToast(on.checked ? '剪贴板感知已开启' : '剪贴板感知已关闭');
+      } catch (e) {
+        on.checked = !on.checked;
+        setToast('保存失败：' + ((e && e.message) || e));
+      }
+    });
+  }
+  const el = clipRulesEl();
+  if (el) {
+    el.addEventListener('input', () => {
+      el.dataset.dirty = '1';
+      scheduleClipValidate();
+    });
+  }
+  const sample = $('clipRulesSample');
+  if (sample) {
+    sample.addEventListener('click', () => {
+      if (el) {
+        el.value = JSON.stringify(CLIP_RULES_SAMPLE, null, 2);
+        el.dataset.dirty = '1';
+      }
+      validateClipRules();
+    });
+  }
+  const clear = $('clipRulesClear');
+  if (clear) {
+    clear.addEventListener('click', () => {
+      if (el) {
+        el.value = '';
+        el.dataset.dirty = '1';
+      }
+      validateClipRules();
+    });
+  }
+  const save = $('clipRulesSave');
+  if (save) save.addEventListener('click', saveClipRules);
 }
 
 // ================== 截图与更新设置 ==================

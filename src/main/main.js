@@ -1503,6 +1503,10 @@ ipcMain.handle('chat:test', async (_e, { baseUrl: rawBase, model: rawModel, apiK
 // ---------- IPC ----------
 ipcMain.handle('config:get', () => sanitizeConfig(loadConfig()));
 
+// 规则文本校验（设置界面里那段 JSON）：不落盘、不碰文件，界面边打字边调。
+// 规则知识只在 clip-sense.js 一份，界面不自己实现一遍。
+ipcMain.handle('clip:rules-parse', (_e, text) => clipSense.parseRulesText(text));
+
 ipcMain.handle('config:set', (_e, patch) => {
   const cur = loadConfig();
   const next = { ...cur, ...patch };

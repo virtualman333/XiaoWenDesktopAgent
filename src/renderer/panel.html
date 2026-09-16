@@ -223,6 +223,7 @@
         <button class="st-nav-item" data-tab="schedule">⏰ 定时任务</button>
         <button class="st-nav-item" data-tab="watch">🔔 主动关注</button>
         <button class="st-nav-item" data-tab="meeting">🎙 会议纪要</button>
+        <button class="st-nav-item" data-tab="clip">📋 剪贴板感知</button>
         <button class="st-nav-item" data-tab="advanced">显示与数据</button>
       </nav>
 
@@ -1059,6 +1060,39 @@
 
           <h3>📝 最近的纪要</h3>
           <div class="mt-list" id="mtList"><div class="hint">还没有记录过会议</div></div>
+        </section>
+
+        <!-- ---------- 剪贴板感知 ---------- -->
+        <section class="st-section" data-tab="clip">
+          <div class="field row">
+            <label><b>启用剪贴板感知</b><span class="hint-inline">复制到报错 / 代码 / 链接时，小问主动问一句</span></label>
+            <label class="switch"><input type="checkbox" id="clipEnabled" /><span></span></label>
+          </div>
+          <div class="hint">
+            常驻读剪贴板属隐私敏感行为，默认关闭。开启后<strong>只提示、不代发</strong>：内容连问法一起带进输入框，
+            发出与否由你按回车决定。
+          </div>
+
+          <h3>识别规则</h3>
+          <div class="field">
+            <label>自定义规则（JSON，与 config.json 里的 <code>clipSenseRules</code> 是同一份）</label>
+            <textarea id="clipRules" rows="11" spellcheck="false" placeholder="留空 = 只用内置 5 类；点下面「插入示例」看格式"></textarea>
+            <div class="cb-result" id="clipRulesResult"></div>
+          </div>
+          <div class="key-row">
+            <button class="btn-ghost" id="clipRulesSample">插入示例</button>
+            <button class="btn-ghost" id="clipRulesClear">清空</button>
+            <button class="btn-primary" id="clipRulesSave">保存规则</button>
+          </div>
+          <div class="hint">
+            三个字段：<code>disableKinds</code> 关掉不想被提示的内置类型、<code>ignorePatterns</code> 永不提示的正则、
+            <code>customKinds</code> 你自己的类型（公司日志前缀、内网域名、自家框架的栈帧格式…）。
+            判定顺序：<strong>凭证 → ignorePatterns → customKinds → 内置 5 类</strong>。
+          </div>
+          <div class="hint">
+            <strong>凭证识别没有开关</strong>：<code>disableKinds: ["secret"]</code> 会被拒绝，自定义类型的 id 也不能占用
+            <code>secret</code> / <code>ignore</code> / 内置类型名。误报一次，密钥就印在系统通知横幅上了，收不回来。
+          </div>
         </section>
 
         <!-- ---------- 显示与数据 ---------- -->

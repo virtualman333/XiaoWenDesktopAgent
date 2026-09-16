@@ -356,6 +356,9 @@ contextBridge.exposeInMainWorld('xw', {
     ipcRenderer.on('clip:ask', h);
     return () => ipcRenderer.removeListener('clip:ask', h);
   },
+  // 校验设置界面里那段规则 JSON（纯校验，不落盘）。规则知识只在 clip-sense.js 一份，
+  // 界面不重复实现 —— 否则「界面说没问题、实际全被丢弃」这种漂移迟早会发生。
+  clipRulesParse: (text) => ipcRenderer.invoke('clip:rules-parse', text),
 
   // 会议状态变化（检测到 / 开始记录 / 已生成纪要 / 丢弃）
   onMeetingEvent: (cb) => {
