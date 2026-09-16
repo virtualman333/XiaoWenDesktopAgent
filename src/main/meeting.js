@@ -97,11 +97,29 @@ function selfExe() {
   return process.platform === 'win32' ? 'electron.exe' : '';
 }
 
+/**
+ * 本轮要读哪几个「设备占用」注册表。
+ *
+ * 麦克风信号是「在开会」的主判据，**永远都读** —— 设置页里的「同时采集麦克风」
+ * (`meetingCaptureMic`) 管的是**录制**时带不带自己的声音，跟检测无关；
+ * 检测侧没有任何开关可以关掉麦克风信号。
+ * 摄像头信号是补充判据（纯视频会议也能识别），由 `meetingWatchCam` 控制。
+ *
+ * 单独抽成函数就是为了让「两个探针共用一个开关」这种笔误不可能再发生：
+ * 归属判断只在这里做一次，`sampleOnce` 只按结果取数据、自己不再看配置。
+ */
+function watchedDevices(c = cfg()) {
+  const devices = ['microphone'];
+  if (c.meetingWatchCam !== false) devices.push('webcam');
+  return devices;
+}
+
 async function sampleOnce() {
   const c = cfg();
+  const devices = watchedDevices(c);
   const [micText, camText, procs] = await Promise.all([
-    c.meetingWatchCam === false ? Promise.resolve('') : readConsent('microphone'),
-    c.meetingWatchCam === false ? Promise.resolve('') : readConsent('webcam'),
+    readConsent('microphone'),                                                 // 主判据：无开关
+    devices.includes('webcam') ? readConsent('webcam') : Promise.resolve(''),  // 可选判据
     listProcesses()
   ]);
   const micUsers = detect.activeUsers(micText);
@@ -113,7 +131,7 @@ async function sampleOnce() {
     selfExe: selfExe(),
     allowUnknown: c.meetingUnknownApps === true
   });
-  return { result, procs, micUsers, camUsers };
+  return { result, procs, micUsers, camUsers, devices };
 }
 
 // ---------------- 状态 ----------------
@@ -711,6 +729,7 @@ ipcMain.handle('meeting:detect-now', async () => {
     reasons: r.reasons,
     micUsers: sample.micUsers.map((u) => ({ exe: u.exe, active: u.active, stopKnown: u.stopKnown, name: u.name })),
     camUsers: sample.camUsers.map((u) => ({ exe: u.exe, active: u.active })),
+    devices: sample.devices,
     procs: sample.procs.filter((p) => detect.isKnown(p.exe)).map((p) => ({ exe: p.exe, title: p.title }))
   };
 });
@@ -762,6 +781,7 @@ module.exports = {
   stopRecording,
   // 给测试 / 设置页用
   sampleOnce,
+  watchedDevices,
   selfExe,
   isRecorderSender,
   get lastDetect() { return lastDetect; },

@@ -2629,8 +2629,16 @@ function bindMeeting() {
     if (!r || !r.ok) { box.textContent = `采样失败：${(r && r.error) || '未知原因'}`; return; }
     const lv = { meeting: '判定在开会/通话', mic: '有程序在用麦克风（不是会议类）', none: '没有检测到通话' }[r.level] || r.level;
     const lines = [`结论：${lv}${r.app ? ` · ${r.app}` : ''}`, ...(r.reasons || [])];
+    // 先说清「这一轮到底看了哪些信号」——否则「没检测到」时用户根本不知道
+    // 是环境安静，还是某个信号压根没采（麦克风信号是主判据，永远都在采）
+    const DEV = { microphone: '麦克风', webcam: '摄像头' };
+    const devs = Array.isArray(r.devices) ? r.devices : ['microphone', 'webcam'];
+    lines.push('本轮探测：' + devs.map((d) => DEV[d] || d).join(' + ')
+      + (devs.includes('webcam') ? '' : '（摄像头信号按设置关闭）'));
     if (r.micUsers && r.micUsers.length) {
       lines.push('麦克风占用：' + r.micUsers.map((u) => `${u.exe || u.name}${u.stopKnown === false ? '(记录不全)' : ''}`).join('、'));
+    } else {
+      lines.push('麦克风占用：没有程序在用');
     }
     if (r.procs && r.procs.length) {
       lines.push('识别到的相关进程：' + r.procs.map((p) => `${p.exe}${p.title ? `「${p.title.slice(0, 24)}」` : ''}`).join('、'));

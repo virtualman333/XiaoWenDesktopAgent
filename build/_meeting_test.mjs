@@ -84,14 +84,21 @@ const fakeElectron = {
   shell: { openPath: async () => '' }
 };
 
-let registerOutput = '';   // 注册表输出（由用例设置）
+let registerOutput = '';   // 注册表输出（由用例设置）—— 默认当作麦克风那一支
+let webcamOutput = '';     // 摄像头那一支；没单独设就沿用 registerOutput
 let tasklistOutput = '';   // tasklist 输出
+let regQueries = [];       // 记录每次 reg query 查的是哪个设备，用来断言「探针真的跑了」
 
 const fakeChildProcess = {
   execFile: (cmd, args, opts, cb) => {
     let out = '';
-    if (cmd === 'reg') out = registerOutput;
-    else if (cmd === 'tasklist') out = tasklistOutput;
+    if (cmd === 'reg') {
+      // readConsent(device) 会调：reg query <CAPABILITY_ROOT>\<device> /s
+      const key = String((args && args[1]) || '');
+      const isCam = /\\webcam\b/i.test(key);
+      regQueries.push(isCam ? 'webcam' : 'microphone');
+      out = isCam ? (webcamOutput || registerOutput) : registerOutput;
+    } else if (cmd === 'tasklist') out = tasklistOutput;
     setImmediate(() => cb(null, out, ''));
   }
 };
@@ -675,6 +682,95 @@ section('9. 开关与参数');
   eq(meeting.status().recording, false, '「先问我」模式不自动录');
   ok(/要.*记|点「开始记录」/.test(delivered[0].text), '而是问一句', delivered[0].text);
 
+  meeting.stop();
+}
+
+// ================= 10. 探针归属：哪个开关管哪一路信号 =================
+section('10. 探针归属：麦克风信号不能被摄像头开关带走');
+{
+  // 取一段函数的源码文本（按大括号配平），用来做形态锁
+  const functionBody = (src, sig) => {
+    const i = src.indexOf(sig);
+    if (i < 0) return '';
+    let depth = 0;
+    let started = false;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === '{') { depth++; started = true; } else if (src[j] === '}') {
+        depth--;
+        if (started && depth === 0) return src.slice(i, j + 1);
+      }
+    }
+    return src.slice(i);
+  };
+  const strip = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+  const ROOT = path.dirname(require.resolve('../package.json'));
+  const meetingSrc = strip(fs.readFileSync(path.join(ROOT, 'src', 'main', 'meeting.js'), 'utf-8'));
+
+  // —— 纯函数：这一轮到底该看哪几路信号 ——
+  eq(meeting.watchedDevices({}).join(','), 'microphone,webcam', '默认两路都看');
+  eq(meeting.watchedDevices({ meetingWatchCam: true }).join(','), 'microphone,webcam', '开着摄像头开关就两路都看');
+  eq(meeting.watchedDevices({ meetingWatchCam: false }).join(','), 'microphone', '★ 关掉摄像头开关只该少一路：麦克风信号必须还在');
+
+  // —— 端到端：关掉摄像头开关后，占麦的会议应用仍要判成「在开会」 ——
+  {
+    const cfg = { meetingEnabled: true, meetingAutoRecord: false, meetingWatchCam: false };
+    const delivered = [];
+    meeting.bind({ getConfig: () => cfg, log: () => {}, deliver: (p) => delivered.push(p), summarize: async () => '', isAsrBusy: () => false });
+
+    registerOutput = [
+      'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged\\C#x#wemeetapp.exe',
+      '    LastUsedTimeStart    REG_QWORD    0x1dc0e2f2a3b4c5d6',
+      '    LastUsedTimeStop    REG_QWORD    0x0'
+    ].join('\n');
+    webcamOutput = '';
+    tasklistOutput = '"wemeetapp.exe","1234","Console","1","300,000 K","Running","DESKTOP\\me","0:12:05","腾讯会议 - 每周同步"';
+    regQueries = [];
+
+    const s = await meeting.sampleOnce();
+    ok(s.micUsers.length > 0, '★ 摄像头开关关掉后，注册表里的麦克风占用照样读得到', JSON.stringify(s.micUsers));
+    eq(s.camUsers.length, 0, '摄像头那一路确实没采');
+    eq(s.result.level, 'meeting', '★ 因此仍能判成「在开会」');
+    ok(s.devices.includes('microphone'), '采样结果里带着本轮探了哪几路（给设置页显示）');
+    ok(regQueries.includes('microphone'), '真的去读了麦克风的注册表');
+    ok(!regQueries.includes('webcam'), '真的没去读摄像头的注册表');
+  }
+
+  // —— 反向对照：开着摄像头开关时，纯视频会议也要算数 ——
+  {
+    const cfg = { meetingEnabled: true, meetingAutoRecord: false, meetingWatchCam: true };
+    meeting.bind({ getConfig: () => cfg, log: () => {}, deliver: () => {}, summarize: async () => '', isAsrBusy: () => false });
+
+    registerOutput = '';   // 没人占麦
+    webcamOutput = [
+      'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged\\C#x#wemeetapp.exe',
+      '    LastUsedTimeStart    REG_QWORD    0x1dc0e2f2a3b4c5d6',
+      '    LastUsedTimeStop    REG_QWORD    0x0'
+    ].join('\n');
+    tasklistOutput = '"wemeetapp.exe","1234","Console","1","300,000 K","Running","DESKTOP\\me","0:12:05","腾讯会议 - 每周同步"';
+    regQueries = [];
+
+    const s = await meeting.sampleOnce();
+    eq(s.micUsers.length, 0, '对照：麦克风这边确实没人用');
+    ok(s.camUsers.length > 0, '对照：摄像头占用被采到了');
+    eq(s.result.level, 'meeting', '对照：纯视频会议也判成在开会');
+    ok(regQueries.includes('webcam'), '对照：查了摄像头的注册表');
+  }
+
+  // —— 形态锁：探针归属只允许判断一次，且判在 watchedDevices 里 ——
+  const sampleBody = functionBody(meetingSrc, 'async function sampleOnce');
+  ok(sampleBody.length > 0, '拿到了 sampleOnce 的源码');
+  ok(!/meetingWatchCam/.test(sampleBody),
+    'sampleOnce 里不再出现 meetingWatchCam（归属判断只该在 watchedDevices 里做一次，否则两路信号又会串开关）');
+  eq((meetingSrc.match(/readConsent\('microphone'\)/g) || []).length, 1, '读麦克风注册表只有一处');
+  eq((meetingSrc.match(/readConsent\('webcam'\)/g) || []).length, 1, '读摄像头注册表只有一处');
+  ok(/function watchedDevices/.test(meetingSrc), 'watchedDevices 存在');
+  ok(/devices:\s*sample\.devices/.test(meetingSrc), 'meeting:detect-now 把本轮探测的信号回给界面');
+
+  registerOutput = '';
+  webcamOutput = '';
+  tasklistOutput = '';
   meeting.stop();
 }
 
