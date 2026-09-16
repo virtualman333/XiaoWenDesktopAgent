@@ -344,7 +344,7 @@ contextBridge.exposeInMainWorld('xw', {
   meetingList: () => ipcRenderer.invoke('meeting:list'),
   meetingGet: (id) => ipcRenderer.invoke('meeting:get', id),
   meetingRemove: (id) => ipcRenderer.invoke('meeting:remove', id),
-  meetingSearch: (kw) => ipcRenderer.invoke('meeting:search', kw),
+  meetingSearch: (kw, limit) => ipcRenderer.invoke('meeting:search', kw, limit),
   meetingOpen: (id) => ipcRenderer.invoke('meeting:open', id),
   meetingFolder: () => ipcRenderer.invoke('meeting:folder'),
   meetingDetectNow: () => ipcRenderer.invoke('meeting:detect-now'),

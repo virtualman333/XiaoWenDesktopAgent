@@ -774,6 +774,86 @@ section('10. 探针归属：麦克风信号不能被摄像头开关带走');
   meeting.stop();
 }
 
+// ================= 11. 界面入口：已实现的能力不能没人调 =================
+section('11. 界面接线：搜纪要走主进程那份实现，界面不另写一套');
+{
+  const ROOT = path.dirname(require.resolve('../package.json'));
+  const mk = (i, title, transcript) => minutes.save({
+    id: `20260917-1200-${String(100 + i)}`,
+    app: '腾讯会议',
+    title,
+    startedAt: Date.now() - i * 60000,
+    endedAt: Date.now() - i * 60000 + 60000,
+    durationMs: 60000,
+    segments: [{ at: Date.now(), text: transcript, source: 'loopback' }],
+    transcript,
+    summary: minutes.parseSummary(`## 主题\n${title}`),
+    stats: { segCount: 1, chars: transcript.length, source: '系统声音' },
+    savedAt: Date.now()
+  });
+
+  for (let i = 0; i < 8; i++) mk(i, i < 6 ? `每周同步 ${i}` : `临时沟通 ${i}`, i === 7 ? '聊到了服务器扩容' : '过一下排期');
+
+  const handler = ipcHandlers.get('meeting:search');
+  ok(typeof handler === 'function', '★ 主进程注册了 meeting:search（界面接线的前提）');
+
+  // 默认 limit：AI 那条工具路只要 5 条，界面这条要能一次看更多
+  const byDefault = await handler({}, '同步');
+  eq(byDefault.length, 6, '★ 默认上限（20）足够界面一次看全匹配项 —— 只有 5 条会让人以为「只有 5 份」');
+  eq((await handler({}, '同步', 3)).length, 3, 'limit 能透传到检索实现');
+  eq((await handler({}, '同步', 999)).length, 6, 'limit 超过总匹配数时给全部');
+  eq((await handler({}, '完全不相关的东西')).length, 0, '搜不到就是空');
+  ok((await handler({}, '')).length > 0, '空关键词给最近的几条（不是空列表）');
+  eq((await handler({}, '扩容')).length, 1, '关键词能命中转写正文（不只标题）');
+  for (let i = 0; i < 8; i++) minutes.remove(`20260917-1200-${String(100 + i)}`);
+
+  // —— 结构锁：会议 API 实现了就必须有界面入口 ——
+  const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.js'), 'utf-8');
+  const rendererFiles = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(js|html)$/.test(e.name)) rendererFiles.push(p);
+    }
+  };
+  walk(path.join(ROOT, 'src', 'renderer'));
+  const renderer = rendererFiles.map((f) => fs.readFileSync(f, 'utf-8')).join('\n').replace(/\s+/g, '');
+
+  const meetingApis = (preload.match(/^\s{2}(meeting[A-Z]\w*)\s*:\s*\(/gm) || []).map((s) => s.trim().split(':')[0]);
+  ok(meetingApis.length >= 8, '从 preload 里解析出的会议 API 太少 —— 解析失灵时下面会在空集上假绿', meetingApis.join(','));
+  // 已知未接线（有意保留，要给界面用就把它从这份名单里删掉）：
+  //   meetingGet          取一份纪要的完整记录（含转写），界面目前只用索引行
+  //   meetingSnapshotText 取当前正在记录的这一段的转写
+  const ALLOWED_DEAD = ['meetingGet', 'meetingSnapshotText'];
+  const dead = meetingApis.filter((n) => !ALLOWED_DEAD.includes(n) && !renderer.includes(n));
+  eq(dead.join(','), '', '★ 会议 API 实现了却没有任何界面调用方 —— meetingSearch / meetingFolder 都这样躺过（写了没人用）');
+
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'panel.html'), 'utf-8');
+  const panel = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'js', 'panel.js'), 'utf-8');
+  ok(html.includes('id="mtSearch"'), '纪要面板有搜索输入框');
+
+  // 只断言「文件里出现过这个名字」是假锁：另一处赋值就能满足它。
+  // 这里把列表渲染函数的**函数体**抠出来，在函数体这一层断言 ——
+  // 「关键词从状态里读」「检索走主进程那份实现」都必须发生在这个函数里。
+  const fnBody = (src, name) => {
+    const i = src.indexOf(name);
+    if (i < 0) return '';
+    const s = src.indexOf('{', i);
+    let depth = 0;
+    for (let j = s; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(s, j + 1); }
+    }
+    return '';
+  };
+  const body = fnBody(panel, 'async function renderMeetingList');
+  ok(body.length > 200, '抠到了列表渲染函数体（抠不到时下面会在空串上假绿）');
+  ok(body.includes('window.xw.meetingSearch('), '★ 列表渲染调的是主进程的检索实现 —— 界面里不许再写一套关键词匹配');
+  ok(body.includes('mtKeyword'), '★ 关键词从状态里读：列表每 5 秒刷新一次，刷新时不能把正在搜的关键词清掉');
+  ok(panel.includes('mtSearchHint'), '搜索时的条数与空结果提示都走列表入口');
+}
+
 // ================= 汇总 =================
 console.log('\n' + '='.repeat(46));
 if (fails.length) {

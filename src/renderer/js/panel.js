@@ -2660,6 +2660,29 @@ function bindMeeting() {
     refreshMeetingStatus();
   });
   $('mtFolder').addEventListener('click', () => window.xw.meetingFolder());
+  // 搜纪要：主进程侧的 minutes.search() 一直是有的（先给 AI 的 search_minutes 工具用），
+  // 界面上却一直没有入口 —— 攒到几十份之后，找「上周那场」只能一个个点开，
+  // 或者干脆去文件夹里翻（列表只列最近 15 份，超出只提示「打开纪要文件夹」）。
+  // 这里只接线，不重写检索：关键词怎么匹配由 minutes.search() 说了算。
+  $('mtSearch').addEventListener('input', () => {
+    mtKeyword = $('mtSearch').value;
+    if (mtSearchTimer) clearTimeout(mtSearchTimer);
+    // 打字时不要每敲一个字就查一次盘（每份纪要都要读 json 才能搜转写内容）
+    mtSearchTimer = setTimeout(() => { mtSearchTimer = null; renderMeetingList(); }, 250);
+  });
+  $('mtSearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === 'Escape') {
+      mtKeyword = $('mtSearch').value;
+      if (mtSearchTimer) { clearTimeout(mtSearchTimer); mtSearchTimer = null; }
+      renderMeetingList();
+    }
+  });
+  $('mtSearchClear').addEventListener('click', () => {
+    if (mtSearchTimer) { clearTimeout(mtSearchTimer); mtSearchTimer = null; }
+    mtKeyword = '';
+    $('mtSearch').value = '';
+    renderMeetingList();
+  });
   $('mtLiveStop').addEventListener('click', async () => {
     setToast('正在收尾并生成纪要…');
     await window.xw.meetingStop();
@@ -2740,15 +2763,36 @@ function updateMtLive(s) {
 
 let mtLastLine = '';
 let mtListCache = [];
+/** 纪要列表当前的搜索关键词（空 = 按时间倒序列出最近若干份） */
+let mtKeyword = '';
+let mtSearchTimer = null;
 
 async function renderMeetingList() {
   const box = $('mtList');
   if (!box || !window.xw.meetingList) return;
+  const kw = String(mtKeyword || '').trim();
   let rows = [];
-  try { rows = await window.xw.meetingList(); } catch (e) { rows = []; }
+  try {
+    if (kw && window.xw.meetingSearch) {
+      // limit 传 30：默认值是给 AI 工具留的 5 条，列表里只回 5 条会让人以为「只有 5 份」
+      rows = await window.xw.meetingSearch(kw, 30);
+    } else {
+      rows = await window.xw.meetingList();
+    }
+  } catch (e) {
+    rows = [];
+  }
   mtListCache = rows || [];
+  const hintEl = $('mtSearchHint');
+  if (hintEl) {
+    hintEl.textContent = kw
+      ? `搜索「${kw}」：${mtListCache.length} 份${mtListCache.length >= 30 ? '（只显示前 30 份，缩小关键词试试）' : ''}`
+      : '';
+  }
   if (!rows.length) {
-    box.innerHTML = '<div class="hint">还没有记录过会议</div>';
+    box.innerHTML = kw
+      ? `<div class="hint">没有匹配「${escapeHtml(kw)}」的纪要。关键词会匹配标题、应用名、话题与转写内容；点「全部」回到列表。</div>`
+      : '<div class="hint">还没有记录过会议</div>';
     return;
   }
   box.textContent = '';
@@ -2800,7 +2844,9 @@ async function renderMeetingList() {
   if (rows.length > 15) {
     const more = document.createElement('div');
     more.className = 'hint';
-    more.textContent = `还有 ${rows.length - 15} 份，点「打开纪要文件夹」看全部`;
+    more.textContent = kw
+      ? `还有 ${rows.length - 15} 份匹配，缩小关键词或复制到文件夹里看`
+      : `还有 ${rows.length - 15} 份，用上面的搜索框按关键词找，或点「打开纪要文件夹」看全部`;
     box.appendChild(more);
   }
 }

@@ -742,7 +742,12 @@ ipcMain.handle('meeting:remove', (_e, id) => {
   broadcast('meeting:event', { type: 'removed', id, ...status() });
   return { ok };
 });
-ipcMain.handle('meeting:search', (_e, keyword) => minutes.search(keyword));
+ipcMain.handle('meeting:search', (_e, keyword, limit) => {
+  // 界面上一次能看的比 AI 工具多：工具那条路只要 5 条够拼上下文，
+  // 面板里只回 5 条会让人以为「只匹配到 5 份」。上限仍然收口，避免一次读几百个 json。
+  const n = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
+  return minutes.search(keyword, n);
+});
 ipcMain.handle('meeting:open', async (_e, id) => {
   const p = path.join(minutes.dir(), `${String(id || '')}.md`);
   try {
