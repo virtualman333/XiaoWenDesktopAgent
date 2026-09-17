@@ -665,6 +665,14 @@ npm test                       # 全量白盒单测，纯 Node，跑完约 12 �
 # 也可以单跑：test:context / test:hotkey / test:meeting / test:entry /
 #            test:proactive / test:orch / test:pet / test:tray / test:wake / test:llm
 # 另外还有个需要真实桌面的（不在默认流程里）：test:pet-top
+#
+# 打包内容校验（防「装完之后才发现少东西」）：
+#   check:deps         已进 npm test —— 源码里裸 require 的模块必须声明在 dependencies 里
+#   test:packed-deps   已进 npm test —— 上面那套校验的自测（合成 asar，秒级）
+#   test:packed        手动跑：先 npm run dist:dir，再校验真实的 app.asar（见下）
+
+# 1.5 打包完先验一遍再发布（这一步能拦住「托盘没图标 / 语音识别挂 / 依赖没进包」）
+npm run dist:dir && npm run test:packed
 
 # 2. 提交，然后推一个 vX.Y.Z 格式的 tag
 git commit -am "release: v1.9.0"

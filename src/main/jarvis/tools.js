@@ -13,6 +13,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const { TextDecoder } = require('util');
 
 const store = require('./store');
 
@@ -119,7 +120,11 @@ function listProcesses() {
       ? 'tasklist /FO CSV /NH'
       : 'ps -eo pid,pcpu,pmem,comm --sort=-pcpu';
     exec(cmd, { windowsHide: true, maxBuffer: 8 * 1024 * 1024, encoding: isWin ? 'buffer' : 'utf8' }, (e, stdout, stderr) => {
-      if (e && !stdout) return resolve({ ok: false, error: (stderr || e.message).toString() });
+      if (e && !stdout) {
+        // stderr 也是 Buffer（encoding: 'buffer'），中文 Windows 下同样是 GBK
+        const msg = Buffer.isBuffer(stderr) ? decodeGbk(stderr) : String(stderr || e.message);
+        return resolve({ ok: false, error: msg });
+      }
       let text = Buffer.isBuffer(stdout) ? decodeGbk(stdout) : String(stdout);
       if (isWin) {
         // CSV -> 简洁表格
@@ -137,14 +142,35 @@ function listProcesses() {
   });
 }
 
+/**
+ * tasklist 在中文 Windows 输出 GBK，Buffer 直接 toString 会乱码。
+ *
+ * 这里**刻意不用 iconv-lite**：它从来没进过 package.json 的 dependencies，
+ * 只是被 electron-builder 的 devDependencies 树顺带 hoist 到 node_modules 根 ——
+ * 开发时 require 得到、打包版里根本没有，而下面的 catch 会把中文进程名
+ * 静默降级成 `?`，谁也不会发现。打包校验（build/_packed_check.mjs 第 5 节）
+ * 现在会把这件事判红，而正确的修法是**去掉这个依赖**，不是给它补一条声明。
+ *
+ * Node / Electron 官方构建都带 full-icu（本机 Electron 32 实测 icu_small=false），
+ * `TextDecoder('gbk')` 就够。实测与 iconv-lite 在合法 GBK 上逐字符一致
+ * （含 GBK 扩展区、ASCII 混排、截断多字节）；唯一差异是**非法字节**：
+ * Electron（ICU 75）给 U+F8F5，Node 给 U+FFFD —— 两者都是乱码占位符，
+ * 对「进程名」这个用途没有区别。
+ */
+let gbkDecoder;
 function decodeGbk(buf) {
-  // tasklist 在中文 Windows 输出 GBK，Buffer 直接 toString 会乱码
-  try {
-    const iconv = require('iconv-lite');
-    return iconv.decode(buf, 'gbk');
-  } catch (e) {
-    return buf.toString('utf8').replace(/\ufffd/g, '?');
+  if (gbkDecoder === undefined) {
+    try {
+      gbkDecoder = new TextDecoder('gbk');
+    } catch (e) {
+      // 只有运行时缺 full-icu 才会走到这里（官方 Node / Electron 都不会）。
+      // 如实降级，但**喊一声** —— 不要再让中文变问号这件事无声无息地发生。
+      console.warn('[tools] 当前运行时没有 GBK 解码器（缺 full-icu）：', e.message);
+      gbkDecoder = null;
+    }
   }
+  if (!gbkDecoder) return buf.toString('utf8').replace(/\ufffd/g, '?');
+  return gbkDecoder.decode(buf);
 }
 
 /**
