@@ -79,6 +79,11 @@ function registerAll() {
     const d = store.getSessions();
     return {
       activeId: d.activeId,
+      /* 手工标题的长度上限随列表一起给界面 —— 上限的唯一来源仍是 store 里的
+         `SESSION_TITLE_MAX`（自动标题的 24 字是另一条规则，不在这条链路上）。
+         为什么不只靠主进程截断：那样超长标题会在回车那一瞬间**突然变短**，
+         用户以为自己手抖了；把数字透传给输入框，边打字边数、到顶就不进字。 */
+      titleMax: store.SESSION_TITLE_MAX,
       sessions: d.sessions.map((s) => ({
         id: s.id, title: s.title, updatedAt: s.updatedAt, count: (s.messages || []).length
       }))

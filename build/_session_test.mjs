@@ -104,17 +104,36 @@ const long = await renameIpc(s2.id, longTitle);
 eq(long.title.length, store.SESSION_TITLE_MAX, '超长标题没有按 SESSION_TITLE_MAX 截断');
 ok(store.SESSION_TITLE_MAX > 0, 'SESSION_TITLE_MAX 没有导出（界面与测试都拿不到这个上限）');
 
+section('[2] 标题上限：数字只有一份，但要真的送到界面手里');
+// 第 15 轮之前界面干脆不设上限，全交给主进程截断 —— 代价是超长标题在回车那一瞬间
+// **突然变短**。修法不是「界面再写一个 60」，而是把 store 里那个数字透传出去。
+// 所以这里既验「送的是那个数」，也验「界面拿它设了 maxLength 而不是自己写死」。
+try {
+  const listed = handlers.get('session:list')(null, {});
+  eq(listed.titleMax, store.SESSION_TITLE_MAX, '★ session:list 没有把 SESSION_TITLE_MAX 带给界面（界面只能自己编一个数字）');
+  eq(typeof listed.titleMax, 'number', 'titleMax 不是数字 —— 界面侧的 Number() 会得到 NaN');
+} catch (e) {
+  ok(false, 'session:list 调用失败', e.message);
+}
+// 两侧字段名必须对上：主进程改了 key、界面还在读旧名字，是这类透传最常见的坏法
+const jarvisSrc = read('src/main/jarvis/index.js');
+const panelSrc = read('src/renderer/js/panel.js');
+const listBlock = jarvisSrc.slice(jarvisSrc.indexOf("ipcMain.handle('session:list'"));
+const listKeys = listBlock.slice(0, listBlock.indexOf('});'));
+ok(listKeys.includes('titleMax'), '主进程的 session:list 载荷里没有 titleMax');
+ok(panelSrc.includes('data.titleMax'), '界面没有读 data.titleMax —— 两边字段名已经对不上了');
+
 eq(await renameIpc('不存在的会话 id', 'x'), null, '未知 id 没有返回 null（调用方无从判断失败）');
 eq(store.getSession('不存在的会话 id'), null, '未知 id 的 getSession 不为 null');
 
-section('[2] 排序与删除');
+section('[3] 排序与删除');
 const ids = readSessions().sessions.map((x) => x.id);
 ok(ids.includes(s1.id) && ids.includes(s2.id), '两个会话都在磁盘上（后面顺序断言的前提）');
 const n = store.deleteSession(s2.id);
 eq(n, 1, '删会话后的剩余数量不对');
 eq(store.getSession(s2.id), null, '会话没被删掉');
 
-section('[3] 界面落点：抽屉里真有重命名入口');
+section('[4] 界面落点：抽屉里真有重命名入口');
 const strip = (s) => s
   .replace(/\/\*[\s\S]*?\*\//g, ' ')
   .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
@@ -144,6 +163,20 @@ ok(renBody.length > 200, '抠到了 startSessionRename 的函数体');
 ok(renBody.includes('window.xw.sessionRename('), '重命名入口没有真的调主进程（界面里另写一套？）');
 ok(renBody.includes('stopPropagation('), '输入框没挡住冒泡 —— 点一下会顺带切到那个会话');
 ok(/key\s*===\s*'Escape'/.test(renBody), '没有 Esc 取消（用户点错了只能硬着头皮改完）');
+/* 上限：界面**不许自己写死一个数字**（本仓「同一件事写两遍」的老毛病），
+   必须拿主进程给的那个值设到输入框上。判据是「赋给 maxLength 的不是数字字面量」，
+   而不是「文件里没有 60」——后者会被别处的无关数字满足，是假锁。 */
+const maxAssign = /maxLength\s*=\s*([^;]+);/.exec(renBody);
+ok(maxAssign, '输入框没有设 maxLength —— 超长标题会在回车那一瞬间突然变短（用户以为手抖了）');
+ok(maxAssign && !/^\s*\d+\s*$/.test(maxAssign[1]), `maxLength 被写成了数字字面量（${maxAssign && maxAssign[1].trim()}）—— 上限又变成两份了`);
+ok(renBody.includes('titleMax'), '输入框的长度上限不是从主进程给的 titleMax 来的');
+ok(renBody.includes('oninput'), '没有监听输入 —— 那就没有实时计数');
+ok(/['"`]\$\{[^}]*\}\/\$\{limit\}/.test(renBody) || /\$\{[^}]*\}\/\$\{limit\}/.test(renBody), '没有「已输入/上限」的计数 —— 到顶静默不进字会让人以为键盘坏了');
+ok(renBody.includes("classList.toggle("), '计数到顶没有视觉提示（颜色不变的话用户不知道为什么打不进去字）');
+// 抽屉调用的那一处要把上限传进去
+ok(/startSessionRename\(\s*title\s*,\s*meta\s*,\s*s\s*,\s*data\.titleMax\s*\)/.test(body), '抽屉里调用重命名时没有把 data.titleMax 传下去 —— 透传断在这一步');
+const cssLimit = read('src/renderer/styles/panel.css');
+ok(/\.sess-meta--limit\s*\{/.test(cssLimit), '样式里没有 .sess-meta--limit —— 计数到顶不会变色');
 // 这条是**源码形态**的锁，刻意保留：本测试没有 DOM，没法跑「进入编辑时名字是否被选中」。
 // 判据退一步 —— 至少确认调用存在，别让「点开还得先手动全选删掉」这种体验悄悄回来。
 ok(renBody.includes('input.select()'), '进入编辑没有选中原名字 —— 改名得先手动全选删掉');

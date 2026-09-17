@@ -733,6 +733,8 @@ body { border-radius: 0; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sess-meta { font-size: 10.5px; color: #9aa1ad; margin-top: 2px; }
+/* 重命名时的第二行会临时显示「已输入/上限」的计数；到顶时变色，说明为什么不再进字 */
+.sess-meta--limit { color: var(--accent, #3b6fe0); font-weight: 600; }
 /* 重命名按钮：平时淡出，悬停条目时才亮出来（避免每个条目都挂两个图标显得吵） */
 .sess-ren {
   position: absolute; right: 26px; top: 8px;

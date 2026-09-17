@@ -212,16 +212,26 @@ async function loadSession() {
  * 交互约定（桌面端习惯）：
  * - 点铅笔按钮进入编辑，点输入框不会顺带切到那个会话（stopPropagation）；
  * - Enter 提交、Esc 取消、失焦按提交处理（用户点了别处通常是想保存）；
- * - 提交后以**主进程返回的标题**为准重画列表 —— 上限与清洗规则只在 store 里定义一次，
- *   界面不自己掐一遍长度（否则两边迟早不一致）。
+ * - 提交后以**主进程返回的标题**为准重画列表 —— 上限与清洗规则只在 store 里定义一次。
+ *
+ * 长度上限（`titleMax`，由 `session:list` 随列表带下来，唯一来源是 store 的
+ * `SESSION_TITLE_MAX`）：
+ * 此前这里刻意不设上限、完全交给主进程截断，代价是超长标题在回车那一瞬间**突然变短**
+ * （用户以为自己手抖了）。现在把那个数字透传给输入框：`maxLength` 让到顶就不再进字，
+ * 第二行临时让给「12/60」的计数 —— 到顶静默不动，会让人以为键盘坏了。
+ * 计数与上限都用**同一个口径**：`String.length` 数的是 UTF-16 码元，
+ * 与 `maxLength` 的判定口径一致（用码点数会与输入框掐的位置对不上）。
+ * 拿不到上限（老版本主进程 / 调用没带参数）时退回旧行为：不设 maxLength，也不显示计数。
  */
-function startSessionRename(titleEl, s) {
+function startSessionRename(titleEl, metaEl, s, titleMax) {
   if (titleEl.querySelector('.sess-rename-input')) return; // 已经在编辑，别叠第二个输入框
+  const limit = Number(titleMax) > 0 ? Math.floor(Number(titleMax)) : 0;
   const input = document.createElement('input');
   input.className = 'sess-rename-input';
   input.type = 'text';
   input.value = s.title || '';
   input.placeholder = '会话名称';
+  if (limit) input.maxLength = limit;
   let done = false;
   const finish = async (commit) => {
     if (done) return;
@@ -234,6 +244,15 @@ function startSessionRename(titleEl, s) {
     } catch (e) { /* 主进程没改成功时按原样重画，不谎报成功 */ }
     renderSessionList();
   };
+  /* 第二行临时让给计数：它本来显示「9/17 12:30 · 4 条」，重命名结束时整块会被重画回来。
+     计数只在拿到上限时显示（拿不到就别假装有个上限）。 */
+  const showCount = () => {
+    if (!limit || !metaEl) return;
+    const n = String(input.value || '').length;
+    metaEl.textContent = `${n}/${limit}`;
+    metaEl.classList.toggle('sess-meta--limit', n >= limit);
+  };
+  input.oninput = showCount;
   input.onclick = (e) => e.stopPropagation();
   input.onmousedown = (e) => e.stopPropagation();
   input.onkeydown = (e) => {
@@ -243,6 +262,7 @@ function startSessionRename(titleEl, s) {
   input.onblur = () => finish(true);
   titleEl.textContent = '';
   titleEl.appendChild(input);
+  showCount();
   input.focus();
   input.select();
 }
@@ -269,7 +289,7 @@ async function renderSessionList() {
       ren.title = '重命名会话';
       ren.onclick = (e) => {
         e.stopPropagation();
-        startSessionRename(title, s);
+        startSessionRename(title, meta, s, data.titleMax);
       };
 
       const del = document.createElement('button');
