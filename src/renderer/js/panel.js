@@ -202,6 +202,51 @@ async function loadSession() {
 }
 
 // ---------- 会话抽屉 ----------
+/**
+ * 就地重命名一个会话：把标题那一行换成输入框。
+ *
+ * 为什么要有这个入口：`sessionRename` 从建立起就在 preload 上、主进程也实现了，
+ * 而界面上**一次都没调用过** —— 会话名只能是「新对话」或者首条消息前 24 字，
+ * 用户想给一段对话起个自己认得出来的名字，只能删掉重建。
+ *
+ * 交互约定（桌面端习惯）：
+ * - 点铅笔按钮进入编辑，点输入框不会顺带切到那个会话（stopPropagation）；
+ * - Enter 提交、Esc 取消、失焦按提交处理（用户点了别处通常是想保存）；
+ * - 提交后以**主进程返回的标题**为准重画列表 —— 上限与清洗规则只在 store 里定义一次，
+ *   界面不自己掐一遍长度（否则两边迟早不一致）。
+ */
+function startSessionRename(titleEl, s) {
+  if (titleEl.querySelector('.sess-rename-input')) return; // 已经在编辑，别叠第二个输入框
+  const input = document.createElement('input');
+  input.className = 'sess-rename-input';
+  input.type = 'text';
+  input.value = s.title || '';
+  input.placeholder = '会话名称';
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+    const v = String(input.value || '').trim();
+    if (!commit || !v) { renderSessionList(); return; }        // 取消 / 空名：不改动
+    try {
+      const r = await window.xw.sessionRename(s.id, v);
+      if (r && session && r.id === session.id) session.title = r.title;
+    } catch (e) { /* 主进程没改成功时按原样重画，不谎报成功 */ }
+    renderSessionList();
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.onmousedown = (e) => e.stopPropagation();
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+  titleEl.textContent = '';
+  titleEl.appendChild(input);
+  input.focus();
+  input.select();
+}
+
 async function renderSessionList() {
   if (!els.sessionList) return;
   try {
@@ -218,6 +263,15 @@ async function renderSessionList() {
       const d = new Date(s.updatedAt || Date.now());
       meta.textContent = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} · ${s.count || 0} 条`;
 
+      const ren = document.createElement('button');
+      ren.className = 'sess-ren';
+      ren.textContent = '✎';
+      ren.title = '重命名会话';
+      ren.onclick = (e) => {
+        e.stopPropagation();
+        startSessionRename(title, s);
+      };
+
       const del = document.createElement('button');
       del.className = 'sess-del';
       del.textContent = '×';
@@ -231,6 +285,7 @@ async function renderSessionList() {
 
       item.appendChild(title);
       item.appendChild(meta);
+      item.appendChild(ren);
       item.appendChild(del);
       item.onclick = async () => {
         await window.xw.sessionSetActive(s.id);

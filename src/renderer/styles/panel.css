@@ -720,7 +720,8 @@ body { border-radius: 0; }
 .drawer-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
 .sess-item {
   position: relative;
-  padding: 9px 26px 9px 10px;
+  /* 右侧留出两个图标（重命名 + 删除）的宽度，标题的省略号不会压在图标下面 */
+  padding: 9px 46px 9px 10px;
   border-radius: 8px;
   cursor: pointer;
   margin-bottom: 3px;
@@ -732,6 +733,29 @@ body { border-radius: 0; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sess-meta { font-size: 10.5px; color: #9aa1ad; margin-top: 2px; }
+/* 重命名按钮：平时淡出，悬停条目时才亮出来（避免每个条目都挂两个图标显得吵） */
+.sess-ren {
+  position: absolute; right: 26px; top: 8px;
+  border: 0; background: none; color: #b3b8c2;
+  font-size: 13px; line-height: 1; cursor: pointer;
+  padding: 3px 4px; border-radius: 4px;
+  opacity: 0;
+}
+.sess-item:hover .sess-ren { opacity: 1; }
+.sess-ren:hover { color: var(--accent, #3b6fe0); background: rgba(59,111,224,.12); }
+/* 就地重命名输入框：占满标题那一行，字号与标题一致，避免进入编辑时整行跳动 */
+.sess-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--accent, #3b6fe0);
+  border-radius: 5px;
+  background: var(--bg, #fff);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  padding: 1px 4px;
+  outline: none;
+}
 .sess-del {
   position: absolute; right: 6px; top: 8px;
   border: 0; background: none; color: #b3b8c2;

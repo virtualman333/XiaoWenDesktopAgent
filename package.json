@@ -29,10 +29,11 @@
     "test:entry": "node build/_entry_test.mjs",
     "test:clip": "node build/_clip_sense_test.mjs",
     "test:memory": "node build/_memory_test.mjs",
+    "test:session": "node build/_session_test.mjs",
     "probe:meeting": "node build/_meeting_live_probe.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
     "test": "npm run test:all",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake"
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",

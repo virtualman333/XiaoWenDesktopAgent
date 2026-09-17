@@ -296,11 +296,29 @@ function setSessionMessages(sessionId, messages) {
   return s;
 }
 
+/**
+ * 手工标题的长度上限。
+ *
+ * 与「自动标题取首条用户消息前 24 字」是两个不同的规则，各有各的理由：
+ * 自动标题是机器生成的一小段摘要，太长在抽屉里反而看不出区别；
+ * 手工标题是用户自己写的名字，可以给到更宽松的余量（超出的部分截断而不是拒绝）。
+ * 上限只在这里定义一次 —— 界面侧不设 maxLength，避免两处各写一个数字后漂移。
+ */
+const SESSION_TITLE_MAX = 60;
+
 function renameSession(id, title) {
   const data = getSessions();
   const s = data.sessions.find((x) => x.id === id);
   if (!s) return null;
-  s.title = title || s.title;
+  const clean = String(title === null || title === undefined ? '' : title)
+    .replace(/\s+/g, ' ')
+    .trim();
+  // 空白标题不生效：抽屉里那一行会变成一块无名条目，比「没改成」更难收拾。
+  // 也刻意**不**写盘 —— 一次无效果的调用不该把 updatedAt 之类改掉。
+  if (!clean) return s;
+  s.title = clean.slice(0, SESSION_TITLE_MAX);
+  // 注意：不动 updatedAt。重命名不是「这个会话有了新动静」，
+  // 把它顶到列表最前面会让用户刚整理过的顺序被打乱。
   saveSessions(data);
   return s;
 }
@@ -381,6 +399,7 @@ module.exports = {
   // sessions
   getSessions,
   createSession,
+  SESSION_TITLE_MAX,
   getSession,
   getActiveSession,
   appendMessage,
