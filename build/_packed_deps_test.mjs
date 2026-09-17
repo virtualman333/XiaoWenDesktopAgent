@@ -20,6 +20,10 @@
  *   D. 依赖清单在、但**入口文件**没进包 → 红（旧脚本把 ws/index.js 写死，验不到别人）
  *   E. 源码 require 了没声明的模块 → 红且点名；require('electron') 不算漏
  *   F. `--src-only` 不需要 asar，退出码只由第 5 节决定
+ *   G. `build.files` 里新加的打包目录自动进扫描面（扫描面现算）
+ *   H. 扫描面的自证：配置不符 / 排除表腐烂 / 扫描面为空都要自己喊出来
+ *   I. **fixture 自己的完整性**：两套独立算法枚举真实目录、清单必须一致；
+ *      文件数触及报警阈值要报出来（原先是「收满 300 条就停」，静默截断）
  *
  * 用法：npm run test:packed-deps
  */
@@ -106,18 +110,45 @@ const DEPS = productionDeps(JSON.parse(fs.readFileSync(path.join(ROOT, 'package.
  * 共用同一份实现：函数退化成「写死 index.js」，fixture 也跟着只塞 index.js，
  * 用例 A 照样全绿，等于没验（本轮真踩过：D3 注入 0 项红）。
  */
+/**
+ * 一个依赖的文件数上限。**这不是截断阈值，是报警阈值**。
+ *
+ * 这里原先写的是「收满 300 条就停」，而那个上限是**静默生效**的：依赖升级到超过 300 个
+ * 文件时，fixture 会悄悄少一批文件 —— 少的是入口候选就直接让用例 A 变红（理由看起来
+ * 像「校验脚本坏了」），少的是别的文件则更坏：**检查的覆盖面缩水而没有任何信号**。
+ * 假 asar 每个文件只占 8 字节，几千个文件也就几十 KB，根本没有省的必要。
+ * 所以现在**不截断**；真出现病态依赖（超过这里）时由第 9 节明确报出来，等人看一眼。
+ */
+const MAX_FILES_PER_DEP = 5000;
+
 function realFiles(dep) {
   const base = path.join(ROOT, 'node_modules', dep);
   const out = [];
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (out.length >= 300) return;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) { if (e.name !== 'node_modules') walk(full); }
       else out.push(path.relative(base, full).replace(/\\/g, '/'));
     }
   })(base);
   return out.sort();
+}
+
+/**
+ * 用**另一套算法**枚举同一个依赖的真实文件（Node 自带的递归 readdir）。
+ *
+ * 为什么需要第二套：手写 walk 里有「跳过嵌套 node_modules」「一层层拼相对路径」两个
+ * 容易写歪的地方，写歪了 fixture 就悄悄少文件，而上面所有用例照样绿。交叉验证的
+ * 判据是「两套独立实现必须给出同一份清单」（本仓第 17 轮在 AUT 的 lockfile 解析上
+ * 用过同一手法：状态机 vs 按缩进建树，22 个包 0 差异才敢下结论）。
+ */
+function realFilesIndependently(dep) {
+  const base = path.join(ROOT, 'node_modules', dep);
+  return fs.readdirSync(base, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => path.relative(base, path.join(e.parentPath, e.name)).replace(/\\/g, '/'))
+    .filter((rel) => !rel.split('/').includes('node_modules'))
+    .sort();
 }
 
 /** 每个依赖的入口候选（校验脚本用的那个函数，这里只用来挑「哪些文件该拿掉」） */
@@ -132,7 +163,26 @@ for (const d of DEPS) {
 const FULL = [...REQUIRED, ...depFiles];
 const BIG = ['src/assets/tray.ico'];
 
-console.log('\n1. 纯函数：清单的算法本身');
+console.log('\n1. 前提：fixture 的输入面本身');
+{
+  /* 这一节跑在**所有用例之前**，因为后面的 B/C/D 几条直接点名 `ws` / `electron-updater`。
+     输入面塌了的时候必须**干净地报出来**，而不是让脚本在更下面某一行抛
+     `Cannot read properties of undefined` —— 「崩掉的脚本 = 没有结论的脚本」，
+     连前面已经跑过的用例的结论也一起丢了。所以这里是 fail fast：报完就退出。
+     （本节的这两条断言是被负向注入逼出来的：把 DEPS 注入成空数组时，
+     原先的写法是在第 233 行崩掉、一条失败信息都没有。） */
+  ok(DEPS.length >= 2,
+    `生产依赖不少于 2 个（现在 ${DEPS.length} 个：${JSON.stringify(DEPS)}）—— 解析面不许为空`, '');
+  ok(DEPS.includes('ws'),
+    `生产依赖里有 ws（后面对照用例点名用它，现在 ${JSON.stringify(DEPS)}）`, '');
+  for (const f of failures) console.log('  - ' + f);
+  if (failures.length) {
+    console.log('\nfixture 的输入面不成立 —— 后面的用例没有意义，先修上面这几条。');
+    process.exit(1);
+  }
+}
+
+console.log('\n2. 纯函数：清单的算法本身');
 eq(bareRequires("const a = require('ws'); const b = require('./local.js');"),
   ['ws'], '裸 require() 只挑第三方模块（相对路径不算）');
 eq(bareRequires("require('fs'); require('node:path'); require('electron');"),
@@ -330,6 +380,46 @@ console.log('\n9. H. 扫描面的自证：配置不符 / 排除表腐烂 / 扫�
   ok(noFiles.problems.some((p) => /一个源码文件都没有/.test(p)),
     '被当成源码扫的目录里没有任何源码 → 报「判据在这里是空跑的」',
     JSON.stringify(noFiles.problems));
+}
+
+console.log('\n10. I. fixture 的完整性：独立枚举交叉验证，且截断要自己喊出来');
+{
+  /* 这一节盯的是**测试自己的前提**：上面 A~H 全部拿 `FULL`（合成的假包清单）当输入，
+     而 `FULL` 来自 `realFiles()`。`realFiles()` 少收文件时，所有用例照样绿 ——
+     检查的覆盖面悄悄缩水，没有任何信号。这正是本仓反复踩的「覆盖面靠人记得」形状，
+     只不过这次「人」是 fixture 自身。
+     两道判据：① 两套独立算法枚举同一份真实目录，清单必须完全一致；
+               ② 文件数触及报警阈值要报出来（不截断，只喊）。 */
+  const counts = {};
+  for (const d of DEPS) {
+    const manual = realFiles(d);
+    const independent = realFilesIndependently(d);
+    counts[d] = manual.length;
+    ok(manual.length > 0,
+      `${d}：fixture 非空（0 个文件的话上面 A~E 全是空跑）`, '');
+    eq(manual, independent, `${d}：手写 walk 与递归 readdir 枚举出的文件清单一致`);
+    ok(manual.length < MAX_FILES_PER_DEP,
+      `${d}：文件数 ${manual.length} 在报警阈值 ${MAX_FILES_PER_DEP} 之内（超了就说明假 asar 规模失控，需要人过一眼）`,
+      '');
+  }
+  console.log('     fixture 文件数：' + JSON.stringify(counts));
+
+  /* fixture 里必须真的收进了每个依赖**磁盘上存在的**入口候选 —— 否则第 5 节那条
+     「依赖清单在、入口文件却没进包」验的是别的东西 */
+  for (const d of DEPS) {
+    const have = realFiles(d);
+    const missing = ENTRIES[d].filter(
+      (c) => fs.existsSync(path.join(ROOT, 'node_modules', d, c)) && !have.includes(c));
+    eq(missing, [], `${d}：磁盘上存在的入口候选都收进了 fixture`);
+  }
+
+  /* FULL 是假的包清单，但它的每一项都该指向一个真文件或真目录 —— 掺进不存在的路径
+     会让「齐全 → 全绿」这条用例失去意义 */
+  /* ⚠ 这条断言第一版写的是 `[...REQUIRED, ...depFiles]` 而不是 `FULL` —— 于是它证的是
+     「两个来源拼起来没有幽灵路径」，**而判据真正用的那个变量（FULL）一条都没被查过**：
+     往 FULL 里掺一条不存在的路径，它照样绿（本轮负向验证 X3 实测抓到）。 */
+  const ghost = FULL.filter((p) => !fs.existsSync(path.join(ROOT, p)));
+  eq(ghost, [], 'FULL 里的每一项都指向仓库里真实存在的路径');
 }
 
 // 收尾
