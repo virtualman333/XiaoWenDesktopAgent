@@ -6,6 +6,8 @@
  * electron-builder**（一次几分钟、几百 MB）的前提下验证校验脚本对缺件会红、对齐全的会绿。
  * 清单要是抄第二份，测试就会拿一份已经漂移的期望去测另一份实现 —— 本仓的老毛病。
  */
+import fs from 'fs';
+import path from 'path';
 import { builtinModules } from 'module';
 
 /** 必须出现在 asar 里的运行期资源（相对 app 根目录） */
@@ -26,8 +28,153 @@ export const REQUIRED = [
   'package.json'
 ];
 
-/** 扫裸 `require()` 时看的源码目录（运行期主进程代码） */
-export const RUNTIME_SRC_DIRS = ['src/main'];
+/**
+ * 运行期源码的**扫描面** —— 现算，不手抄。
+ *
+ * 这里原来是 `export const RUNTIME_SRC_DIRS = ['src/main']`，两个毛病：
+ *
+ *  1. **手抄的清单**：新加一个运行期目录（`src/worker/` 之类）不会被扫，于是
+ *     「裸 require 的模块有没有声明」这件事对它静默失效 —— `iconv-lite` 那次
+ *     只是恰好落在 `src/main/jarvis/` 里才被抓到。「扫描面写死目录清单」这个
+ *     形状在本仓是第二次（另一处见 `_packed_check.mjs` 第 5 节的扫描面），
+ *     在兄弟仓库还有第三处。
+ *  2. **那个数组本身是假的**：`_packed_check.mjs` 只用了 `RUNTIME_SRC_DIRS[0]`，
+ *     有人往数组里加第二个目录**既不报错也不生效**，只会以为自己加上了。
+ *
+ * 现在扫描面从 `package.json` 的 `build.files` **现算**：那份配置本来就是
+ * 「什么会被打进 asar」的唯一来源，往它上面加一个目录就自动进扫描面。
+ * 剩下两类取舍必须显式写出来：产物目录（`ARTIFACT_DIRS`）与刻意不扫的目录
+ * （`EXCLUDED_PACKED_DIRS`）—— 后者的每一条都得真的挡住东西，否则被 `problems` 点名。
+ */
+
+/** 运行期源码的后缀 */
+const RUNTIME_EXTS = /\.(js|mjs|cjs)$/;
+
+/**
+ * 构建 / 安装产物：**定义性排除**，不存在也不算异常 ——
+ * `dist/` 是 .gitignore 里的构建产物，新克隆的本机根本没有它。
+ */
+const ARTIFACT_DIRS = new Set(['node_modules', 'dist', 'dist-app']);
+
+/**
+ * 刻意不扫的**打包内源码**目录 —— 默认是扫，这里是例外。
+ *
+ * 键是相对 app 根的路径；每一条都必须真的挡住源码，否则进 `problems`（清单腐烂）。
+ * 这里**不做计数棘轮**：这些目录的成员数随开发节奏变（渲染层加一个模块就变），
+ * 棘轮只会天天报假警；真正要钉的是「每一个被打包的目录都得有交代」，
+ * 那条由 `runtimeSourceFiles()` 自己算。
+ */
+export const EXCLUDED_PACKED_DIRS = {
+  'src/renderer':
+    '渲染层是 vite 的**输入**：它以 dist/assets/*.js 的形式从 asar 加载，' +
+    '不从 src/renderer/js 按源码 require —— 那里的模块由打包器解析，不属于「裸 require」扫描面',
+};
+
+/**
+ * 从 `build.files` 现算「会进 asar 的目录前缀」。
+ *
+ * 只取每条 glob 的**字面前缀**（`src/**\/*` → `src`）；不含通配符的条目是单个文件
+ * （`package.json`），跳过。取不出前缀的条目（如 `!**\/*.map`）也跳过 ——
+ * 它描述的是排除，不是扫描面。
+ */
+export function packedDirPrefixes(buildFiles) {
+  const out = new Set();
+  for (const raw of buildFiles || []) {
+    const s = String(raw).replace(/\\/g, '/').replace(/^\.\//, '');
+    if (s.startsWith('!')) continue;
+    const globAt = s.search(/[*?[{]/);
+    if (globAt === -1) continue; // 单个文件，不是目录
+    const dir = s.slice(0, globAt).replace(/\/+$/, '');
+    if (dir) out.add(dir);
+  }
+  return [...out].sort();
+}
+
+/**
+ * 收一个目录下的运行期源码（绝对路径）；产物目录直接跳过。
+ * 抽出来是因为 `--src <dir>` 那条临时通道也要用**同一份**遍历口径，
+ * 不能让它自己再写一遍（写两遍必然有一天不一样）。
+ */
+export function collectRuntimeFiles(absDir) {
+  const out = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        if (ARTIFACT_DIRS.has(e.name)) continue;
+        walk(path.join(dir, e.name));
+      } else if (RUNTIME_EXTS.test(e.name)) {
+        out.push(path.join(dir, e.name));
+      }
+    }
+  })(absDir);
+  return out.sort();
+}
+
+/**
+ * 现算第 5 节要扫的运行期源码：`build.files` 覆盖的目录里的全部 `.js/.mjs/.cjs`，
+ * 减去产物目录与排除表。
+ *
+ * 返回 `problems` 供调用方一条 `ok()` 报出去：空数组才是可以下结论的状态。
+ * `opts.excluded` 只为让失败分支能被测到（见 `_packed_deps_test.mjs` 第 8/9 节）。
+ */
+export function runtimeSourceFiles(root, pkg, opts = {}) {
+  const excludedTable = opts.excluded || EXCLUDED_PACKED_DIRS;
+  const prefixes = packedDirPrefixes(pkg && pkg.build && pkg.build.files);
+  const problems = [];
+  const files = [];
+  const roots = [];
+  const excludedKeys = Object.keys(excludedTable);
+  const under = (rel, dir) => rel === dir || rel.startsWith(`${dir}/`);
+
+  if (!prefixes.length) {
+    problems.push(
+      'build.files 里没算出任何打包目录 —— 打包配置改过？第 5 节的扫描面会变成空的'
+    );
+    return { files, roots, problems, prefixes, scanned: [] };
+  }
+
+  // ① 每个被打包的目录都必须有交代：进扫描面 / 是产物 / 被排除。
+  //    少一条（比如 build.files 里加了 `native/**/*`）这里就会说话。
+  for (const prefix of prefixes) {
+    if (ARTIFACT_DIRS.has(prefix) || excludedKeys.some((d) => under(prefix, d))) {
+      roots.push(`${prefix}（不扫）`);
+      continue;
+    }
+    const abs = path.join(root, prefix);
+    if (!fs.existsSync(abs)) {
+      problems.push(`build.files 声明了 ${prefix}/，但磁盘上没有这个目录 —— 配置与实际不符`);
+      continue;
+    }
+    const inside = collectRuntimeFiles(abs).map((f) => path.relative(root, f).replace(/\\/g, '/'));
+    if (!inside.length) {
+      problems.push(`${prefix}/ 被当成运行期源码扫，但一个源码文件都没有 —— 判据在这里是空跑的`);
+      continue;
+    }
+    // 排除表按**文件路径**再过一道：`src` 的扫描面里要滤掉 `src/renderer/**`
+    const kept = inside.filter((rel) => !excludedKeys.some((d) => under(rel, d)));
+    files.push(...kept);
+    roots.push(kept.length === inside.length ? prefix : `${prefix}（滤掉 ${inside.length - kept.length} 个）`);
+  }
+
+  // ② 排除表里的每一条都必须真的挡住东西（少一条多一条都要显式来改）
+  for (const dir of excludedKeys) {
+    const abs = path.join(root, dir);
+    if (!fs.existsSync(abs)) {
+      problems.push(`EXCLUDED_PACKED_DIRS 里的 "${dir}/" 不存在 —— 清单腐烂，请删掉这一条`);
+      continue;
+    }
+    if (collectRuntimeFiles(abs).length === 0) {
+      problems.push(`EXCLUDED_PACKED_DIRS 里的 "${dir}/" 下面没有源码了 —— 这条排除已经没用了`);
+    }
+  }
+
+  // ③ 扫描面不许为空
+  if (!files.length) {
+    problems.push('运行期源码扫出来是空的 —— 「裸 require 的模块都有归处」会变成一句空话');
+  }
+
+  return { files: files.sort(), roots, problems, prefixes, scanned: files };
+}
 
 /**
  * 从 `package.json` 现算「生产依赖」。

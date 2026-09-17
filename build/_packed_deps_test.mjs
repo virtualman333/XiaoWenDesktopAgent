@@ -30,7 +30,8 @@ import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
 
 import {
-  REQUIRED, productionDeps, bareRequires, undeclaredRequires, entryCandidates, inPackage
+  REQUIRED, productionDeps, bareRequires, undeclaredRequires, entryCandidates, inPackage,
+  EXCLUDED_PACKED_DIRS, packedDirPrefixes, runtimeSourceFiles
 } from './_packed_manifest.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -151,6 +152,13 @@ eq(entryCandidates({ exports: { './package.json': './package.json' } }), [],
 eq(entryCandidates({}), [], '什么都没声明的包返回空（由调用方判「判据失效」）');
 ok(inPackage('node_modules/ws/index.js', 'ws'), 'inPackage 认得出 ws 自己的文件');
 ok(!inPackage('node_modules/wsx/index.js', 'ws'), 'inPackage 不把前缀相同的别的包算成 ws');
+eq(packedDirPrefixes(['src/**/*', 'dist/**/*', 'package.json']), ['dist', 'src'],
+  '从 build.files 现算打包目录：取字面前缀，单个文件的条目跳过');
+eq(packedDirPrefixes(['native/**', '!**/*.map']), ['native'],
+  '取不到前缀的排除项（`!` 开头）不算扫描面');
+eq(packedDirPrefixes([]), [], '空配置算出空（由调用方判「判据失效」，别静默当没事）');
+ok(Object.keys(EXCLUDED_PACKED_DIRS).length > 0,
+  `排除表里有条目（${Object.keys(EXCLUDED_PACKED_DIRS).join(', ')}）—— 它是空的说明「刻意不扫」的声明没了`);
 ok(DEPS.includes('ws'), `package.json 的 dependencies 里有 ws（${DEPS.join(', ')}）`);
 ok(ENTRIES.ws && ENTRIES.ws.length > 0, `ws 的入口候选非空（${(ENTRIES.ws || []).join(', ')}）`);
 
@@ -244,13 +252,92 @@ console.log('\n7. F. --src-only：不需要 asar，退出码只由第 5 节决�
   ok(b.out.includes('ws'), '点名了 ws');
 }
 
+console.log('\n8. G. 扫描面现算：build.files 里新加的打包目录自动进扫描面');
+{
+  const app = fs.mkdtempSync(path.join(TMP, 'app-'));
+  const put = (rel, body = "require('ws');\n") => {
+    const p = path.join(app, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body);
+  };
+  for (let i = 0; i < 6; i++) put(`src/main/f${i}.js`);
+  put('src/renderer/js/a.js');
+  const pkg = { build: { files: ['src/**/*', 'dist/**/*', 'package.json'] }, dependencies: { ws: '^8' } };
+
+  const before = runtimeSourceFiles(app, pkg);
+  eq(before.problems, [], '基准树自洽（problems 空）');
+  eq(before.files.length, 6, 'src/main 的 6 个文件在扫描面里，src/renderer 被排除表挡掉');
+  eq(before.roots, ['dist（不扫）', 'src（滤掉 1 个）'], '每个打包目录都有交代：产物、被过滤，各有说法');
+  eq(before.prefixes, ['dist', 'src'], '打包目录现算自 build.files');
+
+  // 打包配置里新增一个目录 —— 现算的扫描面自动带上它，不需要谁去改清单
+  put('native/bridge.js');
+  const pkg2 = { ...pkg, build: { files: [...pkg.build.files, 'native/**/*'] } };
+  const after = runtimeSourceFiles(app, pkg2);
+  eq(after.problems, [], '加了打包目录后仍然自洽');
+  ok(after.files.includes('native/bridge.js'), 'build.files 里新加的 native/** 自动进了扫描面');
+
+  // 反向对照：旧的手抄口径（写死 src/main）看不见它 —— 这正是被修掉的洞
+  const handCopied = ['src/main'];
+  ok(!handCopied.some((d) => 'native/bridge.js'.startsWith(d + '/')),
+    '反向对照：旧口径 src/main 下没有 native/bridge.js');
+
+  // 接到底：native/ 里 require 了没声明的模块，第 5 节的判据现在会点名它
+  put('native/bridge.js', "require('ws');\nrequire('ghost-lib');\n");
+  const bad = runtimeSourceFiles(app, pkg2);
+  eq(undeclaredRequires(bareRequires(bad.files.map((rel) => fs.readFileSync(path.join(app, rel), 'utf-8'))),
+    productionDeps(pkg2)), ['ghost-lib'],
+    '新目录里的裸 require 会被第 5 节点名（旧口径下它连扫都扫不到）');
+}
+
+console.log('\n9. H. 扫描面的自证：配置不符 / 排除表腐烂 / 扫描面为空都要自己喊出来');
+{
+  const app = fs.mkdtempSync(path.join(TMP, 'app2-'));
+  const put = (rel, body = "require('ws');\n") => {
+    const p = path.join(app, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body);
+  };
+  put('src/main/f0.js');
+
+  const missingDir = runtimeSourceFiles(app, { build: { files: ['src/**/*', 'ghost/**/*'] } });
+  ok(missingDir.problems.some((p) => /ghost\//.test(p)),
+    'build.files 声明了不存在的打包目录 → 点名它',
+    JSON.stringify(missingDir.problems));
+
+  const noPrefix = runtimeSourceFiles(app, { build: { files: ['package.json'] } });
+  ok(noPrefix.problems.some((p) => /没算出任何打包目录/.test(p)),
+    'build.files 里一条目录都算不出来 → 明说判据失效',
+    JSON.stringify(noPrefix.problems));
+
+  const rotten = runtimeSourceFiles(app, { build: { files: ['src/**/*'] } },
+    { excluded: { 'src/nowhere': '目录并不存在' } });
+  ok(rotten.problems.some((p) => /src\/nowhere/.test(p) && /清单腐烂/.test(p)),
+    '排除表指向一个不存在的目录 → 报「清单腐烂」',
+    JSON.stringify(rotten.problems));
+
+  // 目录在、但下面一个源码文件都没有 —— 这条排除已经挡不住东西了
+  fs.mkdirSync(path.join(app, 'src/empty'), { recursive: true });
+  const emptyExcl = runtimeSourceFiles(app, { build: { files: ['src/**/*'] } },
+    { excluded: { 'src/empty': '存在但没有源码' } });
+  ok(emptyExcl.problems.some((p) => /没有源码了/.test(p)),
+    '排除表条目下面没有源码 → 报「这条排除已经没用了」',
+    JSON.stringify(emptyExcl.problems));
+
+  // 被当成源码扫的目录里一个源码都没有（目录在，但里面是空的）
+  fs.mkdirSync(path.join(app, 'empty'), { recursive: true });
+  const noFiles = runtimeSourceFiles(app, { build: { files: ['empty/**/*'] } });
+  ok(noFiles.problems.some((p) => /一个源码文件都没有/.test(p)),
+    '被当成源码扫的目录里没有任何源码 → 报「判据在这里是空跑的」',
+    JSON.stringify(noFiles.problems));
+}
+
 // 收尾
 try {
   fs.rmSync(TMP, { recursive: true, force: true });
 } catch {
   /* 临时目录清不掉不影响结论 */
 }
-
 console.log('\n' + '='.repeat(46));
 if (failures.length) {
   console.log(`${failures.length} 项失败：`);

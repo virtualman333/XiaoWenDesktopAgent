@@ -41,8 +41,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import {
-  REQUIRED, RUNTIME_SRC_DIRS, RUNTIME_PROVIDED,
-  productionDeps, bareRequires, undeclaredRequires, entryCandidates, inPackage
+  REQUIRED, RUNTIME_PROVIDED, EXCLUDED_PACKED_DIRS,
+  productionDeps, bareRequires, undeclaredRequires, entryCandidates, inPackage,
+  collectRuntimeFiles, runtimeSourceFiles
 } from './_packed_manifest.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,8 +68,8 @@ try {
 } catch (e) {
   PKG_ERROR = e.message;
 }
-/** 扫裸 `require()` 的源码根（`--src` 可换成别的，供测试用） */
-const SRC_ROOT = argValue('--src') || path.join(ROOT, RUNTIME_SRC_DIRS[0]);
+/** `--src <dir>`：临时只扫这一个目录（测试 / 排查用）。不传就现算（见第 5 节）。 */
+const SRC_OVERRIDE = argValue('--src');
 
 let pass = 0;
 let fail = 0;
@@ -202,15 +203,23 @@ if (asar) {
 }
 
 console.log('\n5. 源码里裸 require() 的模块都在 dependencies（或运行时白名单）里');
-const srcFiles = [];
-(function walk(dir) {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) walk(full);
-    else if (/\.(js|mjs|cjs)$/.test(e.name)) srcFiles.push(full);
-  }
-})(SRC_ROOT);
-ok(srcFiles.length >= 5, `扫到 ${srcFiles.length} 个运行期源码文件（${path.relative(ROOT, SRC_ROOT) || SRC_ROOT}）`,
+// 扫描面**现算**：从 package.json 的 build.files 算出被打包的目录，减去产物目录与
+// EXCLUDED_PACKED_DIRS。`--src <dir>` 是临时通道（只扫那一个目录，不做自证）。
+let srcFiles = [];
+let srcNote = '';
+if (SRC_OVERRIDE) {
+  const dir = path.resolve(SRC_OVERRIDE);
+  srcFiles = collectRuntimeFiles(dir);
+  srcNote = `--src 指定的 ${path.relative(ROOT, dir) || dir}（跳过 build.files 现算）`;
+} else {
+  const surface = runtimeSourceFiles(ROOT, PKG);
+  for (const p of surface.problems) ok(false, `扫描面自洽（build.files → 打包目录 → 排除表）`, p);
+  srcFiles = surface.files.map((rel) => path.join(ROOT, rel));
+  srcNote =
+    `现算自 build.files ${JSON.stringify(surface.prefixes)} → ${surface.roots.join(' + ')}` +
+    `（排除表 ${Object.keys(EXCLUDED_PACKED_DIRS).join(', ')}）`;
+}
+ok(srcFiles.length >= 5, `扫到 ${srcFiles.length} 个运行期源码文件（${srcNote}）`,
   '扫描面塌了 —— 目录挪了？');
 const deps5 = productionDeps(PKG);
 const used = bareRequires(srcFiles.map((f) => fs.readFileSync(f, 'utf-8')));
