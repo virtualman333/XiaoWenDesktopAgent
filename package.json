@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -21,6 +21,7 @@
     "test:packed": "node build/_packed_check.mjs",
     "check:deps": "node build/_packed_check.mjs --src-only",
     "test:packed-deps": "node build/_packed_deps_test.mjs",
+    "test:tools": "node build/_tools_test.mjs",
     "release:upload": "node build/gh-release.mjs",
     "version:bump": "node build/bump-version.mjs",
     "test:llm": "node build/_llm_test.mjs",
@@ -35,7 +36,7 @@
     "probe:meeting": "node build/_meeting_live_probe.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
     "test": "npm run test:all",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run check:deps && npm run test:packed-deps"
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run test:tools && npm run check:deps && npm run test:packed-deps"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -47,7 +48,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.11.0",
+      "output": "release-v1.12.0",
       "buildResources": "build"
     },
     "files": [

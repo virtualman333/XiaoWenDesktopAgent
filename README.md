@@ -254,7 +254,7 @@ npm run dev:electron
 
 ## Agent 能力说明（v1.1 新增）
 
-开启 Agent 模式（标题栏扳手图标或设置页）后，小问可以用 17 个内置工具直接操作电脑：
+开启 Agent 模式（标题栏扳手图标或设置页）后，小问可以用 19 个内置工具直接操作电脑：
 
 | 类别 | 工具 |
 |---|---|
@@ -263,12 +263,15 @@ npm run dev:electron
 | 系统 | `system_info` / `get_datetime` / `process_list` / `process_kill` |
 | 桌面 | `app_open` / `screenshot` / `clipboard_read` / `clipboard_write` / `notify` |
 | 网络 | `http_request` |
+| 会议 | `meeting_record`（开始 / 结束录制，结束即生成摘要并落盘） / `meeting_minutes`（按关键词搜历史纪要，含转写全文） |
 | 记忆 | `memory_add` / `memory_search` |
 
 **安全机制**：
 - 高危命令（format / shutdown / reg / diskpart 等）直接拦截
 - 写/删操作只允许用户目录、下载、临时目录与白名单目录
 - 高危工具执行前弹窗确认（可在设置改为全部确认或全自动）
+
+上面两条**不是「写在文档里就算」**：`npm run test:tools` 会逐条验证名单里没有哑弹、一批常用良性命令不被误报，并真的建一个目录联接来验「字面路径落在允许目录内、解析后却指向别处」会被拒绝。判据收在 `src/main/jarvis/tool-guard.js`（纯函数、零 electron 依赖，所以纯 Node 跑得起来）——此前它写死在 `tools.js` 里，而那个文件第一行就 `require('electron')`，导致这两条安全承诺在 18 套测试里一条断言都没有。
 
 ---
 

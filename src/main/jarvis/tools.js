@@ -18,23 +18,11 @@ const { TextDecoder } = require('util');
 const store = require('./store');
 
 // ---------------- 安全 ----------------
-const DANGEROUS_PATTERNS = [
-  /format\s+[a-z]:/i,
-  /\bdel\s+\/[fs]\b/i,
-  /\brm\s+-rf\s+(\/|\*|~)/i,
-  /\bshutdown\b/i,
-  /\bshutdown\s*\/\s*[sr]/i,
-  /\bdiskpart\b/i,
-  /\breg\s+(delete|add)\b/i,
-  /\bnet\s+user\b/i,
-  /\btakeown\b/i,
-  /\bcipher\s+\/w/i,
-  /\bRemove-Item\s+.*(-Recurse\s+)?(-Force\s+)?(C:\\Windows|C:\\\\|C:\/)/i,
-  /\bStop-Computer\b/i,
-  /\bRestart-Computer\b/i,
-  /\bmkfs\b/i,
-  /\bdd\s+if=/i
-];
+// 判据全部在 ./tool-guard（纯函数、零 electron 依赖，因此能被纯 Node 单测）。
+// 这里只负责把 electron 提供的那几个「允许写入的根目录」喂给它 ——
+// app.getPath 只有主进程里有，那是本文件唯一没法抽走的东西。
+const guard = require('./tool-guard');
+const { DANGEROUS_PATTERNS } = guard;
 
 const HOME = os.homedir();
 const TMP = os.tmpdir();
@@ -48,19 +36,9 @@ function allowedWriteRoots() {
   return roots.map((p) => path.resolve(String(p))).filter(Boolean);
 }
 
-function isUnder(root, target) {
-  const r = path.resolve(root);
-  const t = path.resolve(target);
-  return t === r || t.startsWith(r + path.sep) || t.startsWith(r + '/');
-}
-
+/** 写围栏。判据（含软链接 / 目录联接解析）在 tool-guard，这里只提供允许写入的根目录 */
 function assertWritable(p) {
-  const roots = allowedWriteRoots();
-  const target = path.resolve(String(p));
-  if (roots.some((r) => isUnder(r, target))) return target;
-  const err = new Error(`拒绝写入：${target} 不在允许范围内（允许：用户目录 / 下载 / 临时目录，可在设置里追加白名单）`);
-  err.code = 'EPATH';
-  throw err;
+  return guard.assertWritablePath(p, allowedWriteRoots());
 }
 
 function truncate(s, max) {
@@ -560,7 +538,7 @@ async function executeInner(name, args) {
     case 'shell_exec': {
       const cmd = String(args.command || '');
       if (!cmd.trim()) return { ok: false, error: '命令为空' };
-      const hit = DANGEROUS_PATTERNS.find((re) => re.test(cmd));
+      const hit = guard.matchDangerousCommand(cmd);
       if (hit) return { ok: false, error: `已拦截高危命令（匹配 ${hit}），如需执行请让主人手动操作` };
       const r = await runCmd(cmd, { cwd: args.cwd, shell: args.shell, timeoutMs: s.shellTimeoutMs });
       const text = [r.stdout, r.stderr].filter(Boolean).join('\n').trim();
@@ -758,5 +736,9 @@ module.exports = {
   execute,
   listTools,
   DANGEROUS_PATTERNS,
-  allowedWriteRoots
+  allowedWriteRoots,
+  // 安全判据再从本模块出口一份，e2e / 排查脚本不必多 require 一个文件
+  matchDangerousCommand: guard.matchDangerousCommand,
+  isUnder: guard.isUnder,
+  isWritablePath: guard.isWritablePath
 };
