@@ -18,6 +18,8 @@ const meeting = require('./meeting');
 const entry = require('./entry');
 // 剪贴板感知：认出「值得问」的复制内容，主动开口（纯函数 + 轮询器，可单测）
 const clipSense = require('./clip-sense');
+// 配置改了要跟着重载什么 —— 判据与顺序只此一份（纯函数，可单测）
+const configReload = require('./config-reload');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -1587,46 +1589,40 @@ ipcMain.handle('config:set', (_e, patch) => {
   config = next;
   saveConfig(config);
 
-  // 热更新快捷键 / 悬浮球透明度
-  if (patch.hotkey && patch.hotkey !== cur.hotkey) registerHotkeys();
-  if (patch.petSummonHotkey && patch.petSummonHotkey !== cur.petSummonHotkey) {
-    setPetSummonHotkey(patch.petSummonHotkey);
-  }
-  if (patch.captureRegionHotkey && patch.captureRegionHotkey !== cur.captureRegionHotkey) {
-    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
-  }
-  if (patch.captureFullHotkey && patch.captureFullHotkey !== cur.captureFullHotkey) {
-    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
-  }
-  if (patch.captureEnabled !== undefined && patch.captureEnabled !== cur.captureEnabled) {
-    try { capture.registerShortcuts(); } catch (e) { /* ignore */ }
-  }
-  if (typeof patch.ballOpacity === 'number') {
-    ballWin && !ballWin.isDestroyed() && ballWin.setOpacity(patch.ballOpacity);
-  }
-
-  // 会议检测：开关 / 轮询间隔 / 灵敏度 / 静默时长 改了都要重建采样参数
-  if (Object.keys(patch).some((k) => k.startsWith('meeting'))) {
-    try { meeting.reload(); } catch (e) { /* ignore */ }
-  }
-
-  // 剪贴板感知：开关一变就得跟上（开着才轮询，关掉立刻停）；规则改了热替换，不必重启
-  if ('clipSenseEnabled' in patch || 'clipSenseRules' in patch) syncClipSense('设置变更');
-
-  // 桌面宠物联动：开关 / 动物 / 大小 / 透明度 / 置顶 / 散步
-  try {
-    if ('petEnabled' in patch || 'petTop' in patch || 'petKeepTop' in patch) pet.applyConfig(config);
-    const pw = pet.window;
-    if (pw && !pw.isDestroyed()) {
-      if ('petSize' in patch) pet.resize();
-      if (typeof patch.petOpacity === 'number') {
-        pw.setOpacity(Math.min(Math.max(patch.petOpacity, 0.25), 1));
+  // 热更新：改了什么配置、要跟着重载什么 —— 判据与顺序都在 config-reload.js 那张表里，
+  // 这里只负责派发。以前这里是 11 条手写 if，判据写法五种，其中四条用真值判断，
+  // 于是「清空快捷键」被当成「没改」：配置里已经空了、界面还提示「已清空」，
+  // 系统里那把旧键却还挂着，一直到重启才回落默认。
+  for (const action of configReload.planReloads(patch, cur)) {
+    // 每个动作各自兜住异常：一个重载坏掉不该把后面几个一起带走
+    try {
+      if (action === 'hotkeys') {
+        registerHotkeys();                       // 空值 → 由 registerHotkeys 归一成默认键
+      } else if (action === 'pet-summon-hotkey') {
+        setPetSummonHotkey(patch.petSummonHotkey);   // 空值 → 由它自己归一成默认键
+      } else if (action === 'capture') {
+        capture.registerShortcuts();             // 空键位 → 回落默认框选 / 整屏键
+      } else if (action === 'ball-opacity') {
+        if (ballWin && !ballWin.isDestroyed()) ballWin.setOpacity(patch.ballOpacity);
+      } else if (action === 'meeting') {
+        meeting.reload();                        // 开关 / 间隔 / 灵敏度 / 静默时长都要重建采样参数
+      } else if (action === 'clip-sense') {
+        syncClipSense('设置变更');                // 开着才轮询，关掉立刻停；规则改了热替换
+      } else if (action === 'pet') {
+        pet.applyConfig(config);                 // 开关 / 动物 / 置顶 / 散步
+      } else if (action === 'pet-size') {
+        const pw = pet.window;
+        if (pw && !pw.isDestroyed()) pet.resize();
+      } else if (action === 'pet-opacity') {
+        const pw = pet.window;
+        if (pw && !pw.isDestroyed()) pw.setOpacity(Math.min(Math.max(patch.petOpacity, 0.25), 1));
+      } else if (action === 'entry') {
+        syncEntry('config:set');                 // 等宠物窗口状态落定再对齐，免得算错宿主
       }
+    } catch (e) {
+      console.warn('[config] 重载 %s 失败:', action, e && e.message);
     }
-  } catch (e) { /* ignore */ }
-
-  // 悬浮球 / 宠物的分工变了：等宠物窗口的状态落定再对齐，免得算错宿主
-  if ('ballEnabled' in patch || 'petEnabled' in patch) syncEntry('config:set');
+  }
 
   // 广播配置
   [ballWin, panelWin, settingsWin].forEach((w) => {

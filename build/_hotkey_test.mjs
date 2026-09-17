@@ -63,6 +63,7 @@ Module._load = function (request) {
 };
 
 const capture = require('../src/main/capture.js');
+const configReload = require('../src/main/config-reload.js');
 
 let pass = 0; const fails = [];
 const ok = (cond, name, extra) => { if (cond) pass++; else fails.push(name + (extra ? ` → ${extra}` : '')); };
@@ -181,6 +182,27 @@ section('6. 先试后存');
   const back = capture.registerShortcuts();
   ok(back.items.some((i) => i.accel === 'Alt+Shift+A'), '回到配置里的键位（覆盖层没有落盘）', JSON.stringify(back.items.map((i) => i.accel)));
   eq(live(), 'Alt+Shift+A,Alt+Shift+S', '系统里也是原键位', live());
+}
+
+// ---------------- 7. 清空快捷键：判据 + 归一，接起来看 ----------------
+// 这一节盯的是「两段都对、接起来错的」那种毛病：
+// 归一（空值→默认键）在第 5 节已经证明是对的，但上游要是把空值当成
+// 「没改」，这一步压根跑不到 —— 旧键就一直挂在系统里，直到重启。
+section('7. 清空快捷键之后，系统里挂的到底是什么');
+{
+  const plan = configReload.planReloads({ captureRegionHotkey: '' }, { captureRegionHotkey: 'Alt+Shift+A' });
+  ok(plan.includes('capture'), '清空快捷键被判定成「改了」，会去重注册', JSON.stringify(plan));
+
+  cfg = { captureEnabled: true, captureRegionHotkey: 'Ctrl+Alt+R', captureFullHotkey: 'Alt+Shift+S' };
+  capture.registerShortcuts();
+  eq(live(), 'Alt+Shift+S,Ctrl+Alt+R', '先让 Ctrl+Alt+R 生效');
+
+  // 按下 Delete → 渲染层写 captureRegionHotkey: ''
+  cfg = { ...cfg, captureRegionHotkey: '' };
+  const st = capture.registerShortcuts();
+  eq(live(), 'Alt+Shift+A,Alt+Shift+S', '清空之后立刻回落默认 Alt+Shift+A', live());
+  ok(!table.has('Ctrl+Alt+R'), '旧键真的从系统里撤掉了（不必等重启）');
+  eq(st.items[0].accel, 'Alt+Shift+A', '回报给界面的键位是默认键 —— 界面据此提示，不能自己说「已清空」');
 }
 
 // ---------------- 汇总 ----------------

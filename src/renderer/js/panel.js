@@ -2191,10 +2191,14 @@ function bindPet() {
     label: '召唤宠物',
     onApply: async (v) => {
       const r = await window.xw.petSummonHotkeySet(v);
-      if (r && r.ok === false) setToast(r.error || '这个组合键用不了');
       const now = await window.xw.petSummonHotkeyGet();
       if ($('stPetSummonKey')) $('stPetSummonKey').value = now || '';
       cfg.petSummonHotkey = now;
+      // 注册失败时主进程会退到默认键；实际生效的是哪个，以读回来的为准
+      if (r && r.ok === false) {
+        return { accel: now || '', error: `${r.error || '这个组合键用不了'}${now ? `（已回落 ${now}）` : ''}` };
+      }
+      return { accel: now || '' };
     }
   });
 
@@ -3498,8 +3502,7 @@ function setupHotkeyRecorder(o) {
     if (e.key === 'Backspace' || e.key === 'Delete') {
       input.value = '';
       stop();
-      await o.onApply('');
-      setToast(`${o.label}快捷键已清空`);
+      setToast(hotkeyToast(o.label, await o.onApply(''), ''));
       return;
     }
 
@@ -3521,9 +3524,39 @@ function setupHotkeyRecorder(o) {
 
     input.value = accel;
     stop();
-    await o.onApply(accel);
-    setToast(`${o.label}快捷键已设为 ${accel}`);
+    setToast(hotkeyToast(o.label, await o.onApply(accel), accel));
   });
+}
+
+/**
+ * 快捷键落地之后该说什么 —— **以主进程回报的实际键位为准，不猜**。
+ *
+ * 空值不等于「清空」：三个注册函数都会把空值归一回默认键，所以清空之后
+ * 实际生效的是默认键。以前这里直接说「已清空」，界面说的和系统里挂的
+ * 不是一回事（更早还因为上游用了真值判断，连归一那一步都没走到）。
+ * @param {string} label 这个键的名字，如「框选截图」
+ * @param {{accel?:string,error?:string}|void} back onApply 的回报
+ * @param {string} want 用户想录进去的键（'' 表示清空）
+ */
+function hotkeyToast(label, back, want) {
+  const accel = (back && back.accel) || '';
+  if (back && back.error) return `${label}快捷键没能生效：${back.error}`;
+  if (!accel) return `${label}快捷键${want ? '已提交' : '已清空'}`;
+  if (!want) return `${label}快捷键已清空，回落默认 ${accel}`;
+  return `${label}快捷键已设为 ${accel}`;
+}
+
+/**
+ * 从主进程回报的注册结果里取某个快捷键的实际落地情况 —— 猜不如问。
+ * 「关着截图功能」和「注册失败」是两回事，都得能说出来。
+ * @returns {{accel?:string,error?:string}}
+ */
+function hotkeyOutcome(st, label) {
+  if (!st) return { error: '主进程没有回报注册结果' };
+  if (st.enabled === false) return { error: '截图功能当前是关闭的' };
+  const it = (st.items || []).find((i) => i.label === label);
+  if (!it) return { error: '主进程没有回报这个键的注册结果' };
+  return it.ok ? { accel: it.accel } : { error: it.error || '注册失败' };
 }
 
 /** 显示截图快捷键注册结果（占用 / 非法都会如实说） */
@@ -3900,12 +3933,16 @@ function bindCapture() {
 
   // 截图快捷键：不再让主人手打字符串（写错一个空格就静默失效），
   // 改成「录制」——按下组合键即写入，并立刻回显能不能用。
+  // onApply 必须回报**实际生效的键**：空值会被主进程归一回默认键，
+  // 界面自己猜就会像以前那样提示「已清空」，而系统里挂的是默认键。
   setupHotkeyRecorder({
     inputId: 'capRegionKey', btnId: 'capRegionRec', clearId: 'capRegionClear',
     label: '框选截图',
     onApply: async (v) => {
       cfg = await window.xw.setConfig({ captureRegionHotkey: v });
-      renderHotkeyState(await window.xw.captureHotkeys());
+      const st = await window.xw.captureHotkeys();
+      renderHotkeyState(st);
+      return hotkeyOutcome(st, '框选截图');
     }
   });
   setupHotkeyRecorder({
@@ -3913,7 +3950,9 @@ function bindCapture() {
     label: '整屏截图',
     onApply: async (v) => {
       cfg = await window.xw.setConfig({ captureFullHotkey: v });
-      renderHotkeyState(await window.xw.captureHotkeys());
+      const st = await window.xw.captureHotkeys();
+      renderHotkeyState(st);
+      return hotkeyOutcome(st, '整屏截图');
     }
   });
 
