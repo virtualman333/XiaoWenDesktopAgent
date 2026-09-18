@@ -13,6 +13,8 @@ const {
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+// 「截完之后做什么」的判据只此一份（纯函数、不 require electron，见 capture-plan.js）
+const { capturePlan } = require('./capture-plan');
 
 let getConfigRaw = () => ({});
 let cfgOverride = {};   // 设置页「先试后存」用：临时覆盖，试完清空
@@ -86,23 +88,27 @@ function toDataUrl(image) {
 /** 全屏截图：直接出图 */
 async function captureFull({ displayId, silent = false } = {}) {
   const { image, display, scale } = await grabDisplay(displayId);
-  const file = await persist(image);
   const size = image.getSize();
-  const cfg = getConfig() || {};
-  const after = cfg.captureAfter || 'ask';
+  const plan = capturePlan((getConfig() || {}).captureAfter);
 
-  if (after !== 'none') clipboard.writeImage(image);
+  // 落盘 / 写剪贴板都按判据走 —— 此前是无条件 persist() + `after !== 'none'` 就复制，
+  // 于是「只复制到剪贴板」照样落盘、「只存盘」照样占剪贴板（详见 capture-plan.js）
+  const file = plan.save ? await persist(image) : null;
+  if (plan.copy) clipboard.writeImage(image);
 
   const payload = {
     ok: true,
     path: file,
+    after: plan.key,
+    saved: plan.save,
+    copied: plan.copy,
     width: Math.round(size.width / scale),
     height: Math.round(size.height / scale),
     display: display.id,
     scale
   };
 
-  if (!silent && after === 'ask') {
+  if (!silent && plan.attach) {
     payload.dataUrl = toDataUrl(image);
     notify('capture', payload);
   }
@@ -166,19 +172,21 @@ function captureRegion({ displayId } = {}) {
           width: Math.round(rect.width * s),
           height: Math.round(rect.height * s)
         });
-        const file = await persist(crop);
-        const cfg = getConfig() || {};
-        const after = cfg.captureAfter || 'ask';
-        if (after !== 'none') clipboard.writeImage(crop);
+        const plan = capturePlan((getConfig() || {}).captureAfter);
+        const file = plan.save ? await persist(crop) : null;
+        if (plan.copy) clipboard.writeImage(crop);
         const out = {
           ok: true,
           path: file,
+          after: plan.key,
+          saved: plan.save,
+          copied: plan.copy,
           width: Math.round(rect.width),
           height: Math.round(rect.height),
           display: d.id,
           scale: s
         };
-        if (after === 'ask') {
+        if (plan.attach) {
           out.dataUrl = toDataUrl(crop);
           notify('capture', out);
         }

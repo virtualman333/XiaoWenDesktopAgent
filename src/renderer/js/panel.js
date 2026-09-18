@@ -4160,7 +4160,13 @@ function bindCapture() {
   const now = $('capNow');
   if (now) now.addEventListener('click', async () => {
     const r = await window.xw.captureRegion();
-    if (r && r.ok) setToast('已截图：' + (r.path || ''));
+    if (!r || !r.ok) return;
+    // 提示按主进程回报的**实际动作**写（copied / path），别把「只复制到剪贴板」说成存了个文件：
+    // 这两种模式落不落盘由 capture-plan.js 决定，渲染层不再自己猜
+    const parts = [];
+    if (r.copied) parts.push('已复制到剪贴板');
+    if (r.path) parts.push('已存到 ' + r.path);
+    setToast(parts.length ? '已截图：' + parts.join('，') : '已截图');
   });
   const dir = $('capOpenDir');
   if (dir) dir.addEventListener('click', () => window.xw.captureOpenDir());
