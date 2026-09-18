@@ -1478,6 +1478,7 @@ function initSettings() {
   bindClipTest();
   bindAdvanced();
   fillAll();
+  renderConfigHealth();
 }
 
 function activateTab(tab) {
@@ -4084,6 +4085,28 @@ function fillCapture() {
   setChk('upPre', cfg.autoUpdatePrerelease === true);
   window.xw.captureHotkeys().then(renderHotkeyState).catch(() => {});
   bindUpdater();
+}
+
+// ---------- 配置文件自身的健康提示 ----------
+// 「读不出来就用默认值」这条路径以前是完全无声的：用户手改 config.json 少一个逗号，
+// 打开软件看到的是「设置全没了」，而且随手一点就把残骸也覆盖掉。现在把状态摆到设置页顶部。
+async function renderConfigHealth() {
+  const box = $('cfgAlert');
+  const txt = $('cfgAlertText');
+  if (!box || !txt || typeof window.xw.configHealth !== 'function') return;
+  let h;
+  try { h = await window.xw.configHealth(); } catch (e) { return; }
+  const msg = (h && h.describe) || '';
+  if (!msg) { box.style.display = 'none'; txt.textContent = ''; return; }
+  // 备份文件名要等宽显示 —— 用户得照着这个名字去 userData 目录里找它
+  const base = h.backupPath ? String(h.backupPath).split(/[\\/]/).pop() : '';
+  if (base && msg.includes(base)) {
+    const parts = msg.split(base);
+    txt.innerHTML = parts.map(escapeHtml).join(`<code>${escapeHtml(base)}</code>`);
+  } else {
+    txt.textContent = msg;
+  }
+  box.style.display = '';
 }
 
 // ---------- 保存 ----------

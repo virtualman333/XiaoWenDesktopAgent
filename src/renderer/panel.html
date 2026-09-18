@@ -209,6 +209,13 @@
       <button class="btn-primary" id="stSave">保存</button>
     </div>
 
+    <!-- 配置文件自己出问题时的横幅（读不出来 / 已备份 / 有拼错的键）。
+         以前这条路径完全无声：配置读不出来就用默认值，用户只会觉得「我的设置全没了」。 -->
+    <div class="st-alert" id="cfgAlert" style="display:none">
+      <span class="st-alert-ico">⚠</span>
+      <span id="cfgAlertText"></span>
+    </div>
+
     <div class="st-wrap">
       <nav class="st-nav">
         <button class="st-nav-item active" data-tab="general">常规</button>

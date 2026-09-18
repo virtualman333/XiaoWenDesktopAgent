@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('xw', {
   // ---- 配置 ----
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
+  // 配置文件自身健不健康（读不出来 / 已备份 / 有拼错的键），设置页横幅用它
+  configHealth: () => ipcRenderer.invoke('config:health'),
   onConfigUpdate: (cb) => {
     const handler = (_e, cfg) => cb(cfg);
     ipcRenderer.on('config:update', handler);

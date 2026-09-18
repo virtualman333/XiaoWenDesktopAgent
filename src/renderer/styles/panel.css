@@ -460,6 +460,26 @@ body { border-radius: 0; }
 }
 .st-header h1 { font-size: 16px; font-weight: 600; }
 
+/* 配置文件自身的健康提示（读不出来 / 已备份 / 有拼错的键） */
+.st-alert {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 0;
+  padding: 10px 22px;
+  background: #fff4e5;
+  border-bottom: 1px solid #ffd8a8;
+  color: #8a5200;
+  font-size: 12.5px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+.st-alert-ico { flex-shrink: 0; }
+.st-alert code {
+  font-family: var(--mono);
+  background: rgba(0,0,0,.06);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
 /* 左导航 + 右内容 */
 .st-wrap {
   flex: 1;

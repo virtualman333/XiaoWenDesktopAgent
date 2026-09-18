@@ -665,9 +665,14 @@ npm run dist:dir
 npm run version:bump 1.9.0
 #    再补 CHANGELOG.md，跑测试
 npm test                       # 全量白盒单测，纯 Node，跑完约 12 秒
-# 也可以单跑：test:context / test:hotkey / test:meeting / test:entry /
+# 也可以单跑：test:context / test:hotkey / test:reload / test:config /
+#            test:meeting / test:entry / test:clip / test:memory / test:session /
 #            test:proactive / test:orch / test:pet / test:tray / test:wake / test:llm
 # 另外还有个需要真实桌面的（不在默认流程里）：test:pet-top
+#
+# 配置相关的两条（都进 npm test）：
+#   test:reload   配置热更新「改了什么要重载什么」的判据
+#   test:config   配置文件读写：坏文件逐字节备份 / 读不动就拒绝写 / 设置界面写的键必须都在 DEFAULT_CONFIG 里
 #
 # 打包内容校验（防「装完之后才发现少东西」）：
 #   check:deps         已进 npm test —— 源码里裸 require 的模块必须声明在 dependencies 里
@@ -813,6 +818,23 @@ v1.0.2 已处理两类常见原因：GPU 进程崩溃、以及上次被强制结
 ```
 
 设置页底部有「打开数据目录」按钮可直接跳转。
+
+### 手改 config.json 写坏了会怎样
+
+`config.json` 是可以手改的（`config.example.json` 就是给你照抄的模板），所以它写坏了一定会发生。
+不会静默丢配置：
+
+- 文件**解析不了**（少个逗号、多个括号）或**顶层不是对象**（`[...]` / `"x"` / `null`）时，
+  程序会先把原始内容**逐字节**备份成 `config.json.bad-<时间戳>-<指纹>`，再按默认配置运行，
+  并弹一条系统通知 + 在设置页顶部挂一条横幅告诉你备份文件名。同一份坏内容只会备份一次。
+- 备份写下去之后才允许继续保存设置 —— 不然界面会变成「点了保存但没生效」，更难查。
+- **备份路径**：`%APPDATA%\xiaowen-assistant\config.json.bad-*`。把里面能救的部分填回新的 `config.json` 即可恢复。
+- 空文件（或只有空白）**不算损坏**：那是写入中断的典型残留，没有内容可备份，直接按默认值走。
+  （写盘本身改成「临时文件 + 原子替换」，正常情况下不会再产生这种残留。）
+- 文件**读不动**（被别的程序锁着 / 权限不足）时**拒绝写入**：连读都没读到，无从判断写下去会毁掉什么。
+  这时设置页会明说「本次运行不会写入任何设置」。
+- 配置里出现**不认识的键**（`hotKey`、`apiKeyy` 这类拼错）时会在设置页顶部点名 —— 这些键不会生效，
+  但以前的提示只写进日志，界面上完全看不出来。
 
 ---
 

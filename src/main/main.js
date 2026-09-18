@@ -20,6 +20,8 @@ const entry = require('./entry');
 const clipSense = require('./clip-sense');
 // 配置改了要跟着重载什么 —— 判据与顺序只此一份（纯函数，可单测）
 const configReload = require('./config-reload');
+// config.json 的读 / 写 / 坏了怎么办 —— 判据只此一份（纯 Node，可单测）
+const { createConfigStore } = require('./config-store');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -397,6 +399,7 @@ const DEFAULT_CONFIG = {
   orchMaxWorkers: 2,             // 同时跑几个子代理
   orchRetry: 1,                  // 单个子任务失败最多重试几次
   orchAutoDelegate: true,        // 判断为「常任务」时自动走编排，不再逐步请示
+  orchReview: true,              // 跑完由主代理复核一遍结果（设置页有这个开关）
   // ---- 定时任务 ----
   schedEnabled: true,            // 到点自动执行并播报
   // ---- 会议自动记录（检测会议 / 通话并自动记纪要）----
@@ -436,28 +439,39 @@ const DEFAULT_CONFIG = {
   setupDone: false // 是否已完成首次配置引导（新机 clone 后为 false，会弹出引导）
 };
 
+const configStore = createConfigStore(CONFIG_DIR, DEFAULT_CONFIG);
+
+/**
+ * 读配置。
+ *
+ * 除了「把默认值和文件里的值合起来」，它还负责一件以前没人管的事：
+ * 文件读不出来时**先把原始内容备份一份**，再回落默认值 —— 判据与备份都在
+ * `config-store.js` 里（纯 Node，可单测）。这条路径以前是「catch 一下、
+ * 无声无息用默认值」，而用户手改的就是这个文件（README 教的就是手改），
+ * 于是一次手抖会变成「设置全没了」，而且随手一存就把残骸也覆盖掉。
+ */
 function loadConfig() {
-  try {
-    if (!fs.existsSync(CONFIG_DIR())) fs.mkdirSync(CONFIG_DIR(), { recursive: true });
-    if (!fs.existsSync(CONFIG_FILE())) return { ...DEFAULT_CONFIG };
-    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE(), 'utf-8'));
-    return { ...DEFAULT_CONFIG, ...raw };
-  } catch (e) {
-    console.error('[config] load failed:', e);
-    return { ...DEFAULT_CONFIG };
+  const r = configStore.load();
+  if (r.state === 'invalid' || r.state === 'not-object') {
+    console.warn('[config] 读不出来（%s），已备份为 %s', r.error, r.backupPath || '(备份失败)');
+    // loadConfig 会被反复调用，同一份坏文件的备份路径只会有一个 —— 按它去重，
+    // 免得通知队列被同一个事件堆满。
+    if (!pendingConfigNotice.includes(r.backupPath)) pendingConfigNotice.push(r.backupPath);
+  } else if (r.state === 'unreadable') {
+    console.warn('[config] 读不动：%s —— 本次不写盘，避免覆盖', r.error);
+  } else if (r.unknownKeys.length) {
+    console.warn('[config] 不认识的配置项（多半拼错了，不会生效）：%s', r.unknownKeys.join(', '));
   }
+  return r.config;
 }
 
 function saveConfig(cfg) {
-  try {
-    if (!fs.existsSync(CONFIG_DIR())) fs.mkdirSync(CONFIG_DIR(), { recursive: true });
-    fs.writeFileSync(CONFIG_FILE(), JSON.stringify(cfg, null, 2), 'utf-8');
-    return true;
-  } catch (e) {
-    console.error('[config] save failed:', e);
-    return false;
-  }
+  const r = configStore.save(cfg);
+  if (!r.ok) console.error('[config] save failed:', r.error || r.reason);
+  return r.ok;
 }
+
+const pendingConfigNotice = [];
 
 let config = loadConfig();
 
@@ -1505,6 +1519,10 @@ ipcMain.handle('chat:test', async (_e, { baseUrl: rawBase, model: rawModel, apiK
 // ---------- IPC ----------
 ipcMain.handle('config:get', () => sanitizeConfig(loadConfig()));
 
+// 配置文件的「现状」：读没读出来、备份在哪、有没有拼错的键。
+// 故意只回状态不回配置值 —— 密钥不可能从这里漏出去。
+ipcMain.handle('config:health', () => configStore.health());
+
 // 规则文本校验（设置界面里那段 JSON）：不落盘、不碰文件，界面边打字边调。
 // 规则知识只在 clip-sense.js 一份，界面不自己实现一遍。
 ipcMain.handle('clip:rules-parse', (_e, text) => clipSense.parseRulesText(text));
@@ -2347,6 +2365,23 @@ function bootstrapApp() {
       createTray();
     } catch (e) {
       logLine('tray', '托盘创建失败: ' + ((e && e.stack) || e));
+    }
+    // 启动时发现配置读不出来 → 现在就告诉用户，别让他以为「设置全没了」是自己的错觉。
+    // 只提示一次（pendingConfigNotice 在 loadConfig 里按内容指纹去重后才会入队）。
+    if (pendingConfigNotice.length) {
+      const where = pendingConfigNotice[pendingConfigNotice.length - 1];
+      pendingConfigNotice.length = 0;
+      const body = where
+        ? `config.json 读不出来，原始内容已备份成 ${path.basename(where)}，当前按默认配置运行。`
+        : 'config.json 读不出来，而且备份也没写成功 —— 当前按默认配置运行，请不要急着保存设置。';
+      try {
+        if (Notification.isSupported()) {
+          new Notification({ title: '小问助手 · 配置读不出来', body }).show();
+        } else if (tray && !tray.isDestroyed()) {
+          tray.displayBalloon({ icon: getTrayIcon(), title: '小问助手 · 配置读不出来', content: body });
+        }
+      } catch (e) { /* 通知失败不影响启动 */ }
+      logLine('config', '配置读不出来：' + body);
     }
     // 截图配置要先绑定：registerHotkeys 里注册截图快捷键时会读它
     try {
