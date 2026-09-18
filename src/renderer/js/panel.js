@@ -2488,6 +2488,15 @@ function bindSchedule() {
     setToast($('schEnabled').checked ? '定时任务已开启' : '定时任务已暂停');
   });
 
+  // 并发上限。这里**不自己夹值**：真正的夹取在 schedule.js 的 maxConcurrency()，
+  // 界面只负责把选中的数字原样写进配置；显示时以主进程夹过的 status().concurrency 为准
+  // （否则「界面显示 4、实际跑 2」这种不一致迟早出现）。
+  $('schConc').addEventListener('change', async () => {
+    const n = Number($('schConc').value) || 2;
+    cfg = await window.xw.setConfig({ schedConcurrency: n });
+    setToast(`并发上限改成 ${n}，超出的任务会排队等着`);
+  });
+
   $('schAdd').addEventListener('click', async () => {
     const title = $('schTitle').value.trim();
     const prompt = $('schPrompt').value.trim();
@@ -2542,6 +2551,86 @@ function bindSchedule() {
   }
 }
 
+/** 时刻 → HH:mm（概览里只关心几点） */
+function schClock(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * 把主进程 `schedule.status()` 的结果画成「调度概览」。
+ *
+ * 这四样数据（排队几个 / 并发上限 / 接下来 5 次几点跑 / 最近 20 条运行记录）
+ * 主进程的 `status()` **早就算好了**，preload 也早就暴露成 `xw.scheduleStatus()` ——
+ * 但渲染层一次都没调用过：面板只拿 `scheduleList()`，于是这些数字只活在内存里。
+ * 主人想问的两个问题（「现在是不是在跑」「几点会跑」）在界面上都没有答案。
+ *
+ * 顺带修掉一个真缺陷：面板自己维护的 `schRunning` 是**本地乐观标记**，
+ * 只在收到 start/done 事件时更新 —— 面板一重载它就是空的，正在跑的任务
+ * 会被显示成空闲、连「跑一次」按钮都重新可点。现在以主进程的 `running` 为准。
+ */
+function renderScheduleOverview(st) {
+  const box = $('schOverview');
+  if (!box) return;
+  if (!st) {
+    box.innerHTML = '<div class="sch-ov-empty">读不到调度状态（主进程没起来？）</div>';
+    return;
+  }
+  const chip = (label, value, warn) =>
+    `<span class="sch-ov-chip${warn ? ' warn' : ''}">${escapeHtml(label)}<b>${escapeHtml(String(value))}</b></span>`;
+
+  const running = (st.running || []).length;
+  const badges = [
+    chip('启用任务', `${st.active}/${st.total}`),
+    chip('运行中', running),
+    chip('排队', st.queued, st.queued > 0),
+    chip('并发上限', st.concurrency),
+    chip('调度', st.enabled ? '开' : '关', !st.enabled)
+  ].join('');
+
+  const next = (st.next || []).length
+    ? `<ul class="sch-ov-next">${st.next.map((n) =>
+        `<li>· ${escapeHtml(schClock(n.nextAt))} · ${escapeHtml(n.title || '')}<span class="sch-ov-empty"> ${escapeHtml(n.whenText || '')}</span></li>`
+      ).join('')}</ul>`
+    : '<div class="sch-ov-empty">还没有排上队的任务</div>';
+
+  const log = (st.log || []).length
+    ? `<ul class="sch-ov-log">${st.log.map((e) =>
+        `<li class="${e.ok === false ? 'bad' : ''}">· ${escapeHtml(schClock(e.at))} · ${escapeHtml(e.title || '')}` +
+        `${e.queued ? '（排过队）' : ''}${e.ok === false ? ' · 失败' : ''}` +
+        `${e.text ? ' · ' + escapeHtml(String(e.text).slice(0, 60)) : ''}</li>`
+      ).join('')}</ul>`
+    : '<div class="sch-ov-empty">还没有运行记录</div>';
+
+  box.innerHTML = `
+    <div class="sch-ov-row">${badges}</div>
+    <div class="sch-ov-label">接下来 ${(st.next || []).length} 次</div>${next}
+    <div class="sch-ov-label">最近运行（倒序，最多 20 条）</div>${log}`;
+}
+
+/**
+ * 把主进程 `status()` 的 `running` / `runningInfo` 还原成面板本地那份
+ * 「taskId → 开始时刻」的表。
+ *
+ * 单独抽出来是为了能被测：面板跑不了 Electron，但「主进程说在跑 → 界面认为在跑、
+ * 且秒数接着往上走」这件事本身是纯映射，可以在 Node 里直接喂假数据验。
+ *
+ * `runningInfo` 给的 `elapsedMs`，换算回开始时刻 —— 存开始时刻而不是已用时长，
+ * 是因为条目上的秒数要自己往上走，不能停在查询那一刻。
+ */
+function schRunningFromStatus(st) {
+  const m = new Map();
+  if (!st) return m;
+  const info = {};
+  (st.runningInfo || []).forEach((x) => { info[x.id] = x; });
+  (st.running || []).forEach((id) => {
+    const ms = info[id] ? Number(info[id].elapsedMs) || 0 : 0;
+    m.set(id, Date.now() - ms);
+  });
+  return m;
+}
+
 async function fillSchedule() {
   const box = $('schList');
   if (!box) return;
@@ -2550,13 +2639,30 @@ async function fillSchedule() {
   try { list = await window.xw.scheduleList(); } catch (e) { list = []; }
   schCache = list;
 
+  /* 「运行中」以主进程为准：本地那份 schRunning 只在收到事件时更新，
+     面板一重载就空了 —— 正在跑的任务会被显示成空闲，按钮也重新可点。 */
+  let st = null;
+  try { st = await window.xw.scheduleStatus(); } catch (e) { st = null; }
+  schRunning.clear();
+  schRunningFromStatus(st).forEach((at, id) => { schRunning.set(id, at); });
+  renderScheduleOverview(st);
+
+  /* 并发上限的回显走 status().concurrency（主进程夹取后的真值）。
+     值不在选项里就保持原样 —— 不硬塞一个不存在的选项，select 会变成空白。 */
+  if (st && $('schConc')) {
+    const v = String(st.concurrency);
+    if (Array.from($('schConc').options).some((o) => o.value === v)) $('schConc').value = v;
+  }
+
   if (!list.length) {
     box.innerHTML = '<div class="hint">还没有任务。点上面「加一个常用模板」就能立刻有「每日早报 / 久坐提醒 / 收盘复盘」。</div>';
     return;
   }
 
+  const queuedIds = (st && Array.isArray(st.queuedIds)) ? st.queuedIds : [];
   box.innerHTML = list.map((t) => {
     const isRunning = schRunning.has(t.id);
+    const isQueued = queuedIds.includes(t.id);
     const elapsed = isRunning ? Math.round((Date.now() - schRunning.get(t.id)) / 1000) : 0;
     const last = t.lastResult
       ? `<div class="sched-prompt">上次${t.lastOk === false ? '失败' : ''}：${escapeHtml(String(t.lastResult).slice(0, 80))}</div>`
@@ -2564,13 +2670,13 @@ async function fillSchedule() {
     return `
     <div class="sched-item${t.enabled === false ? ' off' : ''}${isRunning ? ' running' : ''}">
       <div class="sched-main">
-        <div class="sched-title">${escapeHtml(t.title)}${t.source === 'ai' ? '<span class="tag-ai">小问自排</span>' : ''}${isRunning ? `<span class="tag-run">运行中 ${elapsed}s</span>` : ''}</div>
+        <div class="sched-title">${escapeHtml(t.title)}${t.source === 'ai' ? '<span class="tag-ai">小问自排</span>' : ''}${isRunning ? `<span class="tag-run">运行中 ${elapsed}s</span>` : ''}${isQueued && !isRunning ? '<span class="tag-queue">排队中</span>' : ''}</div>
         <div class="sched-meta">${escapeHtml(t.whenText)} · ${escapeHtml(t.etaText)}${t.runCount ? ` · 已执行 ${t.runCount} 次` : ''}</div>
         <div class="sched-prompt">${escapeHtml(String(t.prompt || '').slice(0, 90))}</div>
         ${last}
       </div>
       <div class="sched-ops">
-        <button class="btn-mini" data-act="run" data-id="${t.id}"${isRunning ? ' disabled' : ''}>${isRunning ? '跑着呢' : '跑一次'}</button>
+        <button class="btn-mini" data-act="run" data-id="${t.id}"${isRunning || isQueued ? ' disabled' : ''}>${isRunning ? '跑着呢' : (isQueued ? '已排队' : '跑一次')}</button>
         <button class="btn-mini" data-act="toggle" data-id="${t.id}">${t.enabled === false ? '启用' : '暂停'}</button>
         <button class="btn-mini danger" data-act="del" data-id="${t.id}">删除</button>
       </div>
@@ -2587,9 +2693,12 @@ async function fillSchedule() {
         const r = await window.xw.scheduleRun(id);
         if (r && r.ok === false) {
           setToast(`没能开跑：${r.error || '未知原因'}`);
+        } else if (r && r.queued) {
+          // 排队 ≠ 在跑：不要把它算进「运行中」，否则界面上的秒数会凭空开始涨
+          setToast(r.deduped ? '它已经在队列里了，前面的跑完就轮到它' : '前面还有任务在跑，已排队');
         } else {
           schRunning.set(id, Date.now());
-          setToast(r && r.queued ? '前面还有任务在跑，已排队' : '已经开跑了，结果会主动告诉你');
+          setToast('已经开跑了，结果会主动告诉你');
         }
       } else if (act === 'toggle') {
         await window.xw.scheduleUpdate(id, { enabled: item ? item.enabled === false : true });
@@ -4152,6 +4261,7 @@ function collectPatch() {
     petAgentLink: $('stPetAgentLink').checked,
     // ---- 定时任务 ----
     schedEnabled: $('schEnabled').checked,
+    schedConcurrency: Number($('schConc').value) || 2,
     // ---- 主动关注 ----
     watchEnabled: $('wEnabled').checked,
     watchQuake: $('wQuake').checked,

@@ -853,6 +853,17 @@
             <label><b>启用定时任务</b></label>
             <label class="switch"><input type="checkbox" id="schEnabled" /><span></span></label>
           </div>
+          <!-- 此前 `schedConcurrency` 只被 schedule.js 读、没有任何地方能改，
+               README 却写着「可调 1–4」—— 那句话底下当时是空的。 -->
+          <div class="field row">
+            <label><b>同时最多跑几个</b><span class="hint-inline">超出的排队，不会丢</span></label>
+            <select id="schConc">
+              <option value="1">1 个（一个跑完再跑下一个）</option>
+              <option value="2">2 个（默认）</option>
+              <option value="3">3 个</option>
+              <option value="4">4 个（最多）</option>
+            </select>
+          </div>
 
           <h3>新建任务</h3>
           <div class="field">
@@ -901,6 +912,9 @@
             <button class="btn-primary" id="schAdd">添加任务</button>
             <button class="btn-ghost" id="schPreset">加一个常用模板</button>
           </div>
+
+          <h3>调度概览</h3>
+          <div class="sched-overview" id="schOverview"></div>
 
           <h3>任务列表</h3>
           <div class="sched-list" id="schList"></div>

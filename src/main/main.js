@@ -402,6 +402,7 @@ const DEFAULT_CONFIG = {
   orchReview: true,              // 跑完由主代理复核一遍结果（设置页有这个开关）
   // ---- 定时任务 ----
   schedEnabled: true,            // 到点自动执行并播报
+  schedConcurrency: 2,           // 同时最多跑几个（1–4，超出排队）；读它的只有 schedule.js 的 maxConcurrency()
   // ---- 会议自动记录（检测会议 / 通话并自动记纪要）----
   // 检测靠三个客观信号：谁占着麦克风/摄像头（Windows 注册表）、进程列表、窗口标题。
   // 详细判定逻辑见 src/main/jarvis/meeting-detect.js。

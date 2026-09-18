@@ -1154,6 +1154,28 @@ body { border-radius: 0; }
   background: var(--brand-soft, #eef3ff); border-radius: 5px; padding: 1px 5px;
 }
 
+/* 调度概览：队列 / 并发上限 / 未来 5 次触发 / 运行历史。
+   四样数据主进程的 schedule.status() 早就算好了，此前界面上一样都看不到。 */
+.sched-overview { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.sch-ov-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.sch-ov-chip {
+  font-size: 11px; color: var(--text-2, #6b7280);
+  background: var(--bg-soft, #f6f7f9); border: 1px solid var(--border, #e5e7eb);
+  border-radius: 7px; padding: 3px 7px;
+}
+.sch-ov-chip b { color: var(--text); font-weight: 600; margin-left: 4px; }
+.sch-ov-chip.warn { border-color: #f59e0b; color: #b45309; }
+.sch-ov-label { font-size: 11px; color: var(--text-3, #9ca3af); margin-top: 4px; }
+.sch-ov-next, .sch-ov-log {
+  list-style: none; margin: 0; padding: 0;
+  font-size: 11px; color: var(--text-2, #6b7280);
+}
+.sch-ov-next li, .sch-ov-log li {
+  margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sch-ov-log li.bad { color: #ef4444; }
+.sch-ov-empty { font-size: 11px; color: var(--text-3, #9ca3af); }
+
 /* 星期多选 */
 .weekday-picker { display: flex; gap: 6px; flex-wrap: wrap; }
 .weekday-picker .wd {
@@ -1188,6 +1210,15 @@ body { border-radius: 0; }
   margin-left: 6px; animation: pulseRun 1.6s ease-in-out infinite;
 }
 @keyframes pulseRun { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* 「排队中」：还没轮到跑。刻意不加呼吸动画 —— 它在等，不是在动。
+   底色沿用 .tag-ai 的 --brand-soft，用虚线边框把「等」和「在跑」区分开。 */
+.tag-queue {
+  font-size: 10px; font-weight: 600; color: var(--brand);
+  background: var(--brand-soft, #eef3ff);
+  border: 1px dashed var(--brand, #3b82f6);
+  border-radius: 5px; padding: 0 5px; margin-left: 6px;
+}
 
 /* ============================================================
    工作台：一张卡 = 一件事（替代一问一答的气泡流）

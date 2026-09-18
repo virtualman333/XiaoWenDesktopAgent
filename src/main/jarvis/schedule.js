@@ -111,6 +111,11 @@ function update(id, patch = {}) {
   if (patch.enabled != null) t.enabled = !!patch.enabled;
   t.nextAt = t.enabled ? T.computeNext(t.when, Date.now(), t.lastRunAt) : 0;
   save(d);
+  // 暂停 = 「先别跑」。还没轮到的不该等暂停之后再自己跑起来。
+  if (patch.enabled === false) {
+    const dropped = unqueue(id);
+    if (dropped) log(`「${t.title}」已暂停，队列里 ${dropped} 条待跑一并撤掉`);
+  }
   return { ok: true, task: { ...t, whenText: T.describeWhen(t.when) } };
 }
 
@@ -119,7 +124,10 @@ function remove(id) {
   const before = d.tasks.length;
   d.tasks = d.tasks.filter((t) => t.id !== id);
   save(d);
-  return { ok: d.tasks.length < before };
+  // 还没轮到就跑的，跟着一起撤掉（不然删了之后过一会儿还会被跑出来、还会播报）
+  const dropped = unqueue(id);
+  if (dropped) log(`「${id}」已从队列里撤掉 ${dropped} 条待跑`);
+  return { ok: d.tasks.length < before, unqueued: dropped };
 }
 
 function get(id) {
@@ -248,8 +256,13 @@ function finish(task, opts, { ok, text, startedAt, queued }) {
   return { ok, text, ms };
 }
 
-/** 真正跑一轮 Agent（不含回执与落地） */
-async function work(task, opts, startedAt) {
+/**
+ * 真正跑一轮 Agent（不含回执与落地）。
+ *
+ * `queued` 是「这一轮之前排过队」的标记 —— 一路透传到 `finish()`，落进运行历史。
+ * 没有它，主人只看到「这次跑了 90 秒」，看不出慢是因为**在队里等了**。
+ */
+async function work(task, opts, startedAt, queued) {
   const c = cfg();
   let text = '';
   let ok = false;
@@ -300,13 +313,33 @@ async function work(task, opts, startedAt) {
     if (slowHint) clearTimeout(slowHint);
   }
 
-  return finish(task, opts, { ok, text, startedAt });
+  return finish(task, opts, { ok, text, startedAt, queued });
+}
+
+/** 这个任务是不是已经躺在队列里了（还没轮到） */
+function queued(id) { return queue.some((q) => q.task.id === id); }
+
+/** 把某个任务还没轮到的排队项全部摘掉，返回摘掉几条 */
+function unqueue(id) {
+  let n = 0;
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    if (queue[i].task.id === id) { queue.splice(i, 1); n += 1; }
+  }
+  return n;
 }
 
 /** 下一个排队任务（并发限流） */
 function pump() {
   while (active < maxConcurrency() && queue.length) {
     const next = queue.shift();
+    /* 兜底：排队期间任务可能已经被删掉（主人点了删除，或别处改了 schedules.json）。
+       删掉的任务不但不该跑，更不该主动播报 ——「我删了它，结果它还是来敲我」最烦人。
+       临时任务（runOnce）本来就不落库，用 transient 标出来，不能按「不存在」处理。 */
+    if (!next.transient && !get(next.task.id)) {
+      log(`「${next.task.title}」在排队期间已不存在，跳过`);
+      emit({ type: 'drop', id: next.task.id, title: next.task.title, why: 'gone' });
+      continue;
+    }
     runNow_(next.task, next.opts, true);
   }
 }
@@ -316,7 +349,7 @@ function runNow_(task, opts, queued) {
   runningSince.set(task.id, Date.now());
   const startedAt = Date.now();
   armAck(task, opts);
-  return work(task, opts, startedAt)
+  return work(task, opts, startedAt, queued)
     .catch((e) => ({ ok: false, text: (e && e.message) || String(e) }))
     .finally(() => {
       clearAck(task.id);
@@ -335,6 +368,14 @@ function runTask(task, opts = {}) {
   if (runningSince.has(task.id)) {
     return Promise.resolve({ ok: false, error: '这个任务正在执行中', running: true });
   }
+  /* 已经在队里了就不要排第二份。
+     README 写着「同一任务重复触发只跑一份」，而上面那道闸只挡得住**正在跑**的：
+     并发满的时候连点两次「跑一次」，队列里会躺着两条一模一样的东西，
+     前一个跑完 pump 会把同一个任务接着再跑一遍（结论也再播报一次）。 */
+  if (queued(task.id)) {
+    log(`「${task.title}」已经在队列里了，不重复排`);
+    return Promise.resolve({ ok: true, queued: true, deduped: true, text: '已经在队列里了，马上开跑' });
+  }
 
   const c = cfg();
   if (!c.apiKey || !c.model) {
@@ -345,7 +386,7 @@ function runTask(task, opts = {}) {
   if (!opts.noAck) emitStart(task, opts);
 
   if (active >= maxConcurrency()) {
-    queue.push({ task, opts });
+    queue.push({ task, opts, transient: !!opts.transient });
     log(`「${task.title}」已排队（当前并发 ${active}/${maxConcurrency()}）`);
     return Promise.resolve({ ok: true, queued: true, text: '已排队，马上开跑' });
   }
@@ -369,7 +410,10 @@ async function runNow(id) {
 
 /** 把某个任务的 prompt 直接当一次性任务跑一次（不落库） */
 async function runOnce(title, prompt) {
-  return runTask({ id: 'adhoc-' + Date.now().toString(36), title: title || '临时任务', prompt, wake: true }, { manual: true });
+  return runTask(
+    { id: 'adhoc-' + Date.now().toString(36), title: title || '临时任务', prompt, wake: true },
+    { manual: true, transient: true }   // transient：不在库里，pump 不能按「已删除」把它丢掉
+  );
 }
 
 function runningIds() { return Array.from(runningSince.keys()); }
@@ -458,6 +502,10 @@ function stop() {
   timer = null;
   ackTimers.forEach((t) => clearTimeout(t));
   ackTimers.clear();
+  // 应用要退了，队列里那些还没轮到的直接作废 —— 留着只会在下次 start() 后
+  // 被 pump 跑出来（隔了一次重启的任务结果冒出来，时间上已经毫无意义）
+  if (queue.length) log(`退出：作废 ${queue.length} 条排队中的任务`);
+  queue.length = 0;
 }
 
 function status() {
@@ -475,6 +523,9 @@ function status() {
     running: runningIds(),
     runningInfo: runningInfo(),
     queued: queue.length,
+    // 哪几个在排队 —— 只有个数的话，界面上只能显示「有 1 个在排队」，
+    // 看不出是哪个任务，也没法在那一行上标「排队中」
+    queuedIds: queue.map((q) => q.task.id),
     concurrency: maxConcurrency(),
     log: d.log.slice(-20).reverse()
   };
