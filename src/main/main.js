@@ -13,6 +13,8 @@ const pet = require('./pet');
 // 截图（全屏 / 框选）与自动更新
 const capture = require('./capture');
 const updater = require('./updater');
+// 自动更新的默认值与判据（纯函数、可单测）—— 默认值只此一份，别再往下面那张表里抄一遍
+const updaterPlan = require('./updater-plan');
 const meeting = require('./meeting');
 // 桌面入口规则：悬浮球 ⇄ 宠物 谁上场（纯函数，可单测）
 const entry = require('./entry');
@@ -386,13 +388,11 @@ const DEFAULT_CONFIG = {
   captureAfter: 'ask',           // ask=存盘+复制+打开面板附图 / save=只存盘 / clipboard=只复制 / none=只存盘不复制
   captureDir: '',                // 留空则用「图片/小问截图」
   // ---- 自动更新 ----
-  autoUpdate: true,              // 启动时静默检查
-  autoUpdateSilent: true,        // 有更新就后台下载，下完再问
-  autoUpdatePrerelease: false,   // 是否接收预发布版本
-  autoUpdateInstallOnQuit: true, // 退出时自动应用已下载的更新
-  autoUpdateNotify: true,        // 下载完成后弹窗提醒
-  autoUpdateSilentInstall: true, // 静默安装：不弹 NSIS 安装界面，装完自动拉起
-  autoUpdateInstallWhenIdle: true, // 空闲时自动重启安装（不打断主人干活）
+  // 默认值的**唯一来源**是 src/main/updater-plan.js 的 DEFAULTS（设置页与 updater.js
+  // 都从那里对齐）。此前这 7 个键在 main.js / 设置页 / updater.js 三处各写了一遍默认值，
+  // 而 config.example.json 里还漏了 autoUpdateSilentInstall 与 autoUpdateInstallWhenIdle
+  // —— 照着示例配置抄的用户根本不知道有这两个设置。
+  ...updaterPlan.DEFAULTS,
   // ---- 子代理编排（常任务自动分配）----
   orchEnabled: true,             // 开启后复杂任务自动拆分给子代理
   orchMaxTasks: 6,               // 一次最多拆几个子任务

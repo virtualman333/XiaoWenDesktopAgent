@@ -40,6 +40,8 @@
   "autoUpdatePrerelease": false,
   "autoUpdateInstallOnQuit": true,
   "autoUpdateNotify": true,
+  "autoUpdateSilentInstall": true,
+  "autoUpdateInstallWhenIdle": true,
   "orchEnabled": true,
   "orchAutoDelegate": true,
   "orchReview": true,

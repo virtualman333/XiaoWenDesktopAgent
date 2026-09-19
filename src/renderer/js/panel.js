@@ -4103,6 +4103,7 @@ function bindCapture() {
     upSilent: 'autoUpdateSilent',
     upSilentInstall: 'autoUpdateSilentInstall',
     upIdleInstall: 'autoUpdateInstallWhenIdle',
+    upNotify: 'autoUpdateNotify',
     upOnQuit: 'autoUpdateInstallOnQuit',
     upPre: 'autoUpdatePrerelease'
   };
@@ -4196,6 +4197,7 @@ function fillCapture() {
   setChk('upSilent', cfg.autoUpdateSilent !== false);
   setChk('upSilentInstall', cfg.autoUpdateSilentInstall !== false);
   setChk('upIdleInstall', cfg.autoUpdateInstallWhenIdle !== false);
+  setChk('upNotify', cfg.autoUpdateNotify !== false);
   setChk('upOnQuit', cfg.autoUpdateInstallOnQuit !== false);
   setChk('upPre', cfg.autoUpdatePrerelease === true);
   window.xw.captureHotkeys().then(renderHotkeyState).catch(() => {});

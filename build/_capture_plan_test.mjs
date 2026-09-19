@@ -22,6 +22,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripComments } from './_strip_comments.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,36 +35,13 @@ const eq = (a, b, name) => ok(a === b, name, `期望 ${JSON.stringify(b)}，实�
 const section = (s) => console.log('\n' + s);
 
 /**
- * 剥掉 `//` 行注释与 `/* *\/` 块注释（跳过字符串字面量）。
+ * 剥注释的实现在 `./_strip_comments.mjs`。
  *
  * 这个测试里第一个「读源码做判定」的锁需要它：`capture.js` 的注释里正大光明地写着旧判据
  * `after !== 'none'`，不剥注释就会把注释当实现、判红正确的代码（本仓第 9 / 19 轮各踩过一次）。
- * 出现第二个消费者时再抽成共用模块，现在不提前抽。
+ * 当时只有一个消费者，注释里写的是「出现第二个消费者时再抽成共用模块」——
+ * 第 25 轮 `_updater_plan_test.mjs` 成了第二个消费者，于是它被抽走了。
  */
-function stripComments(src) {
-  let out = '';
-  let i = 0;
-  let quote = null;
-  while (i < src.length) {
-    const c = src[i];
-    const n = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += c + (n === undefined ? '' : n); i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c; i += 1; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i += 1; continue; }
-    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') i += 1; continue; }
-    if (c === '/' && n === '*') {
-      i += 2;
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i += 1;
-      i += 2; continue;
-    }
-    out += c; i += 1;
-  }
-  return out;
-}
-
 const readSrc = (rel) => fs.readFileSync(path.join(ROOT_DIR, rel), 'utf8');
 
 /** 从设置页里解析某个 <select> 的选项（value + 标签原文） */

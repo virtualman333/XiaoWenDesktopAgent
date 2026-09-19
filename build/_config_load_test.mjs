@@ -242,12 +242,35 @@ section('9. ★ 设置界面会写的键，DEFAULT_CONFIG 必须都有');
   ok(start > 0, '能定位 DEFAULT_CONFIG');
   const lines = mainSrc.slice(start).split('\n');
   const defaultKeys = [];
+  // 键有两种来源：行首的对象字面量 `key:`，以及 `...someModule.DEFAULTS,` 这种展开。
+  // **展开必须跟着解** —— 否则「把默认值收敛到唯一来源」这个改动本身会让下面那条
+  // 「config.example.json 里没有假键」误判成 7 个假键（本轮就撞了一次）。
+  // 别名 → 文件 的映射从 main.js 自己的 require 现算，不手抄映射表。
+  const aliasToFile = new Map();
+  for (const m of mainSrc.matchAll(/const\s+(\w+)\s*=\s*require\(\s*['"](\.\/[\w./-]+)['"]\s*\)/g)) {
+    aliasToFile.set(m[1], path.join(ROOT, 'src/main', m[2]));
+  }
+  const spreads = [];
   for (let n = 1; n < lines.length; n++) {
     if (/^};/.test(lines[n])) break;
     const m = /^ {2}(\w+):/.exec(lines[n]);
-    if (m) defaultKeys.push(m[1]);
+    if (m) { defaultKeys.push(m[1]); continue; }
+    const sp = /^ {2}\.\.\.(\w+)\.(\w+)\s*,/.exec(lines[n]);
+    if (sp) spreads.push([sp[1], sp[2]]);
+  }
+  ok(spreads.length > 0, `DEFAULT_CONFIG 里有 ${spreads.length} 处展开（键的另一半来源）`,
+    '一处都没解析到的话，下面那条「展开进来的键得算数」会在空集上通过');
+  for (const [alias, prop] of spreads) {
+    const file = aliasToFile.get(alias);
+    ok(!!file, `认得出展开 ${alias} 是从哪个文件 require 的`, `main.js 的 require 表里没有 ${alias}`);
+    if (!file) continue;
+    const keys = Object.keys(require(file)[prop] || {});
+    ok(keys.length > 0, `展开的 ${alias}.${prop} 是非空对象`, `拿到 ${keys.length} 个键`);
+    defaultKeys.push(...keys);
   }
   ok(defaultKeys.length > 50, 'DEFAULT_CONFIG 解析出足够的键', `只解析到 ${defaultKeys.length} 个`);
+  ok(defaultKeys.includes('autoUpdateNotify'),
+    '★ 从 updater-plan.DEFAULTS 展开进来的键也算 DEFAULT_CONFIG 的键（否则收敛默认值的那次改动会让这条锁失效）');
 
   const panelSrc = fs.readFileSync(path.join(ROOT, 'src/renderer/js/panel.js'), 'utf-8');
 

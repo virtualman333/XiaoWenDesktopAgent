@@ -24,6 +24,7 @@
     "test:packed-deps": "node build/_packed_deps_test.mjs",
     "test:tools": "node build/_tools_test.mjs",
     "test:capture": "node build/_capture_plan_test.mjs",
+    "test:updater": "node build/_updater_plan_test.mjs",
     "release:upload": "node build/gh-release.mjs",
     "version:bump": "node build/bump-version.mjs",
     "test:llm": "node build/_llm_test.mjs",
@@ -40,7 +41,7 @@
     "probe:meeting": "node build/_meeting_live_probe.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
     "test": "npm run test:all",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:config && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:schedule && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run test:tools && npm run test:capture && npm run check:deps && npm run check:tests && npm run test:packed-deps"
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:config && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:schedule && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run test:tools && npm run test:capture && npm run test:updater && npm run check:deps && npm run check:tests && npm run test:packed-deps"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",

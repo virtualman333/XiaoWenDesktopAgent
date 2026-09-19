@@ -6,8 +6,21 @@
  *   2) 状态机 idle → checking → available → downloading → downloaded / error；
  *   3) 所有状态通过 updater:event 广播给每个窗口，界面自己决定怎么展示；
  *   4) 下载完成后不强制重启，等主人点「立即安装」或下次启动时生效。
+ *
+ * 「该怎么决策」全在 `updater-plan.js`（纯函数、零 electron 依赖）：
+ * 默认值、四个开关的语义、报错翻译、空闲安装的判据、下完之后走哪条路 —— 都在那边，
+ * 因为这个文件第一行就 `require('electron')`，纯 Node 加载不了它，**任何断言都写不进来**。
+ * 本文件只负责「接线」：把 electron-updater 的事件接到那些判据上。
  */
 const { app, ipcMain, BrowserWindow, dialog, powerMonitor } = require('electron');
+const {
+  IDLE_POLL_MS,
+  afterDownloaded,
+  autoUpdaterOptions,
+  friendlyError,
+  installSilently,
+  shouldIdleInstall
+} = require('./updater-plan');
 
 let autoUpdater = null;
 try {
@@ -57,20 +70,7 @@ function getState() {
   return { ...state, currentVersion: app.getVersion() };
 }
 
-/** 把 electron-updater 的英文报错翻成人话 */
-function friendlyError(err) {
-  const msg = String((err && err.message) || err || '未知错误');
-  if (/ENOENT|no such file|app-update.yml|404/i.test(msg)) {
-    return '发布源里还没有可用的更新包（需在 GitHub Releases 上传新版本）。';
-  }
-  if (/net::|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|network/i.test(msg)) {
-    return '连不上更新服务器，请检查网络后重试。';
-  }
-  if (/code\s*signature|signature/i.test(msg)) {
-    return '更新包签名校验失败。';
-  }
-  return msg.slice(0, 300);
-}
+/** 把 electron-updater 的英文报错翻成人话 —— 判据在 updater-plan.js，这里只做转发 */
 
 function bindEvents() {
   if (!available) return;
@@ -106,24 +106,31 @@ function bindEvents() {
   autoUpdater.on('update-downloaded', (info) => {
     pendingVersion = (info && info.version) || '';
     const cfg = getConfig() || {};
-    const silentInstall = cfg.autoUpdateSilentInstall !== false;
+    // 「下完之后走哪条路」是一个判据，不是一段散在事件回调里的 if —— 见 updater-plan.js
+    const plan = afterDownloaded(cfg, pendingVersion);
     setState({
       state: 'downloaded',
-      message: silentInstall
-        ? `v${pendingVersion} 已就绪，空闲时会自动静默安装`
-        : `v${pendingVersion} 已下载完成，重启后生效`,
+      message: plan.message,
       version: pendingVersion,
       percent: 100
     });
 
-    // 静默安装模式下：不弹任何对话框（那是最打断人的东西），只做轻提示。
-    // 安装时机交给「空闲自动安装」或主人主动点 / 退出时。
-    if (silentInstall) {
-      try {
-        notify(`新版本 v${pendingVersion} 已下好，你手头没事的时候我会自动静默装好并重启。`);
-      } catch (e) { /* ignore */ }
-      startIdleWatch();
-    } else if (cfg.autoUpdateNotify !== false) {
+    // ⚠ `autoUpdateNotify` 此前只在这段的第一支之外被读，而 `autoUpdateSilentInstall`
+    // 默认是 true —— 于是**默认路径下「下载完成后弹窗提醒」这个开关完全不生效**
+    // （用户关了照样弹，设置页里还根本没有这个勾选框）。现在两条路都先问它。
+    if (plan.silentInstall) {
+      // 静默安装：不弹任何对话框（那是最打断人的东西），最多一条轻提示。
+      // 安装时机交给「空闲自动安装」或主人主动点 / 退出时 —— 与要不要提醒无关。
+      if (plan.lightNotify) {
+        try {
+          notify(`新版本 v${pendingVersion} 已下好，你手头没事的时候我会自动静默装好并重启。`);
+        } catch (e) { /* ignore */ }
+      }
+      if (plan.startIdleWatch) startIdleWatch();
+      return;
+    }
+
+    if (plan.askDialog) {
       // 非静默模式：老老实实问一句，主人点「立即」才走带界面的安装
       try {
         dialog.showMessageBox({
@@ -177,10 +184,8 @@ async function checkOnBoot() {
 }
 
 function applyOptions(cfg) {
-  autoUpdater.autoDownload = cfg.autoUpdateSilent !== false; // 默认静默下载，下完再问
-  autoUpdater.allowPrerelease = cfg.autoUpdatePrerelease === true;
-  autoUpdater.autoInstallOnAppQuit = cfg.autoUpdateInstallOnQuit !== false;
-  autoUpdater.disableDifferentialDownload = false;
+  // 选项怎么来的在 updater-plan.autoUpdaterOptions（判据可单测），这里只落下去
+  Object.assign(autoUpdater, autoUpdaterOptions(cfg));
 }
 
 async function checkManual() {
@@ -217,10 +222,9 @@ function downloadNow() {
 function installNow(silent) {
   if (!configured()) return false;
   const cfg = getConfig() || {};
-  // silent 默认跟着设置走：静默安装不弹 NSIS 向导，装完 forceRunAfter 自动拉起
-  const isSilent = typeof silent === 'boolean'
-    ? silent
-    : cfg.autoUpdateSilentInstall !== false;
+  // silent 默认跟着设置走：静默安装不弹 NSIS 向导，装完 forceRunAfter 自动拉起。
+  // 「显式布尔优先、否则跟设置」这条判据在 updater-plan.installSilently（可单测）。
+  const isSilent = installSilently(cfg, silent);
   if (installKicked) return true;
   installKicked = true;
   try {
@@ -239,21 +243,24 @@ function installNow(silent) {
 /**
  * 空闲自动安装：主人在忙的时候（有键鼠输入）绝不重启，
  * 连续 IDLE_NEED 秒没有输入就静默装好并重启 —— 真正「无感」的升级。
+ *
+ * 判据本身在 `updater-plan.shouldIdleInstall`（可单测）；这里只是把它接到定时器上。
+ * `IDLE_NEED_SECONDS` / `IDLE_POLL_MS` 也都来自那边，免得阈值两处各写一个。
  */
-const IDLE_NEED = 90;   // 秒
 function startIdleWatch() {
   if (idleTimer) return;
   idleTimer = setInterval(() => {
-    const cfg = getConfig() || {};
-    if (cfg.autoUpdateInstallWhenIdle === false) return;
-    if (state.state !== 'downloaded' || installKicked) return;
     let idle = 0;
     try { idle = powerMonitor.getSystemIdleTime(); } catch (e) { return; }
-    if (idle >= IDLE_NEED) {
-      log(`已空闲 ${idle}s，静默安装 v${pendingVersion}`);
-      installNow(true);
-    }
-  }, 20000);
+    if (!shouldIdleInstall({
+      cfg: getConfig() || {},
+      state: state.state,
+      installKicked,
+      idleSeconds: idle
+    })) return;
+    log(`已空闲 ${idle}s，静默安装 v${pendingVersion}`);
+    installNow(true);
+  }, IDLE_POLL_MS);
   if (idleTimer.unref) idleTimer.unref();
 }
 
