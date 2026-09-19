@@ -22,7 +22,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stripComments } from './_strip_comments.mjs';
+import { stripComments, residueErrors } from './_strip_comments.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -148,6 +148,16 @@ const panel = stripComments(readSrc('src/renderer/js/panel.js'));
 ok(/r\.copied/.test(panel), '「立即截图」的提示读了主进程回报的 copied');
 ok(/已存到/.test(panel), '「立即截图」的提示读了主进程回报的 path');
 ok(!/已截图：'\s*\+\s*\(r\.path\s*\|\|\s*''\)/.test(panel), '旧的「已截图 + path」写法不得复活（没落盘时会报一个空路径）');
+
+/* 剥注释器总闸（第 25 轮补）：它扛着本文件**所有**读源码的判定，而它此前在 panel.js 上
+   几乎什么都没做（42 条唯一块注释留着 33 条，体量只减 1.5%）—— 于是上面那几条 lock 是
+   对着「带注释的源码」做的判定，注释里的旧代码随时能把它们判红或判绿。剥不干净必须
+   当场喊出来，而不是让结论悄悄变弱。 */
+for (const [label, src] of [['capture.js', readSrc('src/main/capture.js')],
+  ['panel.js', readSrc('src/renderer/js/panel.js')]]) {
+  const res = residueErrors(src, stripComments(src));
+  ok(res.length === 0, `剥注释器在 ${label} 上没有残留`, res[0]);
+}
 
 // ---------------- 汇总 ----------------
 console.log('\n' + '='.repeat(46));

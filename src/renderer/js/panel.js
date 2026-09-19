@@ -2439,7 +2439,6 @@ async function refreshTrayDiag() {
 let schCache = [];
 const schRunning = new Map();   // taskId -> 开始时间（本地乐观标记）
 let schTicker = null;
-let schLastDone = null;
 let curSettingsTab = 'general';
 
 function buildWeekdayPicker() {
@@ -2523,22 +2522,13 @@ function bindSchedule() {
     fillSchedule();
   });
 
-  // 任务在后台异步跑，界面靠事件跟上（开始 / 结束 / 排队）
+  // 任务在后台异步跑，界面靠事件跟上（开始 / 完成 / 摘掉）
   if (window.xw.onScheduleEvent) {
     window.xw.onScheduleEvent((p) => {
-      if (!p) return;
-      if (p.type === 'start') {
-        schRunning.set(p.id, Date.now());
-        if (!p.manual) setToast(`「${p.title}」到点了，正在办…`);
-      } else {
-        schRunning.delete(p.id);
-        if (!p.silent) {
-          setToast(p.ok === false
-            ? `「${p.title}」没办成：${String(p.text || '').slice(0, 40)}`
-            : `「${p.title}」办好了（${Math.round((p.ms || 0) / 1000)}s）`);
-        }
-        schLastDone = { id: p.id, at: Date.now() };
-      }
+      const plan = scheduleEventPlan(p);
+      if (plan.running === 'set') schRunning.set(p.id, Date.now());
+      else if (plan.running === 'clear') schRunning.delete(p.id);
+      if (plan.toast) setToast(plan.toast);
       if (curSettingsTab === 'schedule') fillSchedule();
     });
   }
@@ -2607,6 +2597,49 @@ function renderScheduleOverview(st) {
     <div class="sch-ov-row">${badges}</div>
     <div class="sch-ov-label">接下来 ${(st.next || []).length} 次</div>${next}
     <div class="sch-ov-label">最近运行（倒序，最多 20 条）</div>${log}`;
+}
+
+/**
+ * 一条 `schedule:event` 该让面板做什么 —— **纯函数**：只算动作，不碰 DOM、不改状态。
+ *
+ * 抽出来的理由和 `schRunningFromStatus()` 一样：面板本身跑不了 Node，但「哪种事件
+ * 对应哪种界面动作」是个纯映射，可以整段抽出来当场喂假数据真跑（见
+ * `build/_schedule_event_contract_test.mjs` 第 5 节）。
+ *
+ * 它替掉的是原来那个 `if (p.type === 'start') { ... } else { ... }`。那个形状有一个
+ * 具体的错处：**除了 `start` 之外的一切都被当成「跑完了」**。而主进程除了 `start` /
+ * `done` 还会发 `drop`（任务还在排队时就不见了）—— 于是删掉一个排队中的任务，面板会
+ * 弹一句「「X」办好了（0s）」：一次都没跑、也没有结论的任务被说成完成了。同时它在
+ * else 分支里读的 `p.silent` **三类事件谁都不带**，那个判断从来没有为假过。
+ *
+ * 所以这里按 `type` 穷举分派，并且**只读该类型确实携带的字段**（字段表在
+ * `src/main/schedule-event.js`，与这里两向对账）。
+ *
+ * @returns {{running: 'set'|'clear'|'none', toast: string|null}}
+ *   `running`：本地的「运行中」表怎么动；`toast`：要弹的提示，`null` 表示不弹。
+ */
+function scheduleEventPlan(p) {
+  if (!p || typeof p.type !== 'string') return { running: 'none', toast: null };
+  switch (p.type) {
+    case 'start':
+      // 手动点的「跑一次」不用再告诉他「到点了」
+      return { running: 'set', toast: p.manual ? null : `「${p.title}」到点了，正在办…` };
+    case 'done':
+      return {
+        running: 'clear',
+        toast: p.ok === false
+          ? `「${p.title}」没办成：${String(p.text || '').slice(0, 40)}`
+          : `「${p.title}」办好了（${Math.round((p.ms || 0) / 1000)}s）`
+      };
+    case 'drop':
+      // 它不是完成：任务在排队期间就被摘掉了（被删 / 被改 / 被暂停），
+      // 一次都没跑。说「办好了」是最坏的一种错 —— 听起来完全合理，但它是假的。
+      return { running: 'clear', toast: `「${p.title}」还没轮到就不见了，已从队列摘掉（没跑，也没有结论）` };
+    default:
+      // 协议里没有的类型：什么都不做（「多出来的类型没有分支」由契约测试两向拦住，
+      // 不靠这里猜）。
+      return { running: 'none', toast: null };
+  }
 }
 
 /**

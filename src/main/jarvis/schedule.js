@@ -10,6 +10,7 @@
  */
 const store = require('./store');
 const T = require('./schedule-time');
+const { evStart, evDone, evDrop } = require('../schedule-event');
 
 const FILE = 'schedules.json';
 const MAX_LOG = 60;
@@ -171,7 +172,7 @@ function emit(payload) {
  * 跑得快的任务一句结论就够了，免得「收到」和「结果」两条横幅连着弹。
  */
 function emitStart(task, opts = {}) {
-  emit({ type: 'start', id: task.id, title: task.title, manual: !!opts.manual });
+  emit(evStart(task, opts));
 }
 
 /** 回执：让主人知道「还在办」，而不是干等 */
@@ -252,7 +253,7 @@ function finish(task, opts, { ok, text, startedAt, queued }) {
     } catch (e) { /* 播报失败不影响任务本身 */ }
   }
 
-  emit({ type: 'done', id: task.id, title: task.title, ok, text, ms });
+  emit(evDone(task, { ok, text, ms }));
   return { ok, text, ms };
 }
 
@@ -334,10 +335,12 @@ function pump() {
     const next = queue.shift();
     /* 兜底：排队期间任务可能已经被删掉（主人点了删除，或别处改了 schedules.json）。
        删掉的任务不但不该跑，更不该主动播报 ——「我删了它，结果它还是来敲我」最烦人。
-       临时任务（runOnce）本来就不落库，用 transient 标出来，不能按「不存在」处理。 */
+       临时任务（runOnce）本来就不落库，用 transient 标出来，不能按「不存在」处理。
+       这条 `drop` **不是完成**：面板侧的分派（`scheduleEventPlan()`）按契约把它与
+       `done` 分开，不许说「办好了」—— 它一次都没跑，也不会有结论。 */
     if (!next.transient && !get(next.task.id)) {
       log(`「${next.task.title}」在排队期间已不存在，跳过`);
-      emit({ type: 'drop', id: next.task.id, title: next.task.title, why: 'gone' });
+      emit(evDrop(next.task, 'gone'));
       continue;
     }
     runNow_(next.task, next.opts, true);
@@ -349,6 +352,14 @@ function runNow_(task, opts, queued) {
   runningSince.set(task.id, Date.now());
   const startedAt = Date.now();
   armAck(task, opts);
+  /* 「开跑了」只在**真的开始跑**的那一刻发。
+     以前这句在 `runTask` 里、位于并发判断**之前**，于是被排进队列的任务也会收到一条
+     `start`：按契约面板立刻把它标成「运行中 Ns」，而它一个字节都还没跑
+     （界面要靠下一次 `fillSchedule()` 从 `status().running` 自己纠回来 —— 纠得回来
+     不等于当时是对的）。排在队列里的那段时间由 `queued` 那条路负责告诉界面。
+     顺序也刻意放在 `runningSince.set` **之后**：事件一发出去，界面就会回查
+     `status()`，那时状态必须已经为真。 */
+  emitStart(task, opts);
   return work(task, opts, startedAt, queued)
     .catch((e) => ({ ok: false, text: (e && e.message) || String(e) }))
     .finally(() => {
@@ -383,8 +394,8 @@ function runTask(task, opts = {}) {
     return Promise.resolve({ ok: false, error: '还没配置大模型接口' });
   }
 
-  if (!opts.noAck) emitStart(task, opts);
-
+  /* 「开跑了」那条事件**不在这里**发 —— 这里还没定下来它到底开不开跑。
+     下面这个并发闸可能把它塞进队列，那时候它没跑，不该收到 `start`。 */
   if (active >= maxConcurrency()) {
     queue.push({ task, opts, transient: !!opts.transient });
     log(`「${task.title}」已排队（当前并发 ${active}/${maxConcurrency()}）`);

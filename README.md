@@ -689,8 +689,8 @@ npm test                       # 全量白盒单测，纯 Node，跑完约 12 �
 # 也可以单跑（下面这些都已经在 npm test 里）：
 #            test:context / test:hotkey / test:reload / test:config / test:meeting /
 #            test:entry / test:clip / test:memory / test:session / test:schedule /
-#            test:proactive / test:orch / test:llm / test:pet / test:tray / test:wake /
-#            test:tools / test:capture / test:updater / test:packed-deps
+#            test:schedule-event / test:proactive / test:orch / test:llm / test:pet /
+#            test:tray / test:wake / test:tools / test:capture / test:updater / test:packed-deps
 # 另外还有个需要真实桌面的（不在默认流程里）：test:pet-top
 #
 # 配置相关的两条（都进 npm test）：

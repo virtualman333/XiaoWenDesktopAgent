@@ -38,10 +38,11 @@
     "test:memory": "node build/_memory_test.mjs",
     "test:session": "node build/_session_test.mjs",
     "test:schedule": "node build/_schedule_status_test.mjs",
+    "test:schedule-event": "node build/_schedule_event_contract_test.mjs",
     "probe:meeting": "node build/_meeting_live_probe.mjs",
     "test:pet-top": "node build/_run-electron.mjs build/_pet_top_test.js",
     "test": "npm run test:all",
-    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:config && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:schedule && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run test:tools && npm run test:capture && npm run test:updater && npm run check:deps && npm run check:tests && npm run test:packed-deps"
+    "test:all": "npm run test:context && npm run test:hotkey && npm run test:reload && npm run test:config && npm run test:meeting && npm run test:entry && npm run test:clip && npm run test:memory && npm run test:session && npm run test:schedule && npm run test:schedule-event && npm run test:proactive && npm run test:orch && npm run test:llm && npm run test:pet && npm run test:tray && npm run test:wake && npm run test:tools && npm run test:capture && npm run test:updater && npm run check:deps && npm run check:tests && npm run test:packed-deps"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",

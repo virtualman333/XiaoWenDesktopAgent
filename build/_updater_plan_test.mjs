@@ -28,7 +28,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stripComments } from './_strip_comments.mjs';
+import { stripComments, residueErrors } from './_strip_comments.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -327,6 +327,16 @@ ok(/require\(\s*['"]\.\/updater-plan['"]\s*\)/.test(main), 'main.js 引入了判
 ok(/\.\.\.\s*updaterPlan\.DEFAULTS/.test(main), 'DEFAULT_CONFIG 从 updaterPlan.DEFAULTS 展开（默认值只此一份）');
 ok(!/autoUpdateSilentInstall\s*:/.test(main), 'main.js 里不许再手抄 autoUpdate 默认值（展开之后就别留着旧表）');
 ok(!/autoUpdateNotify\s*:/.test(main), 'main.js 里不许再手抄 autoUpdateNotify 默认值');
+
+/* 剥注释器总闸（第 25 轮补）：它扛着本文件**所有**读源码的判定，而它此前在 panel.js 上
+   几乎什么都没做（42 条唯一块注释留着 33 条，体量只减 1.5%，却照样返回字符串、不抛错）
+   —— 上面那些 lock 是对着「带注释的源码」做的判定，注释里的旧代码随时能把它们判红或
+   判绿。剥不干净必须当场喊出来，而不是让结论悄悄变弱。 */
+for (const rel of ['src/renderer/js/panel.js', 'src/main/updater.js', 'src/main/main.js']) {
+  const src = readSrc(rel);
+  const res = residueErrors(src, stripComments(src));
+  ok(res.length === 0, `剥注释器在 ${rel} 上没有残留`, res[0]);
+}
 
 // ---------------- 汇总 ----------------
 console.log('\n' + '='.repeat(46));
