@@ -10,7 +10,20 @@ import fs from 'fs';
 import path from 'path';
 import { builtinModules } from 'module';
 
-/** 必须出现在 asar 里的运行期资源（相对 app 根目录） */
+/**
+ * 必须出现在 asar 里的运行期资源（相对 app 根目录）。
+ *
+ * ⚠ 这 5 个 `dist/*.html` 是**构建产物**：`vite.config.mjs` 的 `rollupOptions.input`
+ * 声明了五个页面，主进程五个都真的加载 —— `panel.html` ← main.js、
+ * `ball.html` ← main.js 的悬浮球、`pet.html` ← pet.js、`capture.html` ← capture.js、
+ * `minutes.html` ← meeting.js。它们**必须进 asar**，所以写在这里；但它们**不该被要求
+ * 「此刻就在磁盘上」**——干净检出（CI）里 dist/ 还不存在。判「它会不会产出」要看本源，
+ * 见 `rendererBuildProducts()` 与 `isArtifactPath()`。
+ *
+ * 此前这里只登记了 panel / minutes：另外三个页面**漏打包也不会被任何检查发现**，
+ * 而症状照旧是「装完之后才发现某个窗口打不开」——与本文件开头那次托盘图标事故同形。
+ * 2026-09-20 由 `_packed_deps_test.mjs` 第 10 节的反向对账（vite 会产出什么 ⇄ 清单登记了什么）抓出。
+ */
 export const REQUIRED = [
   'src/main/main.js',
   'src/main/preload.js',
@@ -22,7 +35,11 @@ export const REQUIRED = [
   'src/main/jarvis/minutes.js',
   'src/assets/tray.ico',
   'src/assets/tray.png',
+  // 五个窗口页面：主进程逐个 loadRenderer / loadPage，少一个就是一个打不开的窗口
   'dist/panel.html',
+  'dist/ball.html',
+  'dist/pet.html',
+  'dist/capture.html',
   // 会议记录的隐藏采集页：新加的窗口页面，漏打包就会「检测到会议但录不了」
   'dist/minutes.html',
   'package.json'
@@ -51,10 +68,40 @@ export const REQUIRED = [
 const RUNTIME_EXTS = /\.(js|mjs|cjs)$/;
 
 /**
- * 构建 / 安装产物：**定义性排除**，不存在也不算异常 ——
- * `dist/` 是 .gitignore 里的构建产物，新克隆的本机根本没有它。
+ * ★ 「不存在也不算异常」的目录分成两类，别再混成一个集合 —— 它们由**不同的东西**产出，
+ *   因此对应**不同**的判据：
+ *
+ *   · `DEP_DIRS` —— 第三方依赖，由 `npm ci` / `npm install` 产出。
+ *     干净检出上跑测试时它**一定在**（不然测试根本跑不起来），所以语义是「会存在」。
+ *   · `ARTIFACT_DIRS` —— 构建 / 打包产物，由 `npm run build:renderer` / electron-builder 产出。
+ *     `.gitignore` 里写着，新克隆的本机**根本没有它**，所以语义是「此刻不必存在，
+ *     但要能产出」——判「能不能产出」必须问本源，见 `rendererBuildProducts()`。
+ *     2026-09-18 的 v1.12.0 / v1.13.0 就是在这里栽的：CI 第 5 步跑测试、第 6 步才构建，
+ *     而当时的判据是 `fs.existsSync('dist/panel.html')` —— 量的是「这台机器构建过没有」。
+ *     本机复现：把 dist/ 改个名再跑 `npm run test:packed-deps`，报的就是 CI 里那句话。
  */
-const ARTIFACT_DIRS = new Set(['node_modules', 'dist', 'dist-app']);
+export const DEP_DIRS = new Set(['node_modules']);
+
+/** 构建 / 打包产物目录（相对仓库根的第一段） */
+export const ARTIFACT_DIRS = new Set(['dist', 'dist-app']);
+
+/** 遍历运行期源码时要跳过的目录 = 依赖 + 产物（唯一来源派生，不另抄一份） */
+const SKIP_DIRS = new Set([...DEP_DIRS, ...ARTIFACT_DIRS]);
+
+/** 这个仓库相对路径是不是落在**构建产物**目录里（也就是：不来自干净克隆） */
+export function isArtifactPath(rel) {
+  return ARTIFACT_DIRS.has(firstSegment(rel));
+}
+
+/** 这个仓库相对路径是不是第三方依赖的文件 */
+export function isDepPath(rel) {
+  return DEP_DIRS.has(firstSegment(rel));
+}
+
+/** 相对路径的第一段（`node_modules/ws/index.js` → `node_modules`） */
+function firstSegment(rel) {
+  return String(rel).replace(/\\/g, '/').replace(/^\.\//, '').split('/')[0];
+}
 
 /**
  * 刻意不扫的**打包内源码**目录 —— 默认是扫，这里是例外。
@@ -100,7 +147,7 @@ export function collectRuntimeFiles(absDir) {
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       if (e.isDirectory()) {
-        if (ARTIFACT_DIRS.has(e.name)) continue;
+        if (SKIP_DIRS.has(e.name)) continue;
         walk(path.join(dir, e.name));
       } else if (RUNTIME_EXTS.test(e.name)) {
         out.push(path.join(dir, e.name));
@@ -136,7 +183,7 @@ export function runtimeSourceFiles(root, pkg, opts = {}) {
   // ① 每个被打包的目录都必须有交代：进扫描面 / 是产物 / 被排除。
   //    少一条（比如 build.files 里加了 `native/**/*`）这里就会说话。
   for (const prefix of prefixes) {
-    if (ARTIFACT_DIRS.has(prefix) || excludedKeys.some((d) => under(prefix, d))) {
+    if (SKIP_DIRS.has(prefix) || excludedKeys.some((d) => under(prefix, d))) {
       roots.push(`${prefix}（不扫）`);
       continue;
     }
@@ -260,4 +307,63 @@ export function entryCandidates(depPkg) {
   };
   if (depPkg) { walk(depPkg.exports, 'exports'); add(depPkg.main); }
   return [...out].sort();
+}
+
+/**
+ * 构建产物的**本源**：从 `vite.config.mjs` 现算「`npm run build:renderer` 会产出哪些文件」。
+ *
+ * 为什么不能直接问「`dist/panel.html` 在不在磁盘上」：那问的是**这台机器有没有构建过**，
+ * 而不是「仓库能不能产出它」。本地构建过 → 绿；CI 干净检出 → 红。2026-09-18 就是这样
+ * 连着两天把 v1.12.0 / v1.13.0 的安装包卡住的（CI 第 5 步跑测试，第 6 步才构建）。
+ *
+ * 所以判据改成问本源：产物项的**输入文件**（`src/renderer/*.html`）是否真的在仓库里、
+ * 是否真的列在 vite 的 `rollupOptions.input` 里、`outDir` 是否落在产物目录里。
+ * 这三样在干净检出上一定成立，而「清单里写了一个 vite 根本不会产出的文件」照样会被抓。
+ *
+ * 返回 `problems`：解析面为空（找不到 config / 没算出 outDir / 没算出 input）时**必须**说话，
+ * 否则这条判据会在空集上通过 —— 那正是它要防的失效形态。
+ */
+export function rendererBuildProducts(root) {
+  const problems = [];
+  const empty = { outDir: '', inputs: [], products: [], problems };
+  const cfgRel = 'vite.config.mjs';
+  const cfgAbs = path.join(root, cfgRel);
+  if (!fs.existsSync(cfgAbs)) {
+    problems.push(`找不到 ${cfgRel} —— 算不出渲染层会产出什么，「清单里的产物项真会被构建出来吗」就没人验了`);
+    return empty;
+  }
+  const cfg = fs.readFileSync(cfgAbs, 'utf8');
+
+  // resolve(__dirname, 'x') 是本仓声明路径的唯一写法：outDir 与 input 都靠它
+  const resolveArg = (re) => {
+    const m = re.exec(cfg);
+    return m ? m[1].replace(/\\/g, '/') : '';
+  };
+  const outDir = resolveArg(/build\s*:\s*\{[\s\S]*?outDir\s*:\s*resolve\(\s*__dirname\s*,\s*['"]([^'"]+)['"]\s*\)/);
+  if (!outDir) {
+    problems.push(`${cfgRel} 里没解析出 outDir —— 产物面为空时这条判据会在空集上通过`);
+    return empty;
+  }
+  if (!isArtifactPath(outDir)) {
+    problems.push(
+      `outDir "${outDir}" 不在产物目录（${[...ARTIFACT_DIRS].join(' / ')}）里 —— ` +
+      '构建产物不该落在受版本控制的目录，而且「该不该要求它此刻存在」会失去判据'
+    );
+  }
+
+  const inputs = [...cfg.matchAll(/resolve\(\s*__dirname\s*,\s*['"]([^'"]+\.html)['"]\s*\)/g)]
+    .map((m) => m[1].replace(/\\/g, '/'));
+  if (!inputs.length) {
+    problems.push(`${cfgRel} 里没解析出任何 .html 入口 —— 产物清单会是空的，判据在空集上通过`);
+    return { outDir, inputs: [], products: [], problems };
+  }
+  // 本源必须真的在仓库里 —— 这是干净检出上一定满足的那一半
+  for (const rel of inputs) {
+    if (!fs.existsSync(path.join(root, rel))) {
+      problems.push(`${cfgRel} 的入口 "${rel}" 在仓库里不存在 —— 清单与配置已经对不上`);
+    }
+  }
+
+  const products = [...new Set(inputs.map((rel) => `${outDir.replace(/\/+$/, '')}/${path.basename(rel)}`))].sort();
+  return { outDir, inputs: [...inputs].sort(), products, problems };
 }

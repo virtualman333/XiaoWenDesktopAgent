@@ -699,7 +699,11 @@ npm test                       # 全量白盒单测，纯 Node，跑完约 12 �
 #
 # 打包内容校验（防「装完之后才发现少东西」）：
 #   check:deps         已进 npm test —— 源码里裸 require 的模块必须声明在 dependencies 里
-#   test:packed-deps   已进 npm test —— 上面那套校验的自测（合成 asar，秒级）
+#   test:packed-deps   已进 npm test —— 上面那套校验的自测（合成 asar，秒级）。
+#                      它同时也守着「这份自测自己不许依赖构建产物」：清单里 dist/*.html
+#                      这类产物项不要求此刻存在，而是现算 vite 会不会产出它
+#                      （此前这里要求「磁盘上先有 dist/」，本地绿、CI 干净检出红 ——
+#                        v1.12.0 / v1.13.0 因此连着两次没发出安装包）
 #   test:packed        手动跑：先 npm run dist:dir，再校验真实的 app.asar（见下）
 
 # 1.5 打包完先验一遍再发布（这一步能拦住「托盘没图标 / 语音识别挂 / 依赖没进包」）

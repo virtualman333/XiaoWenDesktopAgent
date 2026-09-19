@@ -23,7 +23,9 @@
  *   G. `build.files` 里新加的打包目录自动进扫描面（扫描面现算）
  *   H. 扫描面的自证：配置不符 / 排除表腐烂 / 扫描面为空都要自己喊出来
  *   I. **fixture 自己的完整性**：两套独立算法枚举真实目录、清单必须一致；
- *      文件数触及报警阈值要报出来（原先是「收满 300 条就停」，静默截断）
+ *      文件数触及报警阈值要报出来（原先是「收满 300 条就停」，静默截断）；
+ *      FULL 每一项按**来源**分类后各问各该问的（构建产物问本源、不要求此刻存在）；
+ *      「vite 会产出什么」⇄「清单登记了什么」两向对账，且产物面解析不出来要自己喊
  *
  * 用法：npm run test:packed-deps
  */
@@ -35,7 +37,8 @@ import { spawnSync } from 'child_process';
 
 import {
   REQUIRED, productionDeps, bareRequires, undeclaredRequires, entryCandidates, inPackage,
-  EXCLUDED_PACKED_DIRS, packedDirPrefixes, runtimeSourceFiles
+  EXCLUDED_PACKED_DIRS, packedDirPrefixes, runtimeSourceFiles,
+  DEP_DIRS, ARTIFACT_DIRS, isArtifactPath, isDepPath, rendererBuildProducts
 } from './_packed_manifest.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -418,8 +421,65 @@ console.log('\n10. I. fixture 的完整性：独立枚举交叉验证，且截�
   /* ⚠ 这条断言第一版写的是 `[...REQUIRED, ...depFiles]` 而不是 `FULL` —— 于是它证的是
      「两个来源拼起来没有幽灵路径」，**而判据真正用的那个变量（FULL）一条都没被查过**：
      往 FULL 里掺一条不存在的路径，它照样绿（本轮负向验证 X3 实测抓到）。 */
-  const ghost = FULL.filter((p) => !fs.existsSync(path.join(ROOT, p)));
-  eq(ghost, [], 'FULL 里的每一项都指向仓库里真实存在的路径');
+  /*
+   * ⚠ 第二版（`FULL` 每一项都必须在磁盘上存在）把一个**隐含前提**当成了判据：
+   *   `REQUIRED` 里那两条 `dist/*.html` 是构建产物，本地构建过就有、干净检出必然没有。
+   *   于是这条断言量的是「这台机器构建过没有」，不是「仓库能不能产出它」——
+   *   2026-09-18 的 v1.12.0 / v1.13.0 因此连着两次发不出安装包（CI 第 5 步跑测试，
+   *   第 6 步才 `npm run build:renderer`，见 `.github/workflows/release.yml`）。
+   *   本机复现方式：把 dist/ 改个名再跑，报的就是 CI 里那句一样的话。
+   *
+   * 现在按**来源**把 FULL 分成三类，各问各该问的：
+   *   ① 仓库自有文件（`src/**`、`package.json` …）→ 必须存在；
+   *   ② 第三方依赖文件（`node_modules/**`）→ 必须存在（`npm ci` 之后一定有，不然测试根本跑不起来）；
+   *   ③ 构建产物（`dist/**`、`dist-app/**`）→ **不要求此刻存在**，但必须真会被产出：
+   *      本源必须列在 `vite.config.mjs` 的 `rollupOptions.input` 里、且本源文件真的在仓库里。
+   *      产物面现算自 `rendererBuildProducts()`，解析不出来就自己喊（不许在空集上通过）。
+   *   外加两份独立声明对账：`ARTIFACT_DIRS` / `DEP_DIRS`（清单里写的「不存在也不算异常」的目录）
+   *   ⇄ `.gitignore`（仓库自己声明的忽略面）。对不上就说明口径出现了第二份。
+   */
+  const firstSeg = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '').split('/')[0];
+  const gitignoreTopDirs = (() => {
+    const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+    return new Set(
+      gi.split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#') && !l.startsWith('!'))
+        .map((l) => l.replace(/^\//, '').replace(/\/+$/, ''))
+        // 只留「顶层目录」这种字面规则：带通配符 / 带子路径的另算，别在这里硬凑
+        .filter((l) => !/[*?[\]]/.test(l) && !l.includes('/'))
+    );
+  })();
+
+  // ③ 先对账：口径必须只有一份
+  ok(gitignoreTopDirs.size > 0, '.gitignore 里解析出了顶层忽略目录', '解析面为空的话下面两条在空集上通过');
+  const notIgnored = [...DEP_DIRS, ...ARTIFACT_DIRS].filter((d) => !gitignoreTopDirs.has(d));
+  eq(notIgnored, [], 'DEP_DIRS / ARTIFACT_DIRS 里的每个目录都被 .gitignore 忽略（否则它其实该存在，判据就错了）');
+  const ignoredButNotArtifact = FULL.filter(
+    (p) => gitignoreTopDirs.has(firstSeg(p)) && !isArtifactPath(p) && !isDepPath(p));
+  eq(ignoredButNotArtifact, [],
+    'FULL 里凡落在忽略目录下的项，都必须被归成「产物」或「依赖」（否则又会出现「要求一个干净检出上不存在的东西」）');
+
+  // ①② 会存在的那两类：仓库自有文件与依赖文件
+  const repoFiles = FULL.filter((p) => !isArtifactPath(p) && !isDepPath(p));
+  const depFiles2 = FULL.filter((p) => isDepPath(p));
+  const artifactFiles = FULL.filter((p) => isArtifactPath(p));
+  ok(repoFiles.length > 0, `FULL 里有 ${repoFiles.length} 项是本仓库的文件`, '一项都没有说明分类塌了');
+  ok(depFiles2.length > 0, `FULL 里有 ${depFiles2.length} 项来自 dependencies`, '一项都没有说明分类塌了');
+  ok(artifactFiles.length > 0, `FULL 里有 ${artifactFiles.length} 项是构建产物`, '一项都没有说明分类塌了');
+  const ghost = [...repoFiles, ...depFiles2].filter((p) => !fs.existsSync(path.join(ROOT, p)));
+  eq(ghost, [], 'FULL 里「应当存在」的每一项（仓库文件 + 依赖）都真的在磁盘上');
+
+  // ② 产物项：不要求此刻存在，但必须真会被构建出来
+  const build = rendererBuildProducts(ROOT);
+  eq(build.problems, [], '渲染层产物面算得出来（vite.config.mjs 解析得出 outDir 与 .html 入口，且本源文件都在）');
+  ok(build.products.length > 0, `渲染层会产出 ${build.products.length} 个文件`, '空集上下面的断言会假绿');
+  const unknownProducts = artifactFiles.filter((p) => !build.products.includes(p));
+  eq(unknownProducts, [],
+    'FULL 里的产物项都在「渲染层真会产出」的清单里（写一个 vite 不会产出的 dist/xxx.html 会被抓）');
+  // 反向：vite 声明会产出的，清单里也应该有 —— 漏一个就是「装完之后才发现界面没了」
+  const unlisted = build.products.filter((p) => !artifactFiles.includes(p));
+  eq(unlisted, [], '渲染层会产出的每个文件都登记进了打包清单（漏登记等于打包时不保证它在）');
 }
 
 // 收尾
