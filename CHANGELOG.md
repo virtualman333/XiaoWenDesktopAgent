@@ -4,6 +4,82 @@
 
 ---
 
+## [1.14.0] - 2026-09-20
+
+### 为什么值得做
+
+**两个版本的安装包根本没发出去，而且没人知道。**
+
+`v1.12.0`（09-17）与 `v1.13.0`（09-18）的 tag 都推上去了，CI 也跑了，但跑的是**失败**：
+`.github/workflows/release.yml` 第 5 步「跑回归测试」红，后面「构建渲染层」「编译安装包（NSIS）」
+「发布到 GitHub Release（附编译产物）」全部 skipped —— 这两个版本的 Release 至今不存在，
+用户从 1.11.0 既升不上去、也拿不到安装包。README 写的是「仓库已配置好 GitHub Actions，推 tag 就自动完成」，
+而这条承诺在 CI 上连着两次没成立，没有任何东西喊出来。
+
+根因只有一句断言：
+
+```
+FAIL FULL 里的每一项都指向仓库里真实存在的路径
+     :: 实际 ["dist/panel.html","dist/minutes.html"]，期望 []
+```
+
+`_packed_deps_test.mjs` 拿 `REQUIRED`（必须进 asar 的运行期资源）拼出合成包清单 `FULL`，
+再要求 `FULL` 里**每一项在磁盘上存在**。而 `REQUIRED` 里的 `dist/panel.html` / `dist/minutes.html`
+是**构建产物**：`.gitignore` 里写着，本地构建过就有、干净检出没有。所以这条断言量的是
+「这台机器构建过没有」，不是「仓库能不能产出它」—— 本地绿、CI 红。
+CI 第 5 步跑测试时，第 6 步的 `npm run build:renderer` 还没跑。
+
+同一份清单文件 `build/_packed_manifest.mjs` 第 53 行自己就写着
+「`dist/` 是 .gitignore 里的构建产物，新克隆的本机根本没有它」——
+一句话在同一个文件里出现在了两个互相矛盾的位置，差异那行就是 bug。
+
+本机复现只要一条命令：把 `dist/` 改个名再跑 `npm run test:packed-deps`，报的就是 CI 里那句话。
+
+### 怎么变
+
+「不存在也不算异常」的目录拆成两类 —— 它们由**不同的东西**产出，因此对应**不同**的判据：
+
+| 类别 | 目录 | 谁产出 | 判据 |
+| --- | --- | --- | --- |
+| 第三方依赖 | `node_modules` | `npm ci` | 必须存在（不然测试根本跑不起来） |
+| 构建产物 | `dist` / `dist-app` | `npm run build:renderer` | **不要求此刻存在**，但必须真会被产出 |
+
+产物项改问**本源**：新增 `rendererBuildProducts()`，从 `vite.config.mjs` 现算 `outDir` 与
+`rollupOptions.input`，要求「清单里的产物项都在 vite 真会产出的清单里」，且每个入口的本源文件
+（`src/renderer/*.html`）真的在仓库里。产物面**解析不出来必须自己喊**，不许在空集上通过。
+
+再加一份独立真值做两向对账：`DEP_DIRS` / `ARTIFACT_DIRS` ⇄ `.gitignore`
+（凡「不存在也不算异常」的目录，`.gitignore` 里必须真的忽略它；否则它其实该存在，判据本身就错了）。
+
+### 顺带抓出一个真的漏登记：有三个窗口页面没被任何检查扛着
+
+反向对账（vite 会产出什么 ⇄ 清单登记了什么）上来就红：
+
+```
+渲染层会产出的每个文件都登记进了打包清单
+     :: 实际 ["dist/ball.html","dist/capture.html","dist/pet.html"]
+```
+
+五个窗口页面主进程**全都真的在加载** —— `panel.html` ← `main.js`、`ball.html` ← `main.js` 的悬浮球、
+`pet.html` ← `pet.js`、`capture.html` ← `capture.js`、`minutes.html` ← `meeting.js` ——
+而清单里只登记了 panel 与 minutes。另外三个页面**漏打包不会被任何检查发现**，
+症状与 `_packed_check.mjs` 开头记的那次托盘图标事故一模一样：装完之后才发现某个窗口打不开。
+已补齐登记。
+
+### 自测
+
+- `npm test` 全量绿。**关键证明**：把 `dist/` 改名（等价于 CI 的干净检出）后 `npm test`
+  的退出码仍是 **0**，而修复前同一状态是 1 项失败、退出码 1。
+- 反向验证：**7 处**单缺陷注入（掺一条不存在的仓库文件 / 掺一条 vite 不会产出的 `dist/*.html` /
+  删掉一个 vite 入口 / `outDir` 挪到受版本控制的目录 / `outDir` 改成解析不出的写法 /
+  `.gitignore` 不再忽略 `dist/` / 清单漏登记一个会产出的页面），逐条核对红的是哪条断言，
+  三个被改的文件按 sha256 逐字节还原。
+
+> v1.12.0 / v1.13.0 的 Release 不再补：tag 已定，而修复不在这两个 tag 上，重跑 CI 仍会撞同一处红。
+> 1.14.0 一发，自动更新用的 `latest.yml` 就恢复指向一个真实存在的版本。
+
+---
+
 ## [1.13.0] - 2026-09-18
 
 ### 为什么值得做

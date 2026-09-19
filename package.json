@@ -1,6 +1,6 @@
 {
   "name": "xiaowen-assistant",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "小问助手 - 常驻桌面右下角的 AI 快捷问答助手",
   "main": "src/main/main.js",
   "author": "yonggui",
@@ -54,7 +54,7 @@
     "appId": "ai.unihub.xiaowen",
     "productName": "小问助手",
     "directories": {
-      "output": "release-v1.13.0",
+      "output": "release-v1.14.0",
       "buildResources": "build"
     },
     "files": [
