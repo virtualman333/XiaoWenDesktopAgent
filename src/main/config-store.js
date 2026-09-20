@@ -171,7 +171,13 @@ function createConfigStore(dir, defaults, opt) {
       error = '';
       writeAllowed = true;
       const raw = c.value;
-      unknownKeys = Object.keys(raw).filter((k) => !Object.prototype.hasOwnProperty.call(defaults, k));
+      // `_` 开头的键是**模板的注释约定** —— config.example.json 里用它写「这一组键是干什么的」，
+      // 而 README 教的正是「复制模板为 config.json」。不豁免的话，照抄模板的用户一进设置页
+      // 就会看到一条「配置文件里有 1 项不认识：_说明 —— 多半是名字拼错了」的假警告，
+      // 而真正的拼写错误反而被这条假警告稀释掉。除 `_` 前缀外一律照旧上报。
+      unknownKeys = Object.keys(raw).filter(
+        (k) => !k.startsWith('_') && !Object.prototype.hasOwnProperty.call(defaults, k)
+      );
       return { config: { ...defaults, ...raw }, state, backupPath, error, unknownKeys };
     }
 

@@ -235,6 +235,27 @@ section('8. 配置文件里拼错的键');
   ok(!store.health().describe.includes('sk-x'), '★ 横幅里绝不带配置值（密钥不能从这儿漏出去）');
 }
 
+// ---------------- 8b. `_` 开头的键：模板的注释，不是拼错的键 ----------------
+// config.example.json 用 `_说明` 写「这一组键是干什么的」，而 README 教的就是
+// 「复制模板为 config.json」。不豁免的话，**照抄模板的用户一进设置页就看到假警告**，
+// 真正的拼写错误反而被它稀释 —— 而那条假警告的文本偏偏是「多半是名字拼错了」。
+section('8b. `_` 前缀键 = 模板注释，不该被报成拼错的键');
+{
+  const d = newDir('underscore');
+  fs.writeFileSync(cfgFile(d), JSON.stringify({
+    _说明: '这一组是上下文预算', _systemPrompt说明: '追加在人设后面',
+    model: 'deepseek-chat', apiKeyy: 'sk-x'
+  }, null, 2), 'utf-8');
+  const store = createConfigStore(d, DEFAULTS);
+  const r = store.load();
+  eq(r.state, 'ok', '带注释键的配置仍然是合法配置');
+  eq(r.unknownKeys.slice().sort(), ['apiKeyy'], '★ `_` 前缀不报，真拼错的照旧报');
+  ok(!store.health().describe.includes('_说明'), '横幅里不出现注释键');
+  // 解析面自证：构造的输入里确实有 `_` 键，否则上面那条断言在空集上恒真
+  const rawKeys = Object.keys(JSON.parse(fs.readFileSync(cfgFile(d), 'utf-8')));
+  eq(rawKeys.filter((k) => k.startsWith('_')).length, 2, '样本里确实有 2 个 `_` 键（断言面非空）');
+}
+
 // ---------------- 9. ★ 默认值只有一份：谁在扛 ----------------
 // main.js 是 Electron 入口（一 require 就整个应用跑起来），单测里没法行为断言，
 // 所以这一节是**跨文件核对**：设置界面会写的每个键，都必须在 DEFAULT_CONFIG 里。
@@ -329,6 +350,93 @@ section('9. ★ 设置界面会写的键，DEFAULT_CONFIG 必须都有');
   const exKeys = Object.keys(example).filter((k) => !k.startsWith('_'));
   eq(exKeys.filter((k) => !defaultKeys.includes(k)), [],
     '★ config.example.json 里没有假键（用户照抄它是要能生效的）');
+
+  // (e) ★ 发现路径：DEFAULT_CONFIG 的每个键，用户总得有办法**知道它存在**、并且改得动它。
+  //     这一面此前完全没人查 —— 26 个「有真实读者」的键里，12 个既不在示例配置、
+  //     也没有任何界面入口，用户只能靠读源码发现（`ctxWindow` / `ctxKeepTurns` /
+  //     `clipSenseRules` 这类调优项就是这么消失的）。
+  //     三条路任一条就算数：示例配置里写着 / 设置面板会**写**它 / 显式登记为运行时状态。
+  //     注意必须是「写」不是「读」—— 面板读 `cfg.asrLanguage` 却不给入口，
+  //     那正是「读得到、改不了」的形状，不算发现路径。
+  const setCfgKeys = new Set();
+  // ⚠ 键的判据是「前面紧挨着 `{` / `,`／行首」，**不是**「前面有空白」：
+  //   面板里有 `setConfig({ ballEnabled: v === 'true' ? true : 'false' })` 这种写法，
+  //   按「前面有空白」取值会把三元运算符的 `true` / `false` / `undefined` 也当成配置键
+  //   （实测就报了这三个假键）。行首那一支是为了认多行的 `setConfig({\n  a: 1,`。
+  for (const m of panelSrc.matchAll(/setConfig\(\s*\{([^}]*)\}/g)) {
+    for (const km of m[1].matchAll(/(?:^|[,{])\s*([a-zA-Z][\w]*)\s*:/gm)) setCfgKeys.add(km[1]);
+  }
+  ok(setCfgKeys.size >= 5, '面板里 setConfig 的字面量键解析出足够的项', `只解析到 ${setCfgKeys.size} 个`);
+  ok(setCfgKeys.has('clipSenseEnabled') && setCfgKeys.has('ttsAutoSpeak'),
+    '解析面没退化（认得出「不走 collectPatch、直接 setConfig」的那几个开关）',
+    [...setCfgKeys].join(', '));
+  // 这一面与 collectPatch / 配置键表是**同一个契约**（都是「界面写下去的键」），
+  // 之前只查了那两处，`setConfig` 这条路径没人盯 —— 拼错一个字母同样是永久静默失效。
+  eq([...setCfgKeys].filter((k) => !defaultKeys.includes(k)), [],
+    '★ 面板里 setConfig({...}) 的字面量键也都在 DEFAULT_CONFIG 里');
+
+  /** 运行时状态（不是设置）：程序自己写、UI 自己读，用户没有「改它」的诉求 */
+  const INTERNAL_KEYS = {
+    history: '对话历史数组 —— 运行时状态，由 appendHistory 写、由面板读；用户不会去手改它',
+  };
+  eq(Object.keys(INTERNAL_KEYS).filter((k) => !defaultKeys.includes(k)), [],
+    '★ INTERNAL_KEYS 里不许有僵尸条目（那个键已经从 DEFAULT_CONFIG 删了）');
+
+  const discoverable = new Set([...exKeys, ...patchKeys, ...tableKeys, ...selfMaps, ...setCfgKeys]);
+  ok(discoverable.size > 80, '发现路径的解析面规模没塌', `只认出 ${discoverable.size} 个键`);
+  console.log(`  · 发现路径自证：示例配置 ${exKeys.length} 项 / 面板会写 ${discoverable.size} 个键`
+    + `（setConfig 字面量 ${setCfgKeys.size} 项）/ INTERNAL ${Object.keys(INTERNAL_KEYS).length} 项`);
+  eq(defaultKeys.filter((k) => !discoverable.has(k) && !(k in INTERNAL_KEYS)), [],
+    '★ DEFAULT_CONFIG 的每个键都必须有发现路径：写在 config.example.json 里、或由设置面板写、'
+    + '或登记进 INTERNAL_KEYS。否则用户只能在源码里发现它');
+
+  // (f) ★ 模板里的值必须**等于默认值** —— 否则「照抄模板」本身就是一次改配置，
+  //     而用户以为自己在用默认值（`_说明` 那句「缺项即默认」也就成了假话）。
+  //     唯一的例外是让人自己去填的两个 Key 占位符。
+  const PLACEHOLDER_KEYS = new Set(['apiKey', 'asrApiKey']);
+  /** 剥掉行尾 `//` 注释 —— 注释只在引号外才算（`'https://x'` 里那两处 `//`
+   *  曾把值截成 `'https:`，这一截会让下面「值不同」假红） */
+  const stripLineComment = (s) => {
+    let inStr = null;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) { if (ch === '\\') i++; else if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') inStr = ch;
+      else if (ch === '/' && s[i + 1] === '/') return s.slice(0, i);
+    }
+    return s;
+  };
+  /** 只认字面量；引用了函数 / 常量的值返回 undefined（跳过，不 eval） */
+  const literalOf = (s) => {
+    const t = (s || '').trim().replace(/,\s*$/, '');
+    if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+    if (t === 'true') return true;
+    if (t === 'false') return false;
+    if (t === 'null') return null;
+    if (/^'.*'$/.test(t) || /^".*"$/.test(t)) return t.slice(1, -1);
+    if (/^\[[\s\S]*\]$/.test(t)) { try { return JSON.parse(t); } catch (e) { return undefined; } }
+    return undefined;
+  };
+  const defaultExpr = new Map();
+  for (let n = 1; n < lines.length; n++) {
+    if (/^};/.test(lines[n])) break;
+    const m = /^ {2}(\w+):\s*(.+)$/.exec(lines[n]);
+    if (m) defaultExpr.set(m[1], stripLineComment(m[2]));
+  }
+  const valueMismatch = [];
+  let compared = 0;
+  for (const k of exKeys) {
+    if (PLACEHOLDER_KEYS.has(k)) continue;
+    const want = literalOf(defaultExpr.get(k));
+    if (want === undefined) continue;   // 展开进来的键 / 非字面量：本轮不比对
+    compared += 1;
+    if (JSON.stringify(want) !== JSON.stringify(example[k])) {
+      valueMismatch.push(`${k}: 模板 ${JSON.stringify(example[k])} / 默认 ${JSON.stringify(want)}`);
+    }
+  }
+  ok(compared >= 40, '模板值与默认值的比对面不许为空', `只比了 ${compared} 个键`);
+  console.log(`  · 模板值比对：比了 ${compared} 个键（占位符 ${[...PLACEHOLDER_KEYS].join('、')} 除外）`);
+  eq(valueMismatch, [], '★ config.example.json 的值必须等于默认值（照抄模板不该改变任何行为）');
 }
 
 // ---------------- 10. 判据必须真的被主进程用上 ----------------
