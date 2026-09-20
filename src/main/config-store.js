@@ -247,4 +247,39 @@ function createConfigStore(dir, defaults, opt) {
   return { load, save, health, describe, filePath: file, tmpFilePath: tmpFile, STATES };
 }
 
-module.exports = { createConfigStore, classifyText, stamp, fingerprint, STATES, NEEDS_BACKUP };
+/**
+ * 往 `config.json` 的 `history` 里追加一条，并按 `maxHistory` 裁剪。**纯函数。**
+ *
+ * 为什么要单独成函数：这段「push + 超了就 slice」在本仓有两个调用点
+ * （主动关注的播报落痕、渲染层的 `history:add`），而两份实现都把**判据**与**动作**
+ * 写成了两个不同的表达式：
+ *
+ *     if (cfg.history.length > (cfg.maxHistory || 200)) {   // 判据：缺省按 200
+ *       cfg.history = cfg.history.slice(-cfg.maxHistory);   // 动作：用原值
+ *     }
+ *
+ * `maxHistory` 缺失（老 config.json 里没有这一项、用户手改成 0 或 null、写成字符串）
+ * 时判据说「该裁了」，动作却是 `slice(-undefined)` = `slice(NaN)` = `slice(0)`
+ * —— **返回整个数组，一条都不裁**。历史于是无上限地长下去，而两条路径看起来都
+ * 「处理过了」。所以这里只算一次上限，判据与动作用的是同一个数。
+ *
+ * @param {object} cfg          配置对象（会被就地改写 `history`）
+ * @param {object} msg          要追加的一条
+ * @param {number} [fallbackMax] 上限取不到时的兜底（与 DEFAULT_CONFIG 的初值一致）
+ * @returns {Array} 裁剪后的 `cfg.history`
+ */
+function appendHistory(cfg, msg, fallbackMax) {
+  if (!cfg || typeof cfg !== 'object') {
+    throw new TypeError('appendHistory: cfg 必须是一个对象');
+  }
+  const list = Array.isArray(cfg.history) ? cfg.history : [];
+  list.push({ ...msg });
+  const raw = Number(cfg.maxHistory);
+  const max = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : (fallbackMax || 200);
+  cfg.history = list.length > max ? list.slice(-max) : list;
+  return cfg.history;
+}
+
+module.exports = {
+  createConfigStore, classifyText, stamp, fingerprint, appendHistory, STATES, NEEDS_BACKUP
+};

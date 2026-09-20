@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const { createConfigStore, classifyText } = require('../src/main/config-store.js');
+const { createConfigStore, classifyText, appendHistory } = require('../src/main/config-store.js');
 
 let pass = 0; const fails = [];
 const ok = (cond, name, extra) => { if (cond) pass++; else fails.push(name + (extra ? ` → ${extra}` : '')); };
@@ -38,6 +38,11 @@ const eq = (a, b, name) => ok(
   `期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`
 );
 const section = (s) => console.log('\n' + s);
+// 抛异常也要留下**一条 FAIL**：判据是「有 FAIL 才算红」。崩溃只给退出码 1，
+// 负向验证脚本读到的情况和「代码真错了」一模一样，分不出来。
+const guard = (name, fn) => {
+  try { fn(); } catch (e) { fails.push(`${name} 抛异常：${(e && e.message) || e}`); }
+};
 
 const DEFAULTS = { apiKey: '', model: 'deepseek-chat', hotkey: 'Alt+Space', petSize: 120 };
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xw-cfg-'));
@@ -352,6 +357,76 @@ section('10. main.js 走的是同一份判据');
   ok(pre.includes('configHealth:'), 'preload 把 configHealth 暴露给渲染层');
   const panel = fs.readFileSync(path.join(ROOT, 'src/renderer/js/panel.js'), 'utf-8');
   ok(panel.includes('renderConfigHealth'), '设置页真的会渲染这条状态');
+}
+
+// ---------------- history 裁剪：判据与动作必须是同一个上限 ----------------
+section('history 裁剪（appendHistory）');
+guard('appendHistory', () => {
+  const mk = (extra) => Object.assign({ history: [] }, extra);
+  const fill = (cfg, n) => { for (let i = 0; i < n; i++) appendHistory(cfg, { content: 'm' + i }); };
+
+  let cfg = mk({ maxHistory: 3 });
+  fill(cfg, 5);
+  eq(cfg.history.map((m) => m.content), ['m2', 'm3', 'm4'], '超上限时留最新的 N 条');
+
+  // ★ 本轮修的那条：判据写 `(maxHistory || 200)`、动作写 `slice(-maxHistory)`
+  //   → 上限取不到时判据说「该裁了」，动作 `slice(-undefined)` = `slice(NaN)` = `slice(0)`
+  //   返回整条数组，**一条都不裁**，而两处调用看起来都「处理过了」。
+  cfg = mk({});
+  fill(cfg, 205);
+  eq(cfg.history.length, 200, 'maxHistory 缺失 → 按 200 兜底，而且**真的裁了**');
+  eq(cfg.history[cfg.history.length - 1].content, 'm204', '裁掉的是最旧的，最新一条还在');
+  eq(cfg.history[0].content, 'm5', '留下的正好是最后 200 条');
+
+  cfg = mk({ maxHistory: 0 });
+  fill(cfg, 201);
+  eq(cfg.history.length, 200, 'maxHistory=0 → 兜底 200（不是「一条都不裁」）');
+  cfg = mk({ maxHistory: null });
+  fill(cfg, 201);
+  eq(cfg.history.length, 200, 'maxHistory=null → 兜底 200');
+  cfg = mk({ maxHistory: '50' });
+  fill(cfg, 60);
+  eq(cfg.history.length, 50, '上限写成字符串也认（config.json 是手改的）');
+  cfg = mk({ maxHistory: 2.9 });
+  fill(cfg, 5);
+  eq(cfg.history.length, 2, '小数向下取整，而不是靠 slice 的隐式转换');
+
+  // 用户把 history 手改成非数组
+  cfg = { history: {} };
+  appendHistory(cfg, { content: 'x' });
+  eq(cfg.history.length, 1, 'history 不是数组时不炸，当成空列表重来');
+
+  // 存副本：改历史不该动到调用方的那个对象
+  const msg = { content: 'y' };
+  cfg = mk({ maxHistory: 10 });
+  appendHistory(cfg, msg);
+  cfg.history[0].content = 'z';
+  eq(msg.content, 'y', '存进去的是副本，改历史影响不到调用方那个对象');
+
+  let threw = false;
+  try { appendHistory(null, { content: 'x' }); } catch (e) { threw = e instanceof TypeError; }
+  eq(threw, true, 'cfg 不是对象时抛 TypeError（静默写进虚空更难查）');
+
+  // 结构锁：main.js 里不许再出现「判据一个上限、动作用另一个」的写法
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/main.js'), 'utf-8');
+  const code = stripCode(src);
+  ok(code.includes('ipcMain.handle'), 'main.js 解析出来了（扫描面没塌）');
+  const OLD_PREDICATE = /maxHistory\s*\|\|\s*200/;
+  const OLD_ACTION = /slice\(-\s*cfg2?\.maxHistory\)/;
+  ok(!OLD_PREDICATE.test(code), 'main.js 剥注释后不再有 `(cfg.maxHistory || 200)` 这种判据');
+  ok(!OLD_ACTION.test(code), 'main.js 剥注释后不再自己 slice(-maxHistory)');
+  const calls = (code.match(/appendHistory\(/g) || []).length;
+  ok(calls >= 2, '两处落痕都走 appendHistory', String(calls));
+  // 判据自证：拿旧写法当样本，两条判据必须都能抓到
+  const bad = 'if (cfg.history.length > (cfg.maxHistory || 200)) { cfg.history = cfg.history.slice(-cfg.maxHistory); }';
+  ok(OLD_PREDICATE.test(bad), '旧判据的写法确实会被抓到（判据不是恒真）');
+  ok(OLD_ACTION.test(bad), '旧的裁剪动作确实会被抓到（判据不是恒真）');
+});
+
+/** 剥掉注释再比对 —— 本轮加的说明里就引用了那两行旧写法，不剥会把自己判红 */
+function stripCode(s) {
+  return s.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
 }
 
 // ---------------- 清理 ----------------

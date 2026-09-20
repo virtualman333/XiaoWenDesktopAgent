@@ -24,7 +24,7 @@ const clipSense = require('./clip-sense');
 // 配置改了要跟着重载什么 —— 判据与顺序只此一份（纯函数，可单测）
 const configReload = require('./config-reload');
 // config.json 的读 / 写 / 坏了怎么办 —— 判据只此一份（纯 Node，可单测）
-const { createConfigStore } = require('./config-store');
+const { createConfigStore, appendHistory } = require('./config-store');
 // 统一对话出口（一律流式；连通性测试 / 编排规划也走这里）
 const llm = require('./llm');
 
@@ -1045,11 +1045,7 @@ function onProactive(payload) {
     const s = jstore.getActiveSession();
     if (s && s.id) jstore.appendMessage(s.id, { role: 'assistant', content });
     const cfg2 = loadConfig();
-    cfg2.history = cfg2.history || [];
-    cfg2.history.push({ role: 'assistant', content, ts: Date.now(), proactive: true });
-    if (cfg2.history.length > (cfg2.maxHistory || 200)) {
-      cfg2.history = cfg2.history.slice(-cfg2.maxHistory);
-    }
+    appendHistory(cfg2, { role: 'assistant', content, ts: Date.now(), proactive: true });
     config = cfg2;
     saveConfig(cfg2);
   } catch (e) { /* ignore */ }
@@ -1398,37 +1394,35 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
     : safeRest;
 
   // ---- 动态上下文：普通问答也走同一套压缩，不然长会话一样会把窗口撑爆 ----
+  // 预算算式、压缩参数、推给界面的 chat:context、以及「要不要重写纪要」的判据
+  // 全在 jarvis/context.js 的 planContext() 一处。这一段此前把 agent.js 那套抄了
+  // 一遍，抄的时候漏掉两件事，而且都不报错：
+  //   ① ctxAutoCompress=false 时一条 chat:context 都不发 → 面板的「上下文」环冻在旧值；
+  //   ② 压缩之后从不调 summarizeLater() → 普通对话（agentEnabled=false，或者模型不支持
+  //      函数调用被自动降级到这条路）下，会话纪要停在上一份，长期记忆永不更新。
   let finalMessages = safeMessages;
   try {
     const ctxmod = require('./jarvis/context');
-    const sysMsgs = safeMessages.filter((m) => m.role === 'system');
-    const rest = safeMessages.filter((m) => m.role !== 'system');
-    if (cfg.ctxAutoCompress === false) {
-      finalMessages = safeMessages;
-    } else {
-      const budget = Math.max(1024,
-        (Number(cfg.ctxWindow) || 128000)
-          - (Number(cfg.ctxReplyReserve) || 8000)
-          - ctxmod.totalTokens(sysMsgs));
-      const sessionId = (() => {
-        try { const s = jstore.getActiveSession(); return (s && s.id) || null; } catch (e) { return null; }
-      })();
-      const priorSummary = sessionId ? (jstore.getSessionSummary(sessionId) || '') : '';
-      const cres = ctxmod.compress({
-        messages: rest,
-        budget,
-        keepTurns: Number(cfg.ctxKeepTurns) || 8,
-        toolOutputMax: Number(cfg.ctxToolOutputMax) || 1200,
-        priorSummary
-      });
-      finalMessages = [...sysMsgs, ...cres.messages];
+    const sessionId = (() => {
+      try { const s = jstore.getActiveSession(); return (s && s.id) || null; } catch (e) { return null; }
+    })();
+    const priorSummary = sessionId ? (jstore.getSessionSummary(sessionId) || '') : '';
+    const plan = ctxmod.planContext({ messages: safeMessages, cfg, priorSummary });
+    finalMessages = plan.messages;
+    try {
+      sender && !sender.isDestroyed() && sender.send('chat:context', { ...plan.stats, at: Date.now() });
+    } catch (e) { /* ignore */ }
+    if (plan.stats.compressed) {
+      logLine('ctx', `上下文压缩：${plan.stats.beforeTokens} → ${plan.stats.afterTokens} token`
+        + `（预算 ${plan.stats.budget}）：${(plan.stats.parts || []).join('；')}`);
+    }
+    if (plan.shouldSummarize && sessionId) {
+      // 与 Agent 路径共用同一个 summarizeLater（同一份冷却与去重）
       try {
-        sender && !sender.isDestroyed() && sender.send('chat:context', { ...cres.stats, budget, at: Date.now() });
-      } catch (e) { /* ignore */ }
-      if (cres.stats.compressed) {
-        logLine('ctx', `上下文压缩：${cres.stats.beforeTokens} → ${cres.stats.afterTokens} token`
-          + `（预算 ${budget}）：${(cres.stats.parts || []).join('；')}`);
-      }
+        require('./jarvis/agent').summarizeLater({
+          cfg, sessionId, priorSummary, stats: plan.stats
+        });
+      } catch (e) { /* 摘要失败无所谓 */ }
     }
   } catch (e) {
     logLine('ctx', '上下文压缩失败，按原样发送: ' + ((e && e.message) || e));
@@ -1677,11 +1671,7 @@ ipcMain.handle('history:get', () => loadConfig().history || []);
 
 ipcMain.handle('history:add', (_e, msg) => {
   const cfg = loadConfig();
-  cfg.history = cfg.history || [];
-  cfg.history.push({ ...msg, ts: Date.now() });
-  if (cfg.history.length > (cfg.maxHistory || 200)) {
-    cfg.history = cfg.history.slice(-cfg.maxHistory);
-  }
+  appendHistory(cfg, { ...msg, ts: Date.now() });
   config = cfg;
   saveConfig(cfg);
   return true;

@@ -5,6 +5,7 @@
  *   词元估算、工具输出截断（头尾都要留）、按轮保留、
  *   超预算折叠成纪要、纪要块位置、压缩统计、滚动摘要的触发条件。
  */
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
@@ -13,7 +14,17 @@ const ctx = require('../src/main/jarvis/context.js');
 let pass = 0; const fails = [];
 const ok = (cond, name, extra) => { if (cond) pass++; else fails.push(name + (extra ? ` → ${extra}` : '')); };
 const eq = (a, b, name) => ok(a === b, name, `期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`);
+// eq 是严格相等，只适合标量；对象 / 数组走这个
+const same = (a, b, name) => ok(
+  JSON.stringify(a) === JSON.stringify(b), name,
+  `期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`
+);
 const section = (s) => console.log('\n' + s);
+// 抛异常也要留下**一条 FAIL**：判据是「有 FAIL 才算红」。崩溃只给退出码 1，
+// 负向验证脚本读到的情况和「代码真错了」一模一样，分不出来。
+const guard = (name, fn) => {
+  try { fn(); } catch (e) { fails.push(`${name} 抛异常：${(e && e.message) || e}`); }
+};
 
 // ---------------- 1. 词元估算 ----------------
 section('1. 词元估算');
@@ -190,6 +201,110 @@ section('6. 滚动摘要');
   ok(/在写周报/.test(prompt), '把上一次的摘要带进去做增量更新');
   ok(/天气/.test(prompt), '把这一段纪要带进去');
   ok(/800|字/.test(prompt), '告诉模型长度上限');
+}
+
+// ---------------- 7. 上下文计划（两条路径的唯一来源） ----------------
+section('7. 上下文计划 planContext');
+guard('planContext', () => {
+  // 7.1 预算算式
+  eq(ctx.budgetFor({}, 0), 128000 - 8000, '窗口缺省 128000、回复预留 8000');
+  eq(ctx.budgetFor({ ctxWindow: 32000, ctxReplyReserve: 2000 }, 500), 32000 - 2000 - 500,
+    '预算要扣掉系统提示词本身');
+  eq(ctx.budgetFor({ ctxWindow: 10, ctxReplyReserve: 9999 }, 0), 1024, '算出来太小也留 1024 的地板');
+  eq(ctx.budgetFor({ ctxWindow: 'abc', ctxReplyReserve: null }, 0), 128000 - 8000,
+    '窗口写成非数字 → 回落缺省，不是 NaN');
+
+  const sys = { role: 'system', content: '你是小问' };
+  const short = [sys, { role: 'user', content: '在吗' }];
+
+  // 7.2 关掉自动压缩：消息原样，但统计**不许缺字段**（面板的环靠它）
+  const off = ctx.planContext({ messages: short, cfg: { ctxAutoCompress: false } });
+  same(off.messages, short, '关掉压缩 → 消息原样（含 system、顺序不变）');
+  eq(off.shouldSummarize, false, '关掉压缩 → 不写摘要');
+  eq(off.stats.compressed, false, '关掉压缩 → compressed=false');
+  ok(off.stats.budget > 0, '关掉压缩也要给出 budget', String(off.stats.budget));
+  eq(typeof off.stats.afterTokens, 'number', '关掉压缩也要给 afterTokens（界面不该读到 undefined）');
+  eq(typeof off.stats.ratio, 'number', '关掉压缩也要给 ratio');
+  eq(off.stats.budget, ctx.budgetFor({ ctxAutoCompress: false }, ctx.totalTokens([sys])),
+    '关掉压缩时 budget 仍是同一条算式算出来的');
+
+  // 7.3 压缩：system 留在原位，压掉的是更早的轮次
+  const long = [sys];
+  for (let i = 0; i < 60; i++) {
+    long.push({ role: 'user', content: `第 ${i} 句要说的话，稍微长一点好让它真的占额度` });
+    long.push({ role: 'assistant', content: `收到 ${i}，这是一段回答` });
+  }
+  const cfg = { ctxWindow: 2000, ctxReplyReserve: 200, ctxKeepTurns: 2 };
+  const on = ctx.planContext({ messages: long, cfg, priorSummary: '' });
+  same(on.messages[0], sys, '压缩后 system 仍在第 0 位');
+  ok(on.messages.length < long.length, '确实压掉了消息', `${long.length} → ${on.messages.length}`);
+  eq(on.stats.compressed, true, '统计里 compressed 为真');
+  eq(on.stats.budget, ctx.budgetFor(cfg, ctx.totalTokens([sys])), '压缩路径用同一条预算算式');
+
+  // 7.4 ★ 本轮修的就是这一条：shouldSummarize 的结论不许在半路上被丢掉
+  eq(on.shouldSummarize, true, '压得这么狠时必须得出「该写摘要」的结论');
+  eq(on.shouldSummarize, ctx.shouldSummarize(on.stats),
+    '交出去的 shouldSummarize 必须等于 shouldSummarize(stats) —— 普通对话路径此前把这一步漏掉了');
+
+  // 7.5 纯函数：同输入同输出
+  const again = ctx.planContext({ messages: long, cfg, priorSummary: '' });
+  same(again.messages, on.messages, '同一输入两次调用，消息相同');
+  same(again.stats, on.stats, '同一输入两次调用，统计相同');
+});
+
+// ---------------- 7b. 算式只有一个来源（结构锁） ----------------
+section('7b. 算式只有一个来源');
+guard('算式唯一性', () => {
+  const read = (rel) => stripComments(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+  const context = read('../src/main/jarvis/context.js');
+  const agent = read('../src/main/jarvis/agent.js');
+  const main = read('../src/main/main.js');
+
+  // 扫描面自证：先钉住「被扫的东西还在」，否则下面的 !test 全是恒真
+  ok(/function budgetFor/.test(context), 'context.js 里找得到 budgetFor（扫描面没塌）');
+  ok(/function planContext/.test(context), 'context.js 里找得到 planContext（扫描面没塌）');
+  ok(/runAgent/.test(agent), 'agent.js 解析出来了（不是读到空串）');
+  ok(main.includes('ipcMain.handle'), 'main.js 解析出来了（不是读到空串）');
+
+  same(budgetFormulaSites({ context, agent, main }), ['context'],
+    '窗口缺省这条算式只在 context.js 出现 —— 预算不许有第二份实现');
+  ok(!/ctxAutoCompress === false/.test(agent), 'agent.js 不再自己判「要不要压缩」');
+  ok(!/ctxAutoCompress === false/.test(main), 'main.js 不再自己判「要不要压缩」');
+  ok(/ctx\.planContext\(/.test(agent), 'agent.js 走 planContext');
+  ok(/ctxmod\.planContext\(/.test(main), 'main.js 走 planContext');
+  // 下面这两条盯的是**调用**，不是「文件里出现过这个名字」—— 注释里写一遍不算数
+  ok(/plan\.shouldSummarize\s*&&\s*sessionId/.test(main),
+    'main.js 用 plan.shouldSummarize 决定要不要重写纪要');
+  ok(/require\(['"]\.\/jarvis\/agent['"]\)\.summarizeLater\(/.test(main),
+    'main.js 真的把重写纪要这件事交给了 summarizeLater');
+  // chat:context 必须在压缩分支**之外**推：关掉自动压缩时面板的环也得跟着更新
+  const sendAt = main.indexOf("send('chat:context'");
+  const compAt = main.indexOf('if (plan.stats.compressed)');
+  ok(sendAt > 0 && compAt > 0, 'main.js 里「推统计」与「记压缩日志」两处都在（扫描面没塌）');
+  ok(sendAt < compAt, 'chat:context 不受 compressed 分支管 —— 关掉自动压缩时面板也要更新');
+  // 判据自身的自证：真给它两份实现必须报两个文件；给一份无关源码必须什么都不报
+  same(budgetFormulaSites({ a: context, b: context }), ['a', 'b'],
+    '有两份实现时这条会报两个文件（判据不是恒真）');
+  same(budgetFormulaSites({ a: 'const x = 1;' }), [],
+    '没有算式时不报（判据不是恒真）');
+});
+
+/** 剥掉注释再比对 —— 本轮加的说明里就引用过这些字眼，不剥会把自己判红 */
+function stripComments(s) {
+  return s.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+}
+
+/**
+ * 哪些文件的**代码**里出现了「窗口缺省 → 回复预留」这条算式。
+ *
+ * 盯的是 `|| 128000` 这个形态，不是光秃秃的 `128000`：`main.js` 的 DEFAULT_CONFIG
+ * 里合法地写着 `ctxWindow: 128000`（那是配置的初值，不是算式），盯错就把配置项判红了。
+ */
+function budgetFormulaSites(codeByName) {
+  return Object.keys(codeByName)
+    .filter((n) => /\|\|\s*128000/.test(codeByName[n]))
+    .sort();
 }
 
 // ---------------- 汇总 ----------------

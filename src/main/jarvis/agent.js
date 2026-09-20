@@ -281,32 +281,21 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   const historyNoSys = history.filter((m) => m.role !== 'system');
 
   // ---- 动态上下文：按模型窗口算预算，超了就地压缩（同步，必然兜住） ----
-  const budget = Math.max(
-    1024,
-    (Number(cfg.ctxWindow) || 128000)
-      - (Number(cfg.ctxReplyReserve) || 8000)
-      - ctx.msgTokens(systemMsg)
-  );
+  // 预算、压缩参数、chat:context 的统计、以及「要不要顺手重写纪要」的判据全在
+  // ctx.planContext() 一处 —— 普通对话路径（main.js）此前只抄走了压缩那一半。
   let priorSummary = '';
   if (opts.useMemory !== false && opts.sessionId) {
     try { priorSummary = store.getSessionSummary(opts.sessionId) || ''; } catch (e) { /* ignore */ }
   }
 
-  let cres;
-  if (cfg.ctxAutoCompress === false) {
-    cres = { messages: historyNoSys, stats: { beforeTokens: ctx.totalTokens(historyNoSys), budget, compressed: false } };
-  } else {
-    cres = ctx.compress({
-      messages: historyNoSys,
-      budget,
-      keepTurns: Number(cfg.ctxKeepTurns) || 8,
-      toolOutputMax: Number(cfg.ctxToolOutputMax) || 1200,
-      priorSummary
-    });
-  }
-  lastContextStats = { ...cres.stats, budget, at: Date.now() };
+  const plan = ctx.planContext({
+    messages: [systemMsg, ...historyNoSys],
+    cfg,
+    priorSummary
+  });
+  lastContextStats = { ...plan.stats, at: Date.now() };
 
-  const convo = [systemMsg, ...cres.messages];
+  const convo = plan.messages;
 
   // 把上下文用量推给界面（面板上的「上下文」环就靠它）
   if (opts.quiet !== true) {
@@ -316,8 +305,8 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   }
 
   // 机械压缩已经发生 → 顺手让模型把纪要重写成更精炼的摘要（异步，不阻塞本轮）
-  if (ctx.shouldSummarize(cres.stats) && opts.sessionId && opts.useMemory !== false) {
-    summarizeLater({ cfg, sessionId: opts.sessionId, priorSummary, stats: cres.stats });
+  if (plan.shouldSummarize && opts.sessionId && opts.useMemory !== false) {
+    summarizeLater({ cfg, sessionId: opts.sessionId, priorSummary, stats: plan.stats });
   }
 
   let fullText = '';
@@ -439,4 +428,9 @@ function summarizeLater({ cfg, sessionId, priorSummary, stats }) {
   }
 }
 
-module.exports = { runAgent, bindMcp, resolveConfirm, abortCurrent, getContextStats };
+// summarizeLater 导出给 main.js：普通对话路径（`chat:stream`）也要在压缩之后
+// 重写会话纪要 —— 以前它只被 Agent 路径调用，于是普通对话下长期记忆永不更新。
+// 两处共用同一个模块级 `summarizing` / `summaryCooldown`，同一会话的冷却也才是一份。
+module.exports = {
+  runAgent, bindMcp, resolveConfirm, abortCurrent, getContextStats, summarizeLater
+};

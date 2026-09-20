@@ -309,6 +309,83 @@ function compress(o = {}) {
 }
 
 /**
+ * 上下文预算：模型窗口 − 留给回复的额度 − 系统提示词本身。
+ *
+ * **全仓只有这一处**。`jarvis/agent.js`（Agent 路径）与 `main.js`（普通对话路径）
+ * 都要算它，各写一份的后果不是重复几行：改了一处、另一条路径还按老公式算，
+ * 而两条路径的区别只有 `ctxWindow` 的取值 —— 用户看不出来究竟是哪一个在生效。
+ * 下限 1024 是刻意的：留得太小，压缩会连这一轮的问题本身一起裁掉。
+ */
+function budgetFor(cfg, systemTokens) {
+  const c = cfg || {};
+  return Math.max(
+    1024,
+    (Number(c.ctxWindow) || 128000)
+      - (Number(c.ctxReplyReserve) || 8000)
+      - (Number(systemTokens) || 0)
+  );
+}
+
+/**
+ * 一次请求的上下文计划：算预算 → 压缩 → 告诉调用方「要不要顺手重写纪要」。
+ *
+ * 这三步以前在 `jarvis/agent.js` 与 `main.js` 各写了一遍，而两份实现已经漂了：
+ * 普通对话（`agentEnabled=false`，或者模型不支持函数调用被自动降级）那条路径
+ * **只抄到压缩，没抄 `shouldSummarize`** —— 于是压缩发生了、纪要却从不重写，
+ * 「长期记忆」永久停在上一份摘要上；同时 `ctxAutoCompress=false` 时它还一条
+ * `chat:context` 都不推，面板上的「上下文」环保留旧值。两处都不报错。
+ *
+ * 现在预算、压缩参数、推给界面的统计、以及「值不值得让模型重写摘要」的判据
+ * 全部由这里出，两条路径只剩「拿到计划之后各自怎么用」。
+ *
+ * @param {object}   o
+ * @param {Array}    o.messages     完整消息（含 system），顺序会被保留
+ * @param {object}   o.cfg          配置
+ * @param {string}   [o.priorSummary] 上一轮的会话摘要
+ * @returns {{messages: Array, stats: object, shouldSummarize: boolean}}
+ */
+function planContext(o) {
+  const src = o || {};
+  const all = Array.isArray(src.messages) ? src.messages.filter(Boolean) : [];
+  const cfg = src.cfg || {};
+  const systems = all.filter((m) => m.role === 'system');
+  const rest = all.filter((m) => m.role !== 'system');
+  const budget = budgetFor(cfg, totalTokens(systems));
+
+  if (cfg.ctxAutoCompress === false) {
+    const tokens = totalTokens(rest);
+    return {
+      messages: all.slice(),
+      stats: {
+        beforeTokens: tokens,
+        afterTokens: tokens,
+        budget,
+        compressed: false,
+        clippedTools: 0,
+        droppedMessages: 0,
+        digestLines: 0,
+        ratio: 1
+      },
+      shouldSummarize: false
+    };
+  }
+
+  const cres = compress({
+    messages: rest,
+    budget,
+    keepTurns: Number(cfg.ctxKeepTurns) || 8,
+    toolOutputMax: Number(cfg.ctxToolOutputMax) || 1200,
+    priorSummary: src.priorSummary
+  });
+  const stats = { ...cres.stats, budget };
+  return {
+    messages: [...systems, ...cres.messages],
+    stats,
+    shouldSummarize: shouldSummarize(stats)
+  };
+}
+
+/**
  * 是否值得让模型来「重写摘要」。
  * 只在真的比较长、且这一轮已经发生过机械压缩时才做，避免无谓的调用。
  */
@@ -340,6 +417,8 @@ module.exports = {
   countTurns,
   tailByTurns,
   compress,
+  budgetFor,
+  planContext,
   shouldSummarize,
   buildSummaryPrompt
 };
