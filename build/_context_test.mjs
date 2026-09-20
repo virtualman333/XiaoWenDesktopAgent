@@ -307,6 +307,99 @@ function budgetFormulaSites(codeByName) {
     .sort();
 }
 
+// ---------------- 8. 上下文用量的「拉」这一侧（面板打开时的初值） ----------------
+//
+// 这条链原先只做了一半：`chat:context` 有生产端（agent 路径 / 普通对话路径）与 preload
+// 桥，面板订阅它画「上下文」环 —— 但**只有推、没有拉**。于是用户打开面板（或重启应用）
+// 看到的永远是空环，得等下一轮对话跑完才有数；而点那个按钮想看的就是「上一轮用了多少」。
+// 主进程里那个 `getContextStats()`（注释写着「面板 / 诊断用」）当时全仓零读者。
+//
+// 第 30 轮补上拉取出口，并把两条生产路径收敛到**一个写入点**（原来普通对话那条是自己
+// new 一个对象直接 send，不写回缓存 —— 推出去的和拉回来的可以不一样，而面板靠推送
+// 根本看不出差别）。
+section('8. 上下文用量的拉取出口');
+guard('统计缓存与归一化', () => {
+  const agent = require('../src/main/jarvis/agent.js');
+  ok(typeof agent.noteContextStats === 'function', 'agent.js 导出了 noteContextStats（单一写入点）');
+  ok(typeof agent.getContextStats === 'function', 'agent.js 导出了 getContextStats（拉取出口）');
+
+  // 初始态：还没跑过任何一轮 → `at` 为 0。面板靠这个约定判断「有没有数可显示」，
+  // 不钉住的话面板挂载时会把一个 0% 的环画出来（比空着更误导）。
+  eq(agent.getContextStats().at, 0, '刚启动时 at 为 0（面板据此判断「还没有数」）');
+
+  const noted = agent.noteContextStats({
+    beforeTokens: 1000, afterTokens: 400, budget: 8000, compressed: true, droppedMessages: 3
+  });
+  ok(noted.at > 0, 'noteContextStats 的返回值带上了时间戳', JSON.stringify(noted));
+  eq(noted.afterTokens, 400, '统计字段原样带过来');
+  eq(noted.compressed, true, '压缩标记原样带过来');
+  eq(agent.getContextStats().afterTokens, 400, '拉回来的就是刚才记下那一份');
+  eq(agent.getContextStats().budget, 8000, '预算字段也一致');
+
+  // 返回值是**副本**：调用方改它不该把缓存改掉（缓存被外侧改掉是最难查的一类）
+  noted.afterTokens = 99999;
+  eq(agent.getContextStats().afterTokens, 400, '返回值是副本，改它不影响缓存');
+
+  // 再记一轮是**替换**而不是合并：上一轮的字段不许残留
+  const again = agent.noteContextStats({ beforeTokens: 10, afterTokens: 8, budget: 100, compressed: false });
+  eq(again.afterTokens, 8, '第二轮覆盖了第一轮');
+  eq(again.droppedMessages, undefined, '上一轮的字段没有残留（是替换不是合并）');
+});
+
+// ---------------- 8b. 统计链的写入点与出口（结构锁） ----------------
+// 「自己现造一个统计对象直接推出去」的形状。**判据与自证必须共用这一份** ——
+// 各写一份内联字面量的话，改掉判据那一处自证照样绿，这条锁就没人管得住了
+// （负向验证实测：只改内联那一处，9 条断言一个都不红）。
+const HANDMADE_STATS_RE = /\{\s*\.\.\.plan\.stats,\s*at:/;
+section('8b. 统计链的写入点与出口');
+guard('统计链结构', () => {
+  const read = (rel) => stripComments(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+  const agentSrc = read('../src/main/jarvis/agent.js');
+  const mainSrc = read('../src/main/main.js');
+  const preloadSrc = read('../src/main/preload.js');
+  const panelSrc = read('../src/renderer/js/panel.js');
+
+  // 扫描面自证：先钉住「被扫的东西还在」，否则下面的 !test 全是恒真
+  ok(/function noteContextStats/.test(agentSrc), 'agent.js 里找得到 noteContextStats（扫描面没塌）');
+  ok(mainSrc.includes('ipcMain.handle'), 'main.js 解析出来了（不是读到空串）');
+  ok(preloadSrc.includes('ipcRenderer'), 'preload.js 解析出来了（不是读到空串）');
+  ok(panelSrc.includes('renderContext'), 'panel.js 解析出来了（不是读到空串）');
+
+  // ① 缓存只有一个写入点：形如「行首 lastContextStats = …」的赋值语句只能有一处
+  const writerLines = (src) => src.split('\n').map((l) => l.trim())
+    .filter((l) => /^lastContextStats\s*=/.test(l));
+  eq(writerLines(agentSrc).length, 1,
+    `统计缓存有 ${writerLines(agentSrc).length} 处写入（要 1 处）—— 「同一份事实两个出口」就是这么来的`);
+
+  // ② 两条生产路径都必须走那个写入点
+  ok(/noteContextStats\(plan\.stats\)/.test(agentSrc), 'agent.js 的 Agent 路径走 noteContextStats');
+  ok(/noteContextStats\(plan\.stats\)/.test(mainSrc), 'main.js 的普通对话路径走 noteContextStats');
+  ok(!HANDMADE_STATS_RE.test(mainSrc),
+    'main.js 不再现造一个统计对象直接推 —— 那样「推出去的」和「拉回来的」可以不一样');
+
+  // ③ 三个出口：主进程 IPC → preload 桥 → 面板挂载时真的拉一次
+  ok(/ipcMain\.handle\(\s*['"]context:stats['"]/.test(mainSrc), 'main.js 注册了 context:stats');
+  ok(/contextStats:\s*\(\)\s*=>\s*ipcRenderer\.invoke\(\s*['"]context:stats['"]/.test(preloadSrc),
+    'preload 暴露了 contextStats()（少了这一层，面板就够不着）');
+  // 面板这一段只扫 bindCtx 的**函数体**，不扫整个文件：整个文件里 `st.at` 到处都是
+  // （renderContext 里也有），拿它当判据的话「把拉取那半段删掉」根本看不见 ——
+  // 负向验证实测过，第一版就是这么漏判的。
+  const at = panelSrc.indexOf('function bindCtx');
+  const bindBody = at < 0 ? '' : panelSrc.slice(at, panelSrc.indexOf('\n}', at));
+  ok(bindBody.length > 0, 'panel.js 里找得到 bindCtx 的函数体（扫描面没塌）');
+  ok(/contextStats/.test(bindBody), 'bindCtx 里调了 contextStats（挂载时拉一次初始值）');
+  ok(/renderContext\s*\(/.test(bindBody), 'bindCtx 把拉回来的值真的交给了 renderContext（只拉不画等于没接）');
+  ok(/st\.at/.test(bindBody), 'bindCtx 里判了 at —— 没跑过任何一轮时不画 0% 的环');
+
+  // 判据自证：合成的「自己现造对象」必须被判出来，收敛写法必须放行
+  eq(HANDMADE_STATS_RE.test("send('chat:context', { ...plan.stats, at: Date.now() })"), true,
+    '判据抓不到「现造对象」的写法 —— 这条锁是空话');
+  eq(HANDMADE_STATS_RE.test('const s = noteContextStats(plan.stats);'), false,
+    '收敛写法被误判 —— 判据过宽');
+  eq(writerLines('let lastContextStats = {};\nlastContextStats = x;\nlastContextStats = y;').length, 2,
+    '写入点计数判据自证：两处写入必须数出 2（否则 count===1 是恒真的）');
+});
+
 // ---------------- 汇总 ----------------
 console.log('\n' + '='.repeat(46));
 if (fails.length) {

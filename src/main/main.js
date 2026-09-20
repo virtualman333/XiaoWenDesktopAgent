@@ -1349,6 +1349,13 @@ ipcMain.handle('chat:abort', () => {
   return false;
 });
 
+// 上一次请求的上下文用量。面板挂载时拉一次 —— 只靠 `chat:context` 推送的话，用户
+// 打开面板（或重启应用后）看到的永远是空环，得等下一轮对话跑完才有数；而「上一轮到底
+// 用了多少」正是他打开面板想看的那个数。`at` 为 0 表示还没有任何一轮跑过。
+ipcMain.handle('context:stats', () => {
+  try { return require('./jarvis/agent').getContextStats(); } catch (e) { return null; }
+});
+
 ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
   const cfg = loadConfig();
   const baseUrl = normalizeBaseUrl(cfg.apiBaseUrl);
@@ -1409,8 +1416,13 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
     const priorSummary = sessionId ? (jstore.getSessionSummary(sessionId) || '') : '';
     const plan = ctxmod.planContext({ messages: safeMessages, cfg, priorSummary });
     finalMessages = plan.messages;
+    // 统计的缓存与推送都走 agent 的**同一个写入点**：普通对话（chat:stream）与 Agent
+    // 路径必须让 getContextStats() 看到同一份值。以前这里是 `{ ...plan.stats, at: ... }`
+    // 现造一个对象直接 send，不写回缓存 —— 面板靠推送看不出差别，但面板打开时拉的
+    // 那个初值会拿到「上一轮 Agent 路径的值」或者全 0。
+    const ctxStats = require('./jarvis/agent').noteContextStats(plan.stats);
     try {
-      sender && !sender.isDestroyed() && sender.send('chat:context', { ...plan.stats, at: Date.now() });
+      sender && !sender.isDestroyed() && sender.send('chat:context', ctxStats);
     } catch (e) { /* ignore */ }
     if (plan.stats.compressed) {
       logLine('ctx', `上下文压缩：${plan.stats.beforeTokens} → ${plan.stats.afterTokens} token`

@@ -293,14 +293,15 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
     cfg,
     priorSummary
   });
-  lastContextStats = { ...plan.stats, at: Date.now() };
+  // 缓存与推送都走同一个值：推给界面的和 `getContextStats()` 拉回来的必须是同一份
+  const contextStats = noteContextStats(plan.stats);
 
   const convo = plan.messages;
 
   // 把上下文用量推给界面（面板上的「上下文」环就靠它）
   if (opts.quiet !== true) {
     try {
-      sender && !sender.isDestroyed() && sender.send('chat:context', lastContextStats);
+      sender && !sender.isDestroyed() && sender.send('chat:context', contextStats);
     } catch (e) { /* ignore */ }
   }
 
@@ -384,7 +385,23 @@ let lastContextStats = { beforeTokens: 0, afterTokens: 0, budget: 0, compressed:
 const summarizing = new Set();      // 正在重写摘要的 sessionId
 const summaryCooldown = new Map();  // sessionId -> 上次摘要时间
 
-/** 上一次请求的上下文用量（面板 / 诊断用） */
+/**
+ * 记下这一轮的上下文用量 —— **模块级缓存只有这一个写入点**。
+ *
+ * `chat:context` 有两条生产路径：Agent 路径（本文件的 `runAgent`）与普通对话路径
+ * （`main.js` 的 `chat:stream`）。以前两条各写各的 —— 前者写回缓存，后者**自己 new
+ * 一个对象直接 send**，于是 `getContextStats()`（面板打开时取的初值）在普通对话下
+ * 永远是「上一次 Agent 路径留下的值」，或者初始的全 0。同一份事实两个出口，
+ * 两边可以不一样，而面板靠推送根本看不出差别。
+ *
+ * 返回存下来的那一份（带 `at`），让调用方把**同一个值**推给界面。
+ */
+function noteContextStats(stats) {
+  lastContextStats = { ...stats, at: Date.now() };
+  return { ...lastContextStats };
+}
+
+/** 上一次请求的上下文用量（面板 / 诊断用）。面板挂载时拉一次，不必等下一轮对话 */
 function getContextStats() { return { ...lastContextStats }; }
 
 /**
@@ -431,6 +448,8 @@ function summarizeLater({ cfg, sessionId, priorSummary, stats }) {
 // summarizeLater 导出给 main.js：普通对话路径（`chat:stream`）也要在压缩之后
 // 重写会话纪要 —— 以前它只被 Agent 路径调用，于是普通对话下长期记忆永不更新。
 // 两处共用同一个模块级 `summarizing` / `summaryCooldown`，同一会话的冷却也才是一份。
+// `noteContextStats` 同理导出：普通对话路径也要写回**同一个**统计缓存。
 module.exports = {
-  runAgent, bindMcp, resolveConfirm, abortCurrent, getContextStats, summarizeLater
+  runAgent, bindMcp, resolveConfirm, abortCurrent,
+  getContextStats, noteContextStats, summarizeLater
 };

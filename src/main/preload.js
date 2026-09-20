@@ -328,6 +328,9 @@ contextBridge.exposeInMainWorld('xw', {
     return () => ipcRenderer.removeListener('chat:context', h);
   },
 
+  // 上一次请求的上下文用量（面板挂载时先拉一次；`at` 为 0 表示还没有任何一轮跑过）
+  contextStats: () => ipcRenderer.invoke('context:stats'),
+
   // ================= 主动关注 =================
   watchStatus: () => ipcRenderer.invoke('watch:status'),
   watchCheck: (source) => ipcRenderer.invoke('watch:check', source),

@@ -1042,11 +1042,31 @@ function renderContext(st) {
   } else {
     parts.push('无需压缩');
   }
-  if (btn) btn.title = parts.join(' · ');
+  // 面板上的数字永远是「上一轮请求」的：不写清时间，用户会把它当成实时值
+  if (btn) btn.title = parts.join(' · ') + ` · 上次请求 ${ctxAge(st.at)}`;
+}
+
+/** 上一次请求距今多久 */
+function ctxAge(at) {
+  const t = Number(at || 0);
+  if (!t) return '时间未知';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s} 秒前`;
+  if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+  return `${Math.round(s / 3600)} 小时前`;
 }
 
 function bindCtx() {
   try { window.xw.onContext && window.xw.onContext((st) => renderContext(st)); } catch (e) { /* ignore */ }
+  // 面板刚打开时先**拉**一次上一轮的用量。只订阅推送的话，打开面板看到的永远是空环
+  // —— 得等下一轮对话跑完才有数，而「上一轮用了多少」正是他点这个按钮想看的。
+  // `at` 为 0 表示还没跑过任何一轮，这时保持空环（画一个 0% 的环比空着更误导）。
+  try {
+    window.xw.contextStats
+      && Promise.resolve(window.xw.contextStats())
+        .then((st) => { if (st && st.at) renderContext(st); })
+        .catch(() => {});
+  } catch (e) { /* ignore */ }
   const btn = $('btnCtx');
   btn && (btn.onclick = () => setStatus(btn.title || '上下文用量'));
 }
