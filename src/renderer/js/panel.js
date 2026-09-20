@@ -472,7 +472,10 @@ async function send(textOverride) {
       });
     } else {
       full = await streamChat({
-        messages: [{ role: 'system', content: cfg.systemPrompt || '' }, ...payload],
+        // 不在这里拼 system —— 人设的唯一来源是主进程的 personaSection()
+        // （= 设置页「人格与记忆」）。这里手拼过一条 cfg.systemPrompt，
+        // 而那个键在设置页里没有入口，等于把用户填的人设整个丢掉。
+        messages: payload,
         onDelta: (_d, acc) => { full = acc; renderStreaming(currentAiNode, acc); scrollToBottom(); }
       });
     }
@@ -489,7 +492,8 @@ async function send(textOverride) {
       updateSendBtn(true);
       try {
         full = await streamChat({
-          messages: [{ role: 'system', content: cfg.systemPrompt || '' }, ...payload],
+          // 同上：system 由主进程拼，这里只送对话内容
+          messages: payload,
           onDelta: (_d, acc) => { full = acc; renderStreaming(currentAiNode, acc); scrollToBottom(); }
         });
       } catch (e2) { err = e2; full = ''; }

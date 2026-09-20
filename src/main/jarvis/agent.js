@@ -13,6 +13,7 @@ const tools = require('./tools');
 const skills = require('./skills');
 const store = require('./store');
 const ctx = require('./context');
+const promptLib = require('./prompt');
 
 let mcpManager = null;
 function bindMcp(m) { mcpManager = m; }
@@ -237,8 +238,10 @@ async function runAgent({ messages, cfg, sender, signal, opts = {} }) {
   if (!apiKey) return { ok: false, error: '请先在设置中配置 API Key' };
 
   // system prompt：人格 + 记忆 + 技能
+  // 人格段走 prompt.personaSection()（唯一拼装点）—— 它同时带上用户在
+  // config.json 里写的 systemPrompt 追加项，与普通对话路径看到的是同一份人设。
   const parts = [];
-  const persona = store.personaPrompt();
+  const persona = promptLib.personaSection(store, cfg);
   if (persona) parts.push(persona);
   const query = (messages || []).filter((m) => m.role === 'user').slice(-2).map((m) => m.content).join(' ');
   if (opts.useMemory !== false) {

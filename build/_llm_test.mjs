@@ -15,6 +15,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { stripComments, residueErrors } from './_strip_comments.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(here, '..');
@@ -153,6 +154,94 @@ check('去尾部斜杠', llm.normalizeBaseUrl('https://a.com/v1/'), 'https://a.c
 check('去 /v1', llm.normalizeBaseUrl('https://a.com/v1'), 'https://a.com');
 check('保留路径', llm.normalizeBaseUrl(' https://a.com/api '), 'https://a.com/api');
 check('空值安全', llm.normalizeBaseUrl(undefined), '');
+
+// ---------------- 3. ★ 人设的唯一来源 ----------------
+// 这一段钉的是一条用户能一路走到黑的路径：
+//   设置页「人格与记忆」写的是 persona.json（jarvis/store.personaPrompt()），
+//   而普通对话路径此前读的是 cfg.systemPrompt —— 一个**设置页里没有入口**的键，
+//   只在 config.json 里，用户改不到。默认人设因此在两处各写一遍。
+//   一旦走普通对话（agentEnabled=false，或模型不支持函数调用被自动降级），
+//   用户在人格页填的一切就全部作废，而且没有任何提示。
+console.log('\n人设的唯一来源：');
+
+const promptLib = require(path.join(ROOT, 'src', 'main', 'jarvis', 'prompt.js'));
+
+// 假 store：形状照 persona.json（设置页「人格与记忆」写的就是它）
+const fakeStore = {
+  personaPrompt: () => [
+    '你是「小雅」，主人的私人助理。',
+    '你的性格：爱开玩笑',
+    '你的主人是「永贵」，你的一切能力都是为主人服务的。',
+    '说话风格要求：\n用粤语回答'
+  ].join('\n')
+};
+
+const sec = promptLib.personaSection(fakeStore, { systemPrompt: '' });
+check('人设段带着用户填的名字', /小雅/.test(sec), true);
+check('人设段带着用户填的称呼', /永贵/.test(sec), true);
+check('人设段带着说话风格', /粤语/.test(sec), true);
+
+const secExtra = promptLib.personaSection(fakeStore, { systemPrompt: '回答里不要出现 Markdown 符号' });
+check('cfg.systemPrompt 作为追加项拼在人设之后',
+  secExtra.startsWith(sec) && secExtra.includes('不要出现 Markdown 符号'), true);
+
+// ★ 旧默认值：saveConfig 落盘的是**全量**配置，所以每一个已存在的 config.json 里
+//   都躺着那句旧人设。升级后若照原样当追加项拼上去，人设里会平白多出一句
+//   「名字叫「小问」」，跟 persona 给出的名字打架。
+check('旧默认值常量在（迁移的前提）',
+  typeof promptLib.LEGACY_SYSTEM_PROMPT === 'string' && promptLib.LEGACY_SYSTEM_PROMPT.includes('小问'), true);
+const secLegacy = promptLib.personaSection(fakeStore, { systemPrompt: promptLib.LEGACY_SYSTEM_PROMPT });
+check('★ 旧默认值不再拼进去', secLegacy === sec, true);
+check('★ 丢掉旧默认值之后人设本体依然完整（解析面不许塌）', /小雅/.test(secLegacy), true);
+
+// 坏 store 不许把整轮对话带走。
+// ★ 这里必须自己接住异常：让它在断言里炸成 ERROR 的话，一条「崩溃」会被读成
+//   「没红」—— 负向注入实测过，去掉 prompt.js 的 try/catch 后退出码是 1，但
+//   一条 FAIL 都不出现。工具必须把异常折算成一条 FAIL，否则它是在假绿。
+let throwCase = '';
+try {
+  throwCase = promptLib.personaSection(
+    { personaPrompt: () => { throw new Error('persona.json 坏了'); } },
+    { systemPrompt: '兜底指令' }
+  );
+} catch (e) {
+  throwCase = `抛异常逃逸了：${e && e.message}`;
+}
+check('personaPrompt 抛异常时仍能拼出追加项', throwCase, '兜底指令');
+check('store 为空 → 空串（调用方据此不放 system）', promptLib.personaSection(null, { systemPrompt: '' }), '');
+
+const split = promptLib.splitSystemMessages([
+  { role: 'system', content: '渲染层手拼的第二份人设' },
+  { role: 'user', content: 'hi' }
+]);
+check('splitSystemMessages 摘出 system（要能数出来）', split.systems.length, 1);
+check('splitSystemMessages 保留其余角色的顺序', split.rest.map((m) => m.role), ['user']);
+check('非数组输入不炸',
+  [promptLib.splitSystemMessages(undefined).systems.length, promptLib.splitSystemMessages(undefined).rest.length], [0, 0]);
+
+// ---- 结构锁：两条路径必须真的接上这个唯一来源 ----
+// 读源码判定，所以先剥注释 —— 本仓注释里正大光明地写着旧判据
+// （prompt.js 的头注释里就写着 cfg.systemPrompt / role: 'system' 这些字样）。
+const strip = (p) => stripComments(fs.readFileSync(path.join(ROOT, p), 'utf8'));
+
+const agentCode = strip('src/main/jarvis/agent.js');
+check('★ agent 路径走 personaSection()', /promptLib\.personaSection\(store,\s*cfg\)/.test(agentCode), true);
+
+const mainCode = strip('src/main/main.js');
+check('★ 普通对话路径走 personaSection()（与 agent 同一份人设）',
+  /promptLib\.personaSection\(jstore,\s*cfg\)/.test(mainCode), true);
+check('★ 普通对话路径丢弃渲染层传来的 system',
+  /promptLib\.splitSystemMessages\(messages\)/.test(mainCode), true);
+check("★ DEFAULT_CONFIG.systemPrompt 不再是第二份人设（必须是空串）",
+  /systemPrompt:\s*''/.test(mainCode), true);
+
+const panelCode = strip('src/renderer/js/panel.js');
+check('★ 渲染层不再读 cfg.systemPrompt', /cfg\.systemPrompt/.test(panelCode), false);
+check("★ 渲染层不再自己拼 system 消息", /role:\s*['"]system['"]/.test(panelCode), false);
+
+// 剥注释器自己也要出声 —— 否则上面四条会对着注释报绿
+check('剥注释器在 panel.js 上没残留（判定面自证）',
+  residueErrors(fs.readFileSync(path.join(ROOT, 'src/renderer/js/panel.js'), 'utf8'), panelCode), []);
 
 server.close();
 console.log('');

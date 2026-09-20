@@ -8,6 +8,7 @@ const os = require('os');
 const jarvis = require('./jarvis');
 const autostart = require('./jarvis/autostart');
 const jstore = require('./jarvis/store');
+const promptLib = require('./jarvis/prompt');
 // 桌面宠物（QQ 企鹅式互动宠物）
 const pet = require('./pet');
 // 截图（全屏 / 框选）与自动更新
@@ -306,7 +307,10 @@ const DEFAULT_CONFIG = {
   apiBaseUrl: 'https://api.deepseek.com',
   apiKey: '',
   model: 'deepseek-chat',
-  systemPrompt: '你是一个常驻桌面的 AI 助手，名字叫「小问」。回答要简洁、直接、口语化，适合语音朗读。除非用户明确要求详细，否则控制在 200 字以内。',
+  // 人设**不在这里**：它住在 jarvis/store.js 的 persona.json（设置页「人格与记忆」写的那份），
+  // 由 jarvis/prompt.js 的 personaSection() 唯一拼装。这个键只是「补充指令」，
+  // 会追加在人设之后。默认留空 —— 这里若再写一句人设，就又是「同一件事写两遍」。
+  systemPrompt: '',
   ttsEnabled: true,
   ttsRate: 0,       // -10 ~ 10
   ttsVolume: 100,
@@ -1375,10 +1379,23 @@ ipcMain.handle('chat:stream', async (event, { messages } = {}) => {
   // 老版本的历史记录里存的是 'ai'，不转换会直接被服务端拒：
   //   HTTP 400 · ai is not one of ['system','assistant','user','tool','function']
   const ROLE_MAP = { ai: 'assistant' };
-  const safeMessages = (Array.isArray(messages) ? messages : [])
+  // ★ 人设只有一份：jarvis/prompt.js 的 personaSection()（即设置页「人格与记忆」）。
+  // 渲染层此前会自己拼一条 `{ role:'system', content: cfg.systemPrompt }` 传进来 ——
+  // 而 cfg.systemPrompt 在设置页里**根本没有入口**，只存在于 config.json 里。
+  // 那条必须丢掉，否则「用户在人格页填的一切」在普通对话路径上全部作废：
+  // agentEnabled=false、或者模型不支持函数调用被自动降级（panel.js 的 err.disabled）时会走到这里。
+  const { systems: droppedSystems, rest: incoming } = promptLib.splitSystemMessages(messages);
+  if (droppedSystems.length) {
+    logLine('persona', `chat:stream 丢弃了渲染层传来的 ${droppedSystems.length} 条 system 消息（人设唯一来源：personaPrompt）`);
+  }
+  const personaText = promptLib.personaSection(jstore, cfg);
+  const safeRest = incoming
     .map((m) => ({ ...m, role: ROLE_MAP[m.role] || m.role }))
-    .filter((m) => m.role === 'system' || m.role === 'user' || m.role === 'assistant'
+    .filter((m) => m.role === 'user' || m.role === 'assistant'
       || m.role === 'tool' || m.role === 'function');
+  const safeMessages = personaText
+    ? [{ role: 'system', content: personaText }, ...safeRest]
+    : safeRest;
 
   // ---- 动态上下文：普通问答也走同一套压缩，不然长会话一样会把窗口撑爆 ----
   let finalMessages = safeMessages;
